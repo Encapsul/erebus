@@ -675,17 +675,13 @@ All must pass. If any fails, your change introduced a regression.
 - **Test file**: `cli/tests/test_health.py` — 12 tests (state, server endpoints, disabled)
 - **Status**: implemented, committed `0da1980`
 
-## OpenTelemetry — 2026-07-20
+## OpenTelemetry — DEPRECATED 2026-08-21
 
-- **File**: `cli/erebus/otel.py` — NEW module
-  - `build_otel_env()` — builds OTEL_SERVICE_NAME, OTEL_RESOURCE_ATTRIBUTES, OTEL_EXPORTER_OTLP_ENDPOINT, etc.
-  - `get_otel_config()` — reads current OTel config from environment
-  - `format_resource_attributes()` — parses "key=value,key2=value2" string
-- **File**: `cli/erebus/cli.py` — `--otel-endpoint URL` and `--otel-protocol` flags
-- **File**: `cli/erebus/build.py` — injects OTel env vars into plan.env
-- **Flow**: `--otel-endpoint http://localhost:4317` → OTEL_* env vars set → app auto-instruments
-- **Test file**: `cli/tests/test_otel.py` — 15 tests (env building, config reading, resource attrs)
-- **Status**: implemented, committed `71b2c28`
+~~**File**: `cli/erebus/otel.py`~~ — Python CLI module, removed. Rust equivalent (`erebus-core/src/otel.rs`)
+was **removed** in favor of agent-IA focus (no metrics/export).
+
+~~**Flow**: `--otel-endpoint http://localhost:4317` → OTEL_* env vars set → app auto-instruments~~
+~~**Status**: deprecated — use app-level OTel agents instead of erebus embedding~~
 
 ## Cron/scheduled tasks — 2026-07-20
 

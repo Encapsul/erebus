@@ -103,3 +103,85 @@ fn seccomp_without_flag_works() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("hello"));
 }
+
+/// Phase 5b: Exec capability enforcement — a `RuntimeLayer` WITHOUT `exec`
+/// capability must refuse the launch ("Exec capability absent").
+fn build_layered_erebus(work: &Path, stub: &Path, capabilities: &[&str]) -> PathBuf {
+    let out = work.join("layered.erebus");
+    let caps_json: Vec<serde_json::Value> =
+        capabilities.iter().map(|c| serde_json::json!(c)).collect();
+    let meta = serde_json::json!({
+        "name": "cap-test",
+        "runtime": "python",
+        "entrypoint": ["python3", "/app/app.py"],
+        "payload_format": "zstd-tar",
+        "layers": [
+            {
+                "kind": "runtime",
+                "name": "python",
+                "interpreter": "python3",
+                "entrypoint": ["python3", "/app/app.py"],
+                "version": "3.11",
+                "env": [],
+                "capabilities": caps_json,
+            }
+        ],
+        "entrypoint_layer": "python",
+    });
+    let meta_bytes = serde_json::to_vec(&meta).unwrap();
+    assemble_erebus(
+        &out,
+        &AssemblyInput {
+            stub_bytes: &fs::read(stub).unwrap(),
+            payload: &payload(),
+            meta_bytes: &meta_bytes,
+            encrypt: false,
+            squashfs: false,
+            target_arch: None,
+            sisr: None,
+        },
+    )
+    .unwrap();
+    out
+}
+
+/// Phase 5b: When a `RuntimeLayer` has NO `exec` capability and seccomp is
+/// NOT active, the stub refuses the launch outright (no fork needed).
+#[test]
+fn exec_capability_absent_refuses_launch() {
+    let tmp = tempdir().unwrap();
+    let work = tmp.path();
+    let stub = PathBuf::from(env!("CARGO_BIN_EXE_erebus-stub"));
+    let erebus_path = build_layered_erebus(work, &stub, &["network"]);
+
+    let output = Command::new(&erebus_path).output().expect("run erebus");
+    assert!(
+        !output.status.success(),
+        "launch without Exec capability should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Exec capability absent"),
+        "expected 'Exec capability absent' in stderr, got: {}",
+        stderr
+    );
+}
+
+/// Phase 5b: When a `RuntimeLayer` HAS `exec` capability, the launch proceeds
+/// (may fail later if python3 is missing, but the capability check passes).
+#[test]
+fn exec_capability_present_allows_check() {
+    let tmp = tempdir().unwrap();
+    let work = tmp.path();
+    let stub = PathBuf::from(env!("CARGO_BIN_EXE_erebus-stub"));
+    let erebus_path = build_layered_erebus(work, &stub, &["exec"]);
+
+    let output = Command::new(&erebus_path).output().expect("run erebus");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Should NOT say "Exec capability absent" — it got past the check.
+    assert!(
+        !stderr.contains("Exec capability absent"),
+        "Exec capability present should pass capability check, got: {}",
+        stderr
+    );
+}

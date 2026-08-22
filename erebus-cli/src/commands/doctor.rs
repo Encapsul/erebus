@@ -43,8 +43,7 @@ pub fn run(args: DoctorArgs) -> Result<()> {
         check_command("zstd", &["--version"], false),
         check_erebus_stub(false),
         // Optional checks
-        check_command("node", &["--version"], true),
-        check_command("deno", &["--version"], true),
+        check_command("uv", &["--version"], true),
         check_command("mksquashfs", &["-version"], true),
         check_python_cryptography(),
     ];

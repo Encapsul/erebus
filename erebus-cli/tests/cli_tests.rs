@@ -109,7 +109,7 @@ fn test_build_help_lists_sisr_flags() {
 fn test_build_dry_run_shows_sisr_when_enabled() {
     let dir = tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("app")).unwrap();
-    std::fs::write(dir.path().join("app/package.json"), "{\"name\":\"app\"}").unwrap();
+    std::fs::write(dir.path().join("app/requirements.txt"), "flask\n").unwrap();
     erebus()
         .args([
             "build",
@@ -132,7 +132,7 @@ fn test_build_dry_run_shows_sisr_when_enabled() {
 fn test_build_dry_run_does_not_enable_sisr_by_default() {
     let dir = tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("app")).unwrap();
-    std::fs::write(dir.path().join("app/package.json"), "{\"name\":\"app\"}").unwrap();
+    std::fs::write(dir.path().join("app/requirements.txt"), "flask\n").unwrap();
     erebus()
         .args([
             "build",

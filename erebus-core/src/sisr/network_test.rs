@@ -23,6 +23,9 @@ use crate::manifest::DeltaManifest;
 use crate::sisr::engine::{ChunkFetcher, SisrEngine};
 use crate::sisr_stage::{build_artifacts, SisrBuildConfig};
 
+/// Legacy unsigned signature placeholder.
+const UNSIGNED: [u8; 64] = [0u8; 64];
+
 /// Tunable network faults applied per `fetch` call.
 #[derive(Default)]
 struct Faults {
@@ -215,7 +218,9 @@ fn latency_does_not_change_the_result() {
         },
     );
 
-    let updated = SisrEngine.apply_update(&cur, &manifest, &fetcher).unwrap();
+    let updated = SisrEngine
+        .apply_update(&cur, &manifest, &fetcher, &UNSIGNED)
+        .unwrap();
     assert_eq!(
         payload_of(&updated).len(),
         96 << 10,
@@ -237,7 +242,7 @@ fn connection_drop_leaves_binary_untouched() {
     );
 
     let err = SisrEngine
-        .apply_update(&cur, &manifest, &fetcher)
+        .apply_update(&cur, &manifest, &fetcher, &UNSIGNED)
         .unwrap_err();
     assert_eq!(
         err.kind(),
@@ -265,7 +270,7 @@ fn corrupted_packets_fail_sha256_verification() {
     );
 
     let err = SisrEngine
-        .apply_update(&cur, &manifest, &fetcher)
+        .apply_update(&cur, &manifest, &fetcher, &UNSIGNED)
         .unwrap_err();
     assert!(
         err.to_string().contains("SHA-256 verification"),
@@ -292,7 +297,7 @@ fn truncated_packets_are_rejected() {
     );
 
     let err = SisrEngine
-        .apply_update(&cur, &manifest, &fetcher)
+        .apply_update(&cur, &manifest, &fetcher, &UNSIGNED)
         .unwrap_err();
     assert!(
         err.to_string().contains("length mismatch"),
@@ -317,7 +322,9 @@ fn slow_throughput_still_reconstructs() {
         },
     );
 
-    let updated = SisrEngine.apply_update(&cur, &manifest, &fetcher).unwrap();
+    let updated = SisrEngine
+        .apply_update(&cur, &manifest, &fetcher, &UNSIGNED)
+        .unwrap();
     assert_eq!(
         payload_of(&updated).len(),
         4 << 10,
@@ -331,7 +338,7 @@ fn fetched_bytes_are_accounted() {
     let (cur, manifest, inner) = update_setup(tmp.path(), 96 << 10, 32 << 10);
 
     let (updated, stats) = SisrEngine
-        .apply_update_with_stats(&cur, &manifest, &inner)
+        .apply_update_with_stats(&cur, &manifest, &inner, &UNSIGNED)
         .unwrap();
     assert_eq!(
         stats.fetched_chunks,

@@ -1,3 +1,7 @@
+//! erebus CLI - package any app into a single self-extracting binary
+
+#![allow(dead_code)]
+
 mod commands;
 mod error;
 mod remote_cache;
@@ -15,7 +19,7 @@ use std::process::ExitCode;
     name = "erebus",
     version,
     about = "Package any app into a single self-extracting binary",
-    long_about = "x.bin compiles any web, server, or CLI application into a\nsingle self-extracting ELF executable.\n\nSupported runtimes: Python, Node.js, Deno, Java, Ruby, .NET/C#,\nGo, PHP, Perl, Binary, Hugo.\n\nExamples:\n  erebus build ./myapp -o myapp.erebus\n  erebus run myapp.erebus\n  erebus inspect myapp.erebus\n  erebus keygen\n  erebus sign myapp.erebus --key ~/.erebus/keys/*.key\n  erebus verify myapp.erebus\n  erebus doctor\n  erebus scan .\n  erebus dashboard\n  erebus completion bash >> ~/.bashrc\n  erebus completion zsh >> ~/.zshrc\n  erebus completion fish > ~/.config/fish/completions/erebus.fish"
+    long_about = "x.bin compiles any web, server, or CLI application into a\nsingle self-extracting ELF executable.\n\nSupported runtimes: Python, Binary (static executables).\n\nExamples:\n  erebus build ./myapp -o myapp.erebus\n  erebus run myapp.erebus\n  erebus inspect myapp.erebus\n  erebus keygen\n  erebus sign myapp.erebus --key ~/.erebus/keys/*.key\n  erebus verify myapp.erebus\n  erebus doctor\n  erebus scan .\n  erebus dashboard\n  erebus completion bash >> ~/.bashrc\n  erebus completion zsh >> ~/.zshrc\n  erebus completion fish > ~/.config/fish/completions/erebus.fish"
 )]
 struct Cli {
     /// Enable verbose output
@@ -90,6 +94,19 @@ enum Commands {
 
     /// Publish a .erebus file to a registry
     Publish(commands::publish::PublishArgs),
+
+    /// Replace a file inside an existing .erebus binary without rebuilding
+    ///
+    /// Examples:
+    ///   erebus swap agent.erebus app/models/agent.gguf --from ./new.gguf
+    Swap(commands::swap::SwapArgs),
+
+    /// Manage the local shared-layer registry (runtime packs, models, tools)
+    ///
+    /// Examples:
+    ///   erebus layer push llama.cpp --name llama-cpp --kind tool
+    ///   erebus layer list
+    Layer(commands::layer::LayerArgs),
 
     /// Show erebus environment info
     Env(commands::env::EnvArgs),
@@ -182,6 +199,8 @@ fn main() -> ExitCode {
             commands::upgrade_binary::run(args)
         }
         Commands::Publish(args) => commands::publish::run(args),
+        Commands::Swap(args) => commands::swap::run(args),
+        Commands::Layer(args) => commands::layer::run(args),
         Commands::Env(args) => commands::env::run(args),
         Commands::Completion { shell } => {
             let mut cmd = Cli::command();

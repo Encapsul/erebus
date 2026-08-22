@@ -125,7 +125,7 @@ fn detect_mode(meta: &serde_json::Value) -> String {
     }
 
     let runtime = meta.get("runtime").and_then(|v| v.as_str()).unwrap_or("");
-    if runtime == "python" || runtime == "node" {
+    if runtime == "python" {
         return "server".into();
     }
 
@@ -264,10 +264,10 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_mode_server_node_express() {
+    fn test_detect_mode_server_python_fastapi() {
         let meta = serde_json::json!({
-            "runtime": "node",
-            "entrypoint": ["node", "server.js"]
+            "runtime": "python",
+            "entrypoint": ["python3", "main.py"]
         });
         assert_eq!(detect_mode(&meta), "server");
     }

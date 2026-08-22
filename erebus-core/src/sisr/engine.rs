@@ -13,13 +13,14 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
-use subtle::ConstantTimeEq;
 
+use crate::cas::ObjectStore;
 use crate::format::{self, Footer};
 use crate::manifest::DeltaManifest;
 use crate::sisr::swap::AtomicWriter;
 use crate::sisr_header::{read_sisr, SisrFooterExt, SISR_VERSION};
-use crate::sisr_stage::merkle_root_of;
+use crate::sisr_stage::sha256_digest as sha256_of;
+use crate::sisr_stage::{ct_eq_hash, merkle_root_of};
 
 /// Supplies raw chunk bytes addressed by their SHA-256 content hash.
 pub trait ChunkFetcher {
@@ -32,15 +33,21 @@ pub trait ChunkFetcher {
 
 /// [`ChunkFetcher`] serving chunk files from a local directory keyed by hex
 /// content hash (`<root>/<64-hex-hash>`).
+///
+/// Internally delegates to `DiskObjectStore` (from `cas.rs`) so that Sisr chunk
+/// caching and the Phase 4 layer registry share one CAS on disk — eliminating
+/// the ad-hoc directory layout that previously existed here.
 pub struct DirectoryChunkFetcher {
-    root: PathBuf,
+    store: crate::cas::DiskObjectStore,
     fetched: Cell<u64>,
 }
 
 impl DirectoryChunkFetcher {
     pub fn new(root: &Path) -> Self {
+        let store = crate::cas::DiskObjectStore::new(root)
+            .expect("cas dir creation should not fail for a writable temp dir");
         Self {
-            root: root.to_path_buf(),
+            store,
             fetched: Cell::new(0),
         }
     }
@@ -48,8 +55,10 @@ impl DirectoryChunkFetcher {
 
 impl ChunkFetcher for DirectoryChunkFetcher {
     fn fetch(&self, hash: &[u8; 32], _length: usize) -> io::Result<Vec<u8>> {
-        let path = self.root.join(hex::encode(hash));
-        let bytes = fs::read(&path)?;
+        let bytes = self
+            .store
+            .get(hash)?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "chunk not found"))?;
         let total = self
             .fetched
             .get()
@@ -80,7 +89,8 @@ impl SisrEngine {
     /// Rebuilds `current_bin` against `manifest` and swaps it in atomically.
     ///
     /// The caller is responsible for authenticating `manifest` (e.g. via a
-    /// signature-checked [`RemoteManifest`]); this engine enforces the
+    /// signature-checked [`RemoteManifest`]) and for passing the verified
+    /// manifest signature as `manifest_sig`; this engine enforces the
     /// cryptographic part it can: every chunk — reused from `self` or fetched
     /// — must SHA-256 to its entry in the manifest before it is written.
     ///
@@ -92,9 +102,10 @@ impl SisrEngine {
         current_bin: &Path,
         manifest: &DeltaManifest,
         fetcher: &dyn ChunkFetcher,
+        manifest_sig: &[u8; 64],
     ) -> io::Result<PathBuf> {
         Ok(self
-            .apply_update_with_stats(current_bin, manifest, fetcher)?
+            .apply_update_with_stats(current_bin, manifest, fetcher, manifest_sig)?
             .0)
     }
 
@@ -136,22 +147,26 @@ impl SisrEngine {
     /// Like [`Self::apply_update`], but also returns reuse/fetch statistics
     /// (used to verify the bandwidth-reduction property in tests).
     ///
-    /// # Authenticity at rest
+    /// # Authenticity at rest (roadmap #45)
     ///
-    /// The rebuilt binary is NOT signed: the update engine has no signing key
-    /// (keys live at the build site), so the output footer clears
-    /// `FLAG_SIGNED` and `sig_offset` is 0. An applied SISR update is only
-    /// authenticated by the signed remote manifest verified during the update
-    /// flow; once written, the binary has no at-rest authenticity. This is a
-    /// documented limitation (roadmap #45) — the long-term fix is a signature
-    /// chain signing `SHA256(new_footer_hash ‖ parent_footer_hash)` so the
-    /// stub can verify applied updates offline. Callers must not treat an
-    /// updated SISR binary as a signed artifact.
+    /// `manifest_sig` must be the Ed25519 signature over
+    /// `merkle_root ‖ manifest_bytes` from the [`RemoteManifest`] the caller
+    /// just verified against the trusted keys. The engine has no signing key
+    /// (keys live at the build site), so the publisher pre-signs every
+    /// release manifest and the update carries that signature into the
+    /// rebuilt binary's SISR extension — the same field a fresh build embeds.
+    /// The launcher then re-verifies it offline on every cold start, so an
+    /// updated binary keeps its at-rest authenticity instead of degrading to
+    /// integrity-only. Passing all-zeros yields a binary the launcher refuses
+    /// to run unless `ERE_SISR_ALLOW_UNSIGNED` is set.
+    ///
+    /// [`RemoteManifest`]: crate::sisr_stage::RemoteManifest
     pub fn apply_update_with_stats(
         &self,
         current_bin: &Path,
         manifest: &DeltaManifest,
         fetcher: &dyn ChunkFetcher,
+        manifest_sig: &[u8; 64],
     ) -> io::Result<(PathBuf, SisrUpdateStats)> {
         let current = fs::canonicalize(current_bin)?;
         let mut exe = File::open(&current)?;
@@ -201,7 +216,10 @@ impl SisrEngine {
             chunk_table_len: u32::try_from(manifest_bytes.len())
                 .map_err(|_| err("manifest exceeds capacity"))?,
             merkle_root: merkle_root_of(manifest),
-            signature: [0u8; 64],
+            // The publisher-signed link: identical message format
+            // (`merkle_root ‖ manifest_bytes`) to the remote manifest the
+            // caller verified, so the rebuilt binary stays offline-verifiable.
+            signature: *manifest_sig,
         };
         w.file_mut().write_all(&manifest_bytes)?;
         w.file_mut().write_all(&ext.pack())?;
@@ -335,17 +353,6 @@ fn fetch_verified(
     Ok(bytes)
 }
 
-fn sha256_of(data: &[u8]) -> [u8; 32] {
-    Sha256::digest(data).into()
-}
-
-/// Constant-time 32-byte digest comparison. Integrity hashes are public, but
-/// the codebase's policy is to compare every verification digest without a
-/// timing side-channel so a future secret-bearing digest can't regress.
-fn ct_eq_hash(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    a.ct_eq(b).into()
-}
-
 /// v3+ footers carry an 8-byte signature-offset prefix (92 bytes total);
 /// older versions are 84 bytes.
 fn write_footer(w: &mut File, footer: &Footer) -> io::Result<()> {
@@ -383,6 +390,9 @@ mod tests {
             })
             .collect()
     }
+
+    /// Stand-in for an unauthenticated update signature (legacy shape).
+    const UNSIGNED: [u8; 64] = [0u8; 64];
 
     /// Fetcher backed by a map of hash → bytes (tests only).
     struct MapFetcher {
@@ -492,7 +502,7 @@ mod tests {
 
         let engine = SisrEngine;
         let (updated, stats) = engine
-            .apply_update_with_stats(&cur, &target, &fetcher)
+            .apply_update_with_stats(&cur, &target, &fetcher, &UNSIGNED)
             .unwrap();
 
         assert_eq!(stats.reused_chunks, reused_count);
@@ -535,7 +545,9 @@ mod tests {
             }],
         };
         let fetcher = MapFetcher::new();
-        assert!(SisrEngine.apply_update(&cur, &bad, &fetcher).is_err());
+        assert!(SisrEngine
+            .apply_update(&cur, &bad, &fetcher, &UNSIGNED)
+            .is_err());
         assert_eq!(fs::read(&cur).unwrap(), original, "binary must be intact");
         assert!(
             fs::read_dir(tmp.path()).unwrap().all(|e| !e
@@ -567,7 +579,7 @@ mod tests {
             }],
         };
 
-        let res = SisrEngine.apply_update(&cur, &target, &fetcher);
+        let res = SisrEngine.apply_update(&cur, &target, &fetcher, &UNSIGNED);
         assert!(res.is_err());
         assert_eq!(fs::read(&cur).unwrap(), original);
     }
@@ -583,7 +595,7 @@ mod tests {
             chunks: vec![],
         };
         assert!(SisrEngine
-            .apply_update(&cur, &bad, &MapFetcher::new())
+            .apply_update(&cur, &bad, &MapFetcher::new(), &UNSIGNED)
             .is_err());
         assert_eq!(fs::read(&cur).unwrap(), original);
     }
@@ -620,7 +632,7 @@ mod tests {
             }],
         };
         let (updated, stats) = SisrEngine
-            .apply_update_with_stats(&out, &target, &fetcher)
+            .apply_update_with_stats(&out, &target, &fetcher, &UNSIGNED)
             .unwrap();
         assert_eq!(stats.fetched_chunks, 1);
         assert_eq!(stats.reused_chunks, 0);
@@ -649,7 +661,7 @@ mod tests {
         };
         fetcher.put(sha256_of(&payload), payload.clone());
         let (updated, _) = SisrEngine
-            .apply_update_with_stats(&cur, &target, &fetcher)
+            .apply_update_with_stats(&cur, &target, &fetcher, &UNSIGNED)
             .unwrap();
         assert_ne!(
             fs::metadata(&updated).unwrap().permissions().mode() & 0o111,
@@ -658,52 +670,18 @@ mod tests {
         );
     }
 
+    /// The pre-swap dry-run (`target_payload_sha256`) predicts the rebuilt
+    /// footer's hash exactly — on a mixed delta (reuse + fetch) — without
+    /// touching the binary.
     #[test]
-    fn target_payload_sha256_matches_rebuilt_footer() {
-        let tmp = tempfile::tempdir().unwrap();
-        let payload = random_buf(20_000, 9);
-        let meta = br#"{"name":"test"}"#;
-        let cur = build_current_bin(tmp.path(), &payload, meta, 4096);
-
-        // Reuse every chunk (no fetch needed) so the dry-run completes.
-        let cur_manifest = read_current_manifest(&cur);
-        let target = DeltaManifest {
-            version: crate::manifest::VERSION,
-            payload_len: cur_manifest.payload_len,
-            chunks: cur_manifest.chunks.clone(),
-        };
-        let fetcher = MapFetcher::new();
-
-        let before = fs::read(&cur).unwrap();
-        let dry_hash = SisrEngine
-            .target_payload_sha256(&cur, &target, &fetcher)
-            .unwrap();
-
-        let (updated, _) = SisrEngine
-            .apply_update_with_stats(&cur, &target, &fetcher)
-            .unwrap();
-        let data = fs::read(&updated).unwrap();
-        let footer = Footer::read_from(&mut Cursor::new(&data)).unwrap();
-        assert_eq!(
-            dry_hash, footer.payload_sha256,
-            "pre-swap hash must equal the rebuilt footer's hash"
-        );
-        assert_eq!(
-            fs::read(&cur).unwrap(),
-            before,
-            "dry-run must not modify the binary"
-        );
-    }
-
-    #[test]
-    fn target_payload_sha256_needs_no_writes_and_matches_after_apply() {
+    fn dry_run_hash_matches_rebuilt_footer_without_writes() {
         let tmp = tempfile::tempdir().unwrap();
         let payload = random_buf(12_000, 11);
         let meta = br#"{"name":"test"}"#;
         let cur = build_current_bin(tmp.path(), &payload, meta, 4096);
         let cur_manifest = read_current_manifest(&cur);
 
-        // Replace the last chunk with a fetch-only chunk.
+        // Mixed delta: reuse every chunk but the last, fetch a new tail.
         let mut chunks = cur_manifest.chunks[..cur_manifest.chunks.len() - 1].to_vec();
         let mut fetcher = MapFetcher::new();
         let tail = random_buf(2_048, 77);
@@ -719,15 +697,25 @@ mod tests {
             chunks,
         };
 
+        let before = fs::read(&cur).unwrap();
         let dry_hash = SisrEngine
             .target_payload_sha256(&cur, &target, &fetcher)
             .unwrap();
+        assert_eq!(
+            fs::read(&cur).unwrap(),
+            before,
+            "dry-run must not modify the binary"
+        );
+
         let (updated, _) = SisrEngine
-            .apply_update_with_stats(&cur, &target, &fetcher)
+            .apply_update_with_stats(&cur, &target, &fetcher, &UNSIGNED)
             .unwrap();
         let data = fs::read(&updated).unwrap();
         let footer = Footer::read_from(&mut Cursor::new(&data)).unwrap();
-        assert_eq!(dry_hash, footer.payload_sha256);
+        assert_eq!(
+            dry_hash, footer.payload_sha256,
+            "pre-swap hash must equal the rebuilt footer's hash"
+        );
     }
 
     #[test]
@@ -769,7 +757,7 @@ mod tests {
         fetcher.put(cur_manifest.chunks[1].hash, good.to_vec());
 
         let (updated, stats) = SisrEngine
-            .apply_update_with_stats(&cur, &cur_manifest, &fetcher)
+            .apply_update_with_stats(&cur, &cur_manifest, &fetcher, &UNSIGNED)
             .unwrap();
         assert_eq!(stats.reused_chunks, cur_manifest.chunks.len() - 1);
         assert_eq!(stats.fetched_chunks, 1);
@@ -778,5 +766,74 @@ mod tests {
             payload,
             "payload must be pristine"
         );
+    }
+
+    /// The publisher scenario at engine level: a REAL v1→v2 delta (rewritten
+    /// tail → some chunks fetched), signed by the publisher, must produce a
+    /// binary that verifies offline against the trusted key — and only it.
+    #[test]
+    fn applied_update_stays_authentic_at_rest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let meta = br#"{"name":"test"}"#;
+
+        // v1: what is currently installed. v2: same head, rewritten tail, so
+        // content-defined cut points keep the leading chunks reusable.
+        let v1 = random_buf(48_000, 21);
+        let cur = build_current_bin(tmp.path(), &v1, meta, 4096);
+        let mut v2 = v1.clone();
+        v2[32_000..].copy_from_slice(&random_buf(16_000, 77));
+
+        // Publisher signs the v2 manifest; every v2 chunk is served and the
+        // engine decides what to reuse.
+        let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let config = SisrBuildConfig {
+            enabled: true,
+            chunk_target_size: 4096,
+            signing_key: Some(key.clone()),
+        };
+        let artifacts = crate::sisr_stage::build_artifacts(&v2, &config).unwrap();
+        let mut fetcher = MapFetcher::new();
+        let mut pos = 0usize;
+        for chunk in &artifacts.manifest.chunks {
+            let end = pos + chunk.length as usize;
+            fetcher.put(chunk.hash, v2[pos..end].to_vec());
+            pos = end;
+        }
+
+        let (updated, stats) = SisrEngine
+            .apply_update_with_stats(&cur, &artifacts.manifest, &fetcher, &artifacts.signature)
+            .unwrap();
+        assert!(
+            stats.fetched_chunks > 0 && stats.fetched_chunks < artifacts.manifest.chunks.len(),
+            "a real delta must mix reuse ({}) and fetch ({})",
+            stats.reused_chunks,
+            stats.fetched_chunks
+        );
+        assert_eq!(rebuilt_payload(&updated), v2, "payload must be exactly v2");
+
+        // The rebuilt binary carries the verified signature verbatim...
+        let data = fs::read(&updated).unwrap();
+        let (ext, manifest) = read_sisr(&mut Cursor::new(&data)).unwrap().unwrap();
+        assert_eq!(ext.signature, artifacts.signature);
+
+        // ...verifies offline against the trusted key...
+        crate::sisr_stage::verify_embedded_sisr(
+            &ext,
+            &manifest,
+            &rebuilt_payload(&updated),
+            &[key.verifying_key()],
+        )
+        .unwrap();
+
+        // ...and only against a trusted key.
+        let rogue = ed25519_dalek::SigningKey::from_bytes(&[8u8; 32]);
+        let err = crate::sisr_stage::verify_embedded_sisr(
+            &ext,
+            &manifest,
+            &rebuilt_payload(&updated),
+            &[rogue.verifying_key()],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("signature verification failed"));
     }
 }

@@ -1,7 +1,32 @@
 # IDEES — Compilation complete
 
-## 1. Position A : Format artefact universel (DEAD CODE)
-**Description** : SISR comme moat + layer graph (RuntimeLayer, AppLayer, ModelLayer, ToolLayer, ConfigLayer) → un format `.ere` extensible a tout type d'artefact
+## 1. Position A : Agent IA local (PRINCIPALE)
+
+**Description** : Format `.erebus` pour agents IA locaux — un seul fichier qui contient
+le stub + runtime + modèle GGUF + prompt + tools + config, signé Ed25519, avec delta
+updates Sisir et sandbox seccomp+Landlock.
+
+### Pourquoi c'est le bon angle
+
+- Le code existe déjà pour ce cas : SISR content-defined chunking pour gros fichiers,
+  encryption AES-256-GCM pour protéger les poids, sandbox seccomp+Landlock, multi-runtime
+  detection (Python/Node/Go/Binary/etc.)
+- Le concurrent direct (llamafile, Mozilla-Ocho 25k★) est faible : C++ only, pas de
+  delta updates, pas de sandbox, pas de multi-runtime
+- Le marché des agents IA locaux est réel et en croissance
+
+---
+
+## 2. Position B : Compilateur vers formats existants (--to flag) — DEPRECATED
+
+**Statut** : **Déprécié.** Abandonné au profit de la focus agent IA.
+
+**Raisons** :
+- Dilution : le format `.erebus` existant répond déjà au besoin de distribution
+- L'OCI n'est concurrent qu'au-delà du réseau (pas dans le segment local AI desktop)
+- WASM/AppImage = features qui ne sont pas dans le segment prioritaire
+- Personne ne paie pour "build once → deploy everywhere" ; le market value est dans
+  le distribution sécurisé + delta updates pour les agents IA
 
 ### Code analysis findings
 - `layer.rs` = DEAD CODE : `Layer` trait, `SerializableLayer`, `Capability`, `Entrypoint` — exists mais jamais branches dans le pipeline production
@@ -16,31 +41,88 @@
 - Stub et CLI utilisent `build_meta_json()` → `AssemblyInput` → `assemble_erebus()` — format plat
 - `cargo check` + `cargo clippy` + `cargo test` tous passes, zéro warnings
 
-## 2. Position B : Compilateur vers formats existants (--to flag)
-**Description** : `erebus build . --to [oci|appimage|wasm]` → single build, sortie multiple formats
+## Analyse concurrentielle — focus local AI (rechererch web 2025-2026)
 
-### Formats cibles
-- **OCI/Docker** : stub → Dockerfile equivalent, payload squashfs → couche OCI
-- **AppImage** : stub .erebus (ELF statique, musl) → AppImage runtime, payload squashfs → AppDir  
-- **WASM** : runtime → WASM via Pyodide/Node WASM, payload → WASI preopen
+### Tools existants dans le segment agent IA local
 
-### Usage
-```bash
-# Multi-format : un seul build → 3 formats
-erebus build ./myapp --to oci,appimage,wasm --target linux-x64,linux-arm64 -o out/
+| Outil | Format | SISR | Sandbox | Multi-runtime |
+|---|---|---|---|---|
+| **llamafile (YC OSS)** | Fat C++ binary | None | None | C++ only |
+| **Docker/BuildKit** | OCI image | zstd:chunked (partial) | Namespace | Yes (any runtime) |
+| **PyInstaller** | Executable | None | None | Python only |
+| **Bun** | Single binary | None | None | JS/TS only |
+| **Nix** | Store | NAR deltas | Namespace | Yes |
 
-# SISR cross-format : meme chunk engine pour tous
-erebus build ./myapp --to oci,appimage,wasm --enable-sisr --update-url https://updates.example.com
+## 4. Pourquoi erebus contre llamafile (le concurrent direct)
+
+**llamafile** = un binaire C++ qui package llama.cpp + un modèle GGUF. C'est fait pour
+tourner un modèle llama, pas pour packager un agent IA complet.
+
+| Aspect | llamafile | **erebus** |
+|---|---|---|
+| Runtime | C++ llama.cpp only | Python/Node/Go/Binary + llama.cpp |
+| Delta updates | None (full re-download) | **SISR content-defined delta** |
+| Sandbox | None | **seccomp + Landlock** |
+| Multi-language | No (C++ only) | **Yes** (Python API + C++ inference + Go tools) |
+| Format | Single ELF | Single `.erebus` (décompressible) |
+| Cross-arch | Rebuild nécessaire | **Universal binary project** |
+| Web UI | Static HTML only | FastAPI/Flask/Node server |
+
+## 5. Use case prioritaire : agent IA local
+
+Packager un agent IA typique :
+
+```
+my-agent/
+  app.py            ← FastAPI server (Python)
+  requirements.txt  ← flask, requests, llama-cpp-python
+  model.gguf        ← 4-30GB GGUF model weights
+  tools/            ← Python tool scripts
+  prompt.txt        ← system prompt
 ```
 
-### Valeur unique
-- SISR qui traverse tous les formats (OCI + AppImage + WASM)
-- Build once, deploy everywhere
-- Pas d'outil existant ne fait ça (voir analyse concurrentielle)
+```bash
+# Build une fois → un seul fichier
+erebus build ./my-agent --embed-interpreter python3 -o agent.erebus
 
-## 3. Analyse concurrentielle (recherche web 2025-2026)
+# Distribution → un seul fichier, marche partout
+chmod +x agent.erebus && ./agent.erebus
+# → Python runtime + deps + model + code extractés en 2s, server ready
 
-### Tools existants
+# Mise à jour incrémentale → 15MB au lieu de 4GB
+erebus build ./my-agent --update --enable-sisr
+# → SISR delta : seuls les chunks modifiés sont téléchargés
+```
+
+## 6. Business model
+
+- **Produit** : OSS tool (gratis) — `erebus build`, `erebus swap`, `erebus run`
+- **Monetisation** : SaaS registry pour versioning de modèles + delta hosting
+- **Pricing** :
+  | Tier | Price | Features |
+  |---|---|---|
+  | Free | $0 | Local build, single-file |
+  | Pro | $7/user/mois | Private registry, SISR |
+  | Team | $29/team/mois | SSO, analytics |
+  | Enterprise | Custom | Airgap, compliance |
+
+## 7. Recommendation
+
+### Angle principal : Agent IA local
+
+- Focus sur le segment local AI / agents IA
+- erebus = llamafile + delta updates + sandbox + multi-runtime
+- Positionnement : "Distribution sécurisée pour agents IA locaux — un fichier,
+  delta updates de 95% plus petites, sandbox pour exécuter des agents non-connus."
+
+### Competitive moat
+
+1. **SISR delta updates** — chunk-level content-defined; seul le delta est téléchargé
+2. **Single-file self-extracting** — plus simple que Docker, no daemon
+3. **Multi-runtime** — Python + C++ + Go + Binary dans un seul format
+4. **Sandbox sécurité** — seccomp + Landlock + Ed25519 signing
+5. **Open format** — interoperability ($tar$/unsquashfs pour décompresser)
+```
 | Outil | Format | SISR | SaaS | Business model |
 |---|---|---|---|---|
 | **Docker/BuildKit** | OCI only | zstd:chunked (partial) | ❌ local | Infra existante |

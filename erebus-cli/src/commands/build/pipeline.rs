@@ -2,17 +2,13 @@ use crate::remote_cache::remote_cache_from_args;
 use anyhow::{Context, Result};
 use erebus_core::detect;
 use erebus_core::embed;
-use erebus_core::layer::SerializableLayer;
 use erebus_core::metadata::{BunFeatures, EmbeddedInterpreter};
 use erebus_core::paths::cache_dir;
 use erebus_core::pkgmgr;
 use std::path::PathBuf;
 
-use super::args::{config_fingerprint, parse_target, BuildArgs, BuildPlan};
-use super::deps::{
-    check_php_platform_reqs, ensure_composer, ensure_node, has_workspace_protocol,
-    is_command_available,
-};
+use super::args::{config_fingerprint, BuildArgs, BuildPlan};
+use super::deps::is_command_available;
 use super::payload::{copy_dir_recursive_with, create_squashfs_payload, include_points_to_env};
 use super::sign::sign_macos_binary;
 use super::sisr::{build_sisr_config, report_sisr_bandwidth};
@@ -91,7 +87,7 @@ pub(crate) fn build_single_target(
     }
 
     // ── Compute hashes for incremental update ──────────────────────────
-    // Hashed BEFORE tree-shake/minify run: those mutate a staging copy
+    // Hashed BEFORE staging: mutations during packaging must not affect it
     // below, and the cache/`--update` keys must reflect the pristine
     // source, not its by-products, or a rebuild would never match.
     let new_app_hash = erebus_core::include::hash_app_files(app_dir);
@@ -146,19 +142,6 @@ pub(crate) fn build_single_target(
         }
     }
 
-    // ── PHP platform extensions check ──────────────────────────────────
-    if runtime_name == "php" && !no_install {
-        check_php_platform_reqs(app_dir, verbose)?;
-    }
-
-    // Detect pnpm workspace with workspace:* protocol (cannot use npm)
-    if pkgmgr::detect_node_pkgmgr(app_dir) == Some(pkgmgr::PkgMgr::Npm)
-        && has_workspace_protocol(app_dir)
-    {
-        eprintln!("[erebus] warning: package.json uses `workspace:*` protocol (pnpm-specific)");
-        eprintln!("  but pnpm is not detected. Create `pnpm-workspace.yaml` or add a lockfile.");
-    }
-
     // Detect and install all package managers (primary + secondary)
     let all_pkg_mgrs = pkgmgr::detect_all_pkgmgrs(app_dir, runtime_name);
     for mgr in &all_pkg_mgrs {
@@ -169,47 +152,16 @@ pub(crate) fn build_single_target(
         if !no_install {
             let cmd = mgr.install_cmd();
 
-            // Check if the binary exists before trying to run it. For
-            // cross-target builds the builder's host toolchain has the wrong
-            // arch/OS, so always download the target node instead.
-            let need_target_node = target.is_some()
-                && matches!(
-                    mgr,
-                    pkgmgr::PkgMgr::Npm
-                        | pkgmgr::PkgMgr::Pnpm
-                        | pkgmgr::PkgMgr::Yarn
-                        | pkgmgr::PkgMgr::Bun
+            if !is_command_available(cmd[0]) {
+                eprintln!(
+                    "[erebus] skipping {} — `{}` not found on PATH",
+                    mgr.name(),
+                    cmd[0]
                 );
-            let mut node_bin_dir: Option<PathBuf> = None;
-            if !is_command_available(cmd[0]) || need_target_node {
-                // For node/npm: download static node to temp dir
-                if matches!(
-                    mgr,
-                    pkgmgr::PkgMgr::Npm
-                        | pkgmgr::PkgMgr::Pnpm
-                        | pkgmgr::PkgMgr::Yarn
-                        | pkgmgr::PkgMgr::Bun
-                ) {
-                    let bin_dir = ensure_node(target.as_deref(), verbose)?;
-                    node_bin_dir = Some(bin_dir);
-                } else {
-                    eprintln!(
-                        "[erebus] skipping {} — `{}` not found on PATH",
-                        mgr.name(),
-                        cmd[0]
-                    );
-                    continue;
-                }
+                continue;
             }
 
-            // For composer: auto-download composer.phar if not on PATH
-            let (prog, extra_args) = if matches!(mgr, pkgmgr::PkgMgr::Composer) {
-                ensure_composer(app_dir, verbose)?
-            } else {
-                (cmd[0].to_string(), Vec::new())
-            };
-
-            let mut full_args: Vec<String> = extra_args;
+            let mut full_args: Vec<String> = Vec::new();
             full_args.extend(cmd.iter().skip(1).map(|s| s.to_string()));
 
             // When cross-compiling for a different arch, force source builds for pip
@@ -223,71 +175,12 @@ pub(crate) fn build_single_target(
                 full_args.push(":all:".into());
             }
 
-            // When cross-compiling for a different OS/arch, tell npm/pnpm/yarn/bun
-            // to install dependencies for the target platform, not the host.
-            //
-            // We also pass --ignore-scripts: the target node binary cannot run
-            // on a foreign host (e.g. macOS node on Linux), so any install
-            // scripts that compile native modules would fail. Pure-JS deps and
-            // prebuilt binaries selected by --platform/--arch still work.
-            let is_cross_node = matches!(
-                mgr,
-                pkgmgr::PkgMgr::Npm
-                    | pkgmgr::PkgMgr::Pnpm
-                    | pkgmgr::PkgMgr::Yarn
-                    | pkgmgr::PkgMgr::Bun
-            ) && target.as_ref().is_some_and(|t| {
-                let (t_arch, t_os) = parse_target(t);
-                t_arch != std::env::consts::ARCH || t_os != std::env::consts::OS
-            });
-            if is_cross_node {
-                if let Some(target_str) = target.as_ref() {
-                    let (t_arch, t_os) = parse_target(target_str);
-                    let npm_arch = match t_arch.as_str() {
-                        "x86_64" => "x64",
-                        "aarch64" | "arm64" => "arm64",
-                        "i686" | "i386" | "x86" => "ia32",
-                        other => other,
-                    };
-                    let npm_platform = match t_os.as_str() {
-                        "darwin" => "darwin",
-                        "windows" => "win32",
-                        "linux" => "linux",
-                        other => other,
-                    };
-                    if matches!(mgr, pkgmgr::PkgMgr::Npm | pkgmgr::PkgMgr::Pnpm) {
-                        full_args.push("--platform".into());
-                        full_args.push(npm_platform.into());
-                        full_args.push("--arch".into());
-                        full_args.push(npm_arch.into());
-                        full_args.push("--ignore-scripts".into());
-                    } else if matches!(mgr, pkgmgr::PkgMgr::Yarn) {
-                        full_args.push("--platform".into());
-                        full_args.push(npm_platform.into());
-                        full_args.push("--ignore-scripts".into());
-                    } else if matches!(mgr, pkgmgr::PkgMgr::Bun) {
-                        full_args.push("--platform".into());
-                        full_args.push(npm_platform.into());
-                        full_args.push("--arch".into());
-                        full_args.push(npm_arch.into());
-                        full_args.push("--ignore-scripts".into());
-                    }
-                }
-            }
-
-            let mut command = std::process::Command::new(&prog);
+            let mut command = std::process::Command::new(cmd[0]);
             command.args(&full_args).current_dir(app_dir);
-
-            // If we downloaded node for npm/yarn/bun, prepend its bin dir to PATH
-            // using Command::env() instead of mutating global std::env::PATH
-            if let Some(ref bin_dir) = node_bin_dir {
-                let current = std::env::var("PATH").unwrap_or_default();
-                command.env("PATH", format!("{}:{}", bin_dir.display(), current));
-            }
 
             let status = command
                 .status()
-                .context(format!("failed to run `{}` — is it installed?", prog))?;
+                .context(format!("failed to run `{}` — is it installed?", cmd[0]))?;
             if !status.success() {
                 eprintln!(
                     "[erebus] warning: {} installation failed (exit code {})",
@@ -298,9 +191,8 @@ pub(crate) fn build_single_target(
         }
     }
 
-    // Clean up downloaded build tools (node/npm, composer.phar) from cache
-    // (deferred: for cross-target builds the downloaded node must remain on
-    // PATH until the interpreter is embedded below).
+    // Clean up downloaded build tools from cache (deferred: nothing downloads
+    // tools today, but the cleanup stays for parity with the cache layout).
 
     // Find stub binary
     let stub = find_stub(&target)?;
@@ -317,26 +209,6 @@ pub(crate) fn build_single_target(
     copy_dir_recursive_with(app_dir, &rootfs.join("app"), include_node_modules)
         .context("failed to copy app files")?;
 
-    // ── Tree-shake / minify on the STAGING COPY ───────────────────────
-    // Never mutate the source directory: a build must leave `app_dir`
-    // byte-identical so repeat builds and `--update` hash comparisons see
-    // the real input.
-    if args.tree_shake {
-        let removed = erebus_core::treeshake::prune_node_modules(&rootfs.join("app"), verbose)
-            .context("tree-shaking failed")?;
-        if verbose {
-            eprintln!("  tree-shake: removed {removed} unused package(s)");
-        }
-    }
-
-    if args.minify {
-        let minified = erebus_core::minify::minify_app_dir(&rootfs.join("app"), verbose)
-            .context("minification failed")?;
-        if verbose {
-            eprintln!("  minify: minified {minified} file(s)");
-        }
-    }
-
     // ── Include extra files ───────────────────────────────────────────
     if !args.include.is_empty() {
         let app_dest = rootfs.join("app");
@@ -348,20 +220,18 @@ pub(crate) fn build_single_target(
     }
 
     // ── Embed interpreter ──────────────────────────────────
-    // NOTE: ensure_node() may have downloaded the target runtime to
-    // <cache_dir>/build-tools/<target>/bin and added it to PATH —
-    // embed_interpreter picks it up from there (`.exe` first for cross-OS).
+    //
+    // CROSS-TARGET CAVEAT: CPython is copied verbatim from the *build host*
+    // plus its ldd deps. A `--target <other-arch>` build therefore embeds a
+    // host-arch interpreter that will only run on matching hardware/emulators.
+    // Until a per-target interpreter source exists, treat non-host-arch Python
+    // builds as stub-level validation only (see ROADMAP.md → RISC-V).
     let embedded_interpreter_str = if let Some(ref interp) = args.embed_interpreter {
         Some(interp.clone())
+    } else if runtime_name == "python" {
+        Some("python3".to_string())
     } else {
-        match runtime_name.as_str() {
-            "python" => Some("python3".to_string()),
-            "node" => Some("node".to_string()),
-            "php" => Some("php".to_string()),
-            "ruby" => Some("ruby".to_string()),
-            "deno" => Some("deno".to_string()),
-            _ => None,
-        }
+        None
     };
 
     let mut interpreter_embedded = false;
@@ -400,20 +270,6 @@ pub(crate) fn build_single_target(
         }
     }
 
-    // Embed N-API native addon dependencies (.node files → ldd → .so)
-    if runtime_name == "node" {
-        match embed::embed_napi_addons(&rootfs, verbose) {
-            Ok(n) => {
-                if verbose && n > 0 {
-                    eprintln!("Embedded {} N-API shared library dependencies", n);
-                }
-            }
-            Err(e) => {
-                eprintln!("[erebus] warning: N-API addon embedding failed: {e}");
-            }
-        }
-    }
-
     // Embed RoadRunner binary for Laravel Octane apps (rr.yaml or .rr.yaml)
     if app_dir.join("rr.yaml").is_file() || app_dir.join(".rr.yaml").is_file() {
         if which::which("rr").is_ok() {
@@ -432,9 +288,9 @@ pub(crate) fn build_single_target(
         eprintln!("  (interpreter embedding skipped)");
     }
 
-    // Clean up downloaded build tools (node/npm, composer.phar). Only the
-    // tool's own cache dir is removed — never a shared `/tmp` path, which
-    // another user/process may own or have symlinked (roadmap #36).
+    // Clean up downloaded build tools. Only the tool's own cache dir is
+    // removed — never a shared `/tmp` path, which another user/process may
+    // own or have symlinked (roadmap #36).
     let _ = std::fs::remove_dir_all(cache_dir().join("build-tools"));
 
     // Build the payload: zstd(tar) by default, or a real SquashFS image
@@ -579,17 +435,6 @@ pub(crate) fn build_single_target(
         }
     }
 
-    // ── Disable Xdebug for PHP apps (avoids "Could not connect to debugging client") ──
-    if runtime_name == "php" && !env_map.contains_key("XDEBUG_MODE") {
-        env_map.insert(
-            "XDEBUG_MODE".into(),
-            serde_json::Value::String("off".into()),
-        );
-        if verbose {
-            eprintln!("  xdebug: XDEBUG_MODE=off (auto-injected for PHP)");
-        }
-    }
-
     // ── Persistent storage ────────────────────────────────────────────
     if args.persist {
         let persist_dir = erebus_core::persistent::get_persist_dir(&app_name);
@@ -675,19 +520,6 @@ pub(crate) fn build_single_target(
         detect::resolve_entrypoint(app_dir, runtime).unwrap_or_else(|| vec!["run".to_string()])
     };
 
-    let entrypoint = if runtime == detect::Runtime::Wasm && (args.wasi || args.component_model) {
-        let mut ep = entrypoint.clone();
-        if args.component_model {
-            ep.insert(1, "--component-model".into());
-        }
-        if args.wasi {
-            ep.insert(1, "--wasi".into());
-        }
-        ep
-    } else {
-        entrypoint
-    };
-
     let mut bun_features = BunFeatures::default();
 
     // Set embedded interpreter based on either explicit --embed-interpreter or auto-detection
@@ -695,27 +527,14 @@ pub(crate) fn build_single_target(
         (
             Some(match interp.to_lowercase().as_str() {
                 "python3" | "python" => EmbeddedInterpreter::Python3,
-                "node" => EmbeddedInterpreter::Node,
-                "deno" => EmbeddedInterpreter::Deno,
-                "ruby" => EmbeddedInterpreter::Ruby,
-                "php" => EmbeddedInterpreter::Php,
-                "perl" => EmbeddedInterpreter::Perl,
-                "java" => EmbeddedInterpreter::Java,
-                "go" => EmbeddedInterpreter::Go,
-                "wasm" => EmbeddedInterpreter::Wasm,
                 other => EmbeddedInterpreter::Custom(other.to_string()),
             }),
             args.interpreter_path.clone(),
         )
+    } else if runtime_name == "python" {
+        (Some(EmbeddedInterpreter::Python3), None)
     } else {
-        match runtime_name.as_str() {
-            "python" => (Some(EmbeddedInterpreter::Python3), None),
-            "node" => (Some(EmbeddedInterpreter::Node), None),
-            "php" => (Some(EmbeddedInterpreter::Php), None),
-            "ruby" => (Some(EmbeddedInterpreter::Ruby), None),
-            "deno" => (Some(EmbeddedInterpreter::Deno), None),
-            _ => (None, None),
-        }
+        (None, None)
     };
 
     if let Some(interpreter) = interpreter_opt {
@@ -727,22 +546,6 @@ pub(crate) fn build_single_target(
             eprintln!(
                 "  embedded runtime: {}",
                 bun_features.embedded_runtime.interpreter.as_ref().unwrap()
-            );
-        }
-    }
-
-    if args.wasm {
-        eprintln!("[erebus] warning: --wasm is not yet implemented in the stub; metadata will be written but ignored at runtime");
-        bun_features.wasm.enabled = true;
-        if let Some(ref path) = args.wasmtime_path {
-            bun_features.wasm.wasmtime_path = Some(path.display().to_string());
-        }
-        bun_features.wasm.wasi = args.wasi;
-        bun_features.wasm.component_model = args.component_model;
-        if verbose {
-            eprintln!(
-                "  wasm: enabled (wasi={}, component_model={})",
-                args.wasi, args.component_model
             );
         }
     }
@@ -848,9 +651,6 @@ pub(crate) fn build_single_target(
         size as f64 / (1024.0 * 1024.0)
     );
 
-    // Generate desktop packaging files if requested
-    generate_package_artifacts(&args.package_format, output, app_dir, runtime_name)?;
-
     if args.enable_sisr {
         eprintln!(
             "warning: SISR binaries are NOT signed at rest — authenticity is only guaranteed \
@@ -939,74 +739,4 @@ pub(crate) fn build_single_target(
         })));
     }
     Ok(None)
-}
-
-/// Generate desktop packaging manifests (Flatpak or Snap) next to the erebus bundle.
-fn generate_package_artifacts(
-    format: &str,
-    output: &std::path::Path,
-    _app_dir: &std::path::Path,
-    runtime_name: &str,
-) -> Result<()> {
-    let app_name = output.file_stem().and_then(|s| s.to_str()).unwrap_or("app");
-
-    // Detect desktop environment and whether this is a GUI app
-    let desktop_env = erebus_core::flatpak::DesktopEnv::from_env();
-    let runtime_lower = runtime_name.to_lowercase();
-    let is_desktop = runtime_lower == "python"
-        || runtime_lower == "python3"
-        || runtime_lower == "node"
-        || runtime_lower == "nodejs"
-        || runtime_lower == "ruby"
-        || runtime_lower.starts_with("binary:")
-        || runtime_lower == "rust"
-        || runtime_lower == "go";
-
-    match format {
-        "flatpak" => {
-            let layers: Vec<SerializableLayer> = vec![];
-            let entrypoint = vec![runtime_name.to_string()];
-            let manifest = erebus_core::flatpak::generate_manifest(
-                app_name,
-                runtime_name,
-                &entrypoint,
-                &layers,
-                is_desktop,
-                desktop_env,
-            )?;
-            let manifest_json = serde_json::to_string_pretty(&manifest)?;
-
-            let out_dir = output.parent().unwrap_or(std::path::Path::new("."));
-            let manifest_path = out_dir.join("flatpak-manifest.json");
-            std::fs::write(&manifest_path, manifest_json)?;
-
-            let desktop_content = erebus_core::flatpak::generate_desktop_file(app_name, app_name);
-            let desktop_path = out_dir.join(format!("{app_name}.desktop"));
-            std::fs::write(&desktop_path, desktop_content)?;
-
-            eprintln!("  Flatpak manifest: {}", manifest_path.display());
-            eprintln!("  Desktop file: {}", desktop_path.display());
-        }
-        "snap" => {
-            let snap_config = erebus_core::snap::generate_snapcraft_yaml(
-                app_name,
-                "1.0.0",
-                None,
-                runtime_name,
-                &[runtime_name.to_string()],
-                false,
-                is_desktop,
-            )?;
-            let yaml = erebus_core::snap::generate_yaml_string(&snap_config)?;
-
-            let out_dir = output.parent().unwrap_or(std::path::Path::new("."));
-            let snap_path = out_dir.join("snapcraft.yaml");
-            std::fs::write(&snap_path, yaml)?;
-
-            eprintln!("  Snap manifest: {}", snap_path.display());
-        }
-        _ => {}
-    }
-
-    Ok(())
 }

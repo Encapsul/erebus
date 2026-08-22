@@ -9,6 +9,7 @@ use std::io;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 use crate::chunker::{Chunker, FastCDC};
 use crate::manifest::{self, ChunkEntry, DeltaManifest};
@@ -208,6 +209,77 @@ pub fn verify(
     public
         .verify(&msg, &Signature::from_bytes(signature))
         .is_ok()
+}
+
+/// Verifies the at-rest authenticity of an embedded SISR section.
+///
+/// The whole chain runs offline: an Ed25519 signature from a trusted key
+/// covers `merkle_root ‖ manifest_bytes`, the Merkle root commits to the
+/// chunk table, and every chunk region of `payload` must hash to its
+/// manifest entry — binding the bytes that will actually run to the signed
+/// table. Fails closed on an all-zeros signature (unsigned build), a Merkle
+/// mismatch, an untrusted signature, a chunk table that does not tile
+/// `payload` exactly, or any content mismatch.
+///
+/// Cost note: the per-chunk pass is one extra SHA-256 sweep over the
+/// payload, same order as the launcher's existing full-file integrity check.
+pub fn verify_embedded_sisr(
+    ext: &crate::sisr_header::SisrFooterExt,
+    manifest: &DeltaManifest,
+    payload: &[u8],
+    publics: &[VerifyingKey],
+) -> io::Result<()> {
+    if ext.signature == [0u8; 64] {
+        return Err(err("unsigned SISR section refused at rest"));
+    }
+    if merkle_root_of(manifest) != ext.merkle_root {
+        return Err(err("embedded SISR Merkle root does not match chunk table"));
+    }
+    let manifest_bytes = manifest.serialize()?;
+    if !publics
+        .iter()
+        .any(|public| verify(&manifest_bytes, &ext.merkle_root, &ext.signature, public))
+    {
+        return Err(err("embedded SISR signature verification failed"));
+    }
+    verify_payload_chunks(manifest, payload)
+}
+
+/// Binds `payload` to the signed chunk table: exact tiling plus a
+/// constant-time hash check per chunk region.
+pub fn verify_payload_chunks(manifest: &DeltaManifest, payload: &[u8]) -> io::Result<()> {
+    if manifest.payload_len != payload.len() as u64 {
+        return Err(err("SISR manifest payload_len does not match payload"));
+    }
+    let mut pos = 0usize;
+    for chunk in &manifest.chunks {
+        let len = usize::try_from(chunk.length).map_err(|_| err("chunk length overflow"))?;
+        let end = pos
+            .checked_add(len)
+            .ok_or_else(|| err("chunk region overflow"))?;
+        let region = payload
+            .get(pos..end)
+            .ok_or_else(|| err("chunk region out of payload bounds"))?;
+        if !ct_eq_hash(&sha256_digest(region), &chunk.hash) {
+            return Err(err("payload chunk failed SHA-256 verification"));
+        }
+        pos = end;
+    }
+    if pos != payload.len() {
+        return Err(err("SISR chunk table does not tile the payload exactly"));
+    }
+    Ok(())
+}
+
+pub(crate) fn sha256_digest(data: &[u8]) -> [u8; 32] {
+    Sha256::digest(data).into()
+}
+
+/// Constant-time 32-byte digest comparison. Integrity hashes are public, but
+/// the codebase's policy is to compare every verification digest without a
+/// timing side-channel so a future secret-bearing digest can't regress.
+pub(crate) fn ct_eq_hash(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    a.ct_eq(b).into()
 }
 
 fn signing_message(merkle_root: &[u8; 32], manifest_bytes: &[u8]) -> Vec<u8> {
@@ -436,5 +508,95 @@ mod tests {
             artifacts.manifest.chunks.len(),
             artifacts.manifest_bytes.len(),
         );
+    }
+
+    /// Builds a signed artifact set plus the ext header a binary would embed.
+    fn signed_ext(
+        payload: &[u8],
+        key: &SigningKey,
+    ) -> (crate::sisr_header::SisrFooterExt, DeltaManifest, Vec<u8>) {
+        let config = SisrBuildConfig {
+            enabled: true,
+            chunk_target_size: 4096,
+            signing_key: Some(key.clone()),
+        };
+        let artifacts = build_artifacts(payload, &config).unwrap();
+        let ext = crate::sisr_header::SisrFooterExt {
+            sisr_version: crate::sisr_header::SISR_VERSION,
+            chunk_table_offset: 0,
+            chunk_table_len: artifacts.manifest_bytes.len() as u32,
+            merkle_root: artifacts.merkle_root,
+            signature: artifacts.signature,
+        };
+        (ext, artifacts.manifest, payload.to_vec())
+    }
+
+    #[test]
+    fn verify_embedded_sisr_accepts_a_signed_section() {
+        let key = SigningKey::from_bytes(&[5u8; 32]);
+        let payload = random_buf(10_000, 31);
+        let (ext, manifest, payload) = signed_ext(&payload, &key);
+        verify_embedded_sisr(&ext, &manifest, &payload, &[key.verifying_key()]).unwrap();
+    }
+
+    #[test]
+    fn verify_embedded_sisr_rejects_zero_signature() {
+        let key = SigningKey::from_bytes(&[5u8; 32]);
+        let payload = random_buf(10_000, 31);
+        let (mut ext, manifest, payload) = signed_ext(&payload, &key);
+        ext.signature = [0u8; 64];
+        let err =
+            verify_embedded_sisr(&ext, &manifest, &payload, &[key.verifying_key()]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("unsigned"));
+    }
+
+    #[test]
+    fn verify_embedded_sisr_rejects_untrusted_key() {
+        let signer = SigningKey::from_bytes(&[5u8; 32]);
+        let other = SigningKey::from_bytes(&[6u8; 32]);
+        let payload = random_buf(10_000, 31);
+        let (ext, manifest, payload) = signed_ext(&payload, &signer);
+        let err =
+            verify_embedded_sisr(&ext, &manifest, &payload, &[other.verifying_key()]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("signature verification failed"));
+    }
+
+    #[test]
+    fn verify_embedded_sisr_rejects_tampered_payload() {
+        let key = SigningKey::from_bytes(&[5u8; 32]);
+        let payload = random_buf(10_000, 31);
+        let (ext, manifest, mut payload) = signed_ext(&payload, &key);
+        let last = payload.len() - 1;
+        payload[last] ^= 1;
+        let err =
+            verify_embedded_sisr(&ext, &manifest, &payload, &[key.verifying_key()]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("SHA-256 verification"));
+    }
+
+    #[test]
+    fn verify_embedded_sisr_rejects_wrong_payload_length() {
+        let key = SigningKey::from_bytes(&[5u8; 32]);
+        let payload = random_buf(10_000, 31);
+        let (ext, manifest, mut payload) = signed_ext(&payload, &key);
+        payload.pop();
+        let err =
+            verify_embedded_sisr(&ext, &manifest, &payload, &[key.verifying_key()]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("payload_len"));
+    }
+
+    #[test]
+    fn verify_embedded_sisr_rejects_merkle_mismatch() {
+        let key = SigningKey::from_bytes(&[5u8; 32]);
+        let payload = random_buf(10_000, 31);
+        let (mut ext, manifest, payload) = signed_ext(&payload, &key);
+        ext.merkle_root[0] ^= 1;
+        let err =
+            verify_embedded_sisr(&ext, &manifest, &payload, &[key.verifying_key()]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("Merkle root does not match"));
     }
 }

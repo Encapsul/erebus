@@ -5,64 +5,53 @@
 [![Version](https://img.shields.io/badge/version-0.5.0-green.svg)](https://github.com/Tednoob17/erebus/releases)
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)]()
-[![Runtimes](https://img.shields.io/badge/runtimes-13-purple.svg)](#supported-runtimes)
+[![Runtimes](https://img.shields.io/badge/runtimes-2-purple.svg)](#supported-runtimes)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Tednoob17/erebus/pulls)
 
-**Package any app into a single self-extracting binary.**
+**Package any AI agent into a single self-extracting binary.**
 
-erebus compiles any web, server, or CLI application into a single self-contained executable. Supported runtimes: Python, Node.js, Deno, Java, Ruby, .NET/C#, Go, PHP, Perl, Binary, Hugo, Electron, Wasm.
+erebus compiles AI agents (llama.cpp + GGUF model + Python API server) into a single self-contained executable. Supported runtimes: Python (FastAPI/Flask/Django), Binary (llama.cpp inference).
 
-The binary format (`[stub][payload][metadata][footer]`) is a universal executable artifact — capable of transporting an application, an AI agent, a microservice, or a plugin as a single portable unit.
+The binary format (`[stub][payload][metadata][footer]`) is a universal executable artifact — capable of transporting an AI agent, its model weights, and inference engine as a single portable unit.
 
 ## Quick start
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Tednoob17/erebus/main/scripts/install.sh | bash
 erebus doctor
-cd your-app && erebus build . -o myapp.ere
-./myapp.ere
+cd your-app && erebus build . -o myapp.erebus
+./myapp.erebus
 ```
 
 ## Overview
 
-erebus transforms any application directory into a portable, self-extracting binary that can run on target machines without requiring the host runtime. This includes:
+erebus transforms any AI agent directory into a portable, self-extracting binary that can run on target machines without requiring the host runtime. This includes:
 
-- **Python applications** — Django, FastAPI, Flask
-- **Node.js applications** — Next.js, Express, Fastify
-- **Go binaries** — Standalone executables
+- **Python applications** — FastAPI, Flask, Django (API server, orchestration, tools)
+- **Binary executables** — llama.cpp inference engine (model runner)
 - **Namespace isolation** — user/mount namespaces + optional seccomp (not full Docker sandboxing)
+- **Delta updates (SISR)** — 95% smaller model updates via content-defined chunking
 
-The tool handles runtime detection, dependency installation, compression, and signing through a unified, language-agnostic pipeline.
+The tool handles runtime detection, dependency installation, compression, and signing through a unified, language-agnostic pipeline optimized for AI agents.
 
 ## Supported runtimes
 
 | Runtime | Detection | Framework support |
 |---------|-----------|-------------------|
-| Python | `requirements.txt`, `pyproject.toml`, `Pipfile` | Django, FastAPI, Flask |
-| Node.js | `package.json` | Next.js, Nuxt, Astro, Remix, SvelteKit, Express, Fastify, Hono |
-| Deno | `deno.json`, `deno.jsonc` | Fresh |
-| Java | `pom.xml`, `build.gradle` | Spring Boot |
-| Ruby | `Gemfile` | Sinatra, Rails |
-| .NET/C# | `*.csproj`, `*.sln` | ASP.NET |
-| Go | `go.mod` | Static binary |
-| PHP | `composer.json` | Laravel, Symfony, WordPress |
-| Perl | `Makefile.PL`, `cpanfile` | Mojolicious, Dancer |
-| Hugo | `hugo.toml`, `hugo.yaml` | Static site generator |
-| Electron | Electron app directory | Electron apps |
-| Wasm | `index.wasm`, `app.wasm`, `main.wasm` | WebAssembly runtimes |
-| Binary | ELF executable | Any static or dynamic binary |
+| Python | `requirements.txt`, `pyproject.toml`, `Pipfile`, `setup.py` | FastAPI, Flask, Django |
+| Binary | ELF executable (llama.cpp, etc.) | Any static or dynamic binary |
 
 Each runtime has specific detection logic and framework support that triggers when building.
 
 ## Binary format
 
-The `.ere` binary is structured as:
+The `.erebus` binary is structured as:
 
 ```
 [stub][payload][metadata][footer]
 ```
 
-- **Stub**: statically-linked launcher (musl ELF on Linux) that reads its own binary, verifies integrity, extracts the payload, and `execvp`s the entrypoint
+- **Stub**: statically-linked launcher — Mach-O on macOS, PE on Windows, musl ELF on Linux — that reads its own binary, verifies integrity, extracts the payload, and `execvp`s the entrypoint
 - **Payload**: zstd-compressed tar archive (or squashfs) of the application + runtime
 - **Metadata**: JSON with runtime info, entrypoint, layers, capabilities, version
 - **Footer**: 4-byte magic `0xBEEF_CAFE`, format version, integrity SHA-256 hash
@@ -72,7 +61,7 @@ Format versions: v2 (plain), v3 (signed), v4 (encrypted), v5 (squashfs).
 ## Target & host support
 
 `erebus build --target <list>` packages one artifact **per target**. A comma-separated
-list emits one `<name>-<target>.ere` per target into the output directory. The
+list emits one `<name>-<target>.erebus` per target into the output directory. The
 stubs and (where available) embedded runtimes are cross-selected by target.
 
 | `--target` short form | Resolved triple | Stub | Runtime arch | Notes |
@@ -94,11 +83,11 @@ stubs and (where available) embedded runtimes are cross-selected by target.
 
 | Command | Description |
 |---------|-------------|
-| `erebus build <dir>` | Package an app directory into a `.ere` file |
-| `erebus inspect <file>` | Read metadata from a `.ere` file |
-| `erebus scan [dir]` | Find `.ere` files recursively and display metadata |
-| `erebus sign <file>` | Sign a `.ere` with an Ed25519 private key |
-| `erebus verify <file>` | Verify the signature of a `.ere` against trusted keys |
+| `erebus build <dir>` | Package an app directory into a `.erebus` file |
+| `erebus inspect <file>` | Read metadata from a `.erebus` file |
+| `erebus scan [dir]` | Find `.erebus` files recursively and display metadata |
+| `erebus sign <file>` | Sign a `.erebus` with an Ed25519 private key |
+| `erebus verify <file>` | Verify the signature of a `.erebus` against trusted keys |
 | `erebus keygen` | Generate an Ed25519 keypair for signing |
 | `erebus trust <keyfile>` | Add a public key to the trusted keys directory |
 | `erebus doctor` | Check system prerequisites and report missing dependencies |
@@ -112,7 +101,7 @@ stubs and (where available) embedded runtimes are cross-selected by target.
 - **Global `--verbose`** flag for detailed output on any command
 - **`--strict`** mode on `erebus doctor` for strict validation
 - **`--dry-run`** flag on build, inspect, scan for preview operations
-- **`.ere.toml`** configuration file support
+- **`.erebus.toml`** configuration file support
 - **Rust-based CLI** with zero Python dependency at runtime
 - **Self-updating** via `erebus upgrade`
 
@@ -120,34 +109,39 @@ stubs and (where available) embedded runtimes are cross-selected by target.
 
 ```bash
 # Basic build
-erebus build ./myapp -o myapp.ere
+erebus build ./myapp -o myapp.erebus
 
 # Embed interpreter for self-contained binaries
-erebus build ./myapp --embed-interpreter python3 -o myapp.ere
+erebus build ./myapp --embed-interpreter python3 -o myapp.erebus
 
 # Multi-arch packaging: one artifact per target
-erebus build ./myapp --target linux-x64,linux-arm64 -o out/app.ere
-#  -> out/app-linux-x64.ere, out/app-linux-arm64.ere
+erebus build ./myapp --target linux-x64,linux-arm64 -o out/app.erebus
+#  -> out/app-linux-x64.erebus, out/app-linux-arm64.erebus
 
 # Cross-OS packaging: Windows artifact built on Linux/macOS
-erebus build ./myapp --target win-x64 -o out/app.ere
+erebus build ./myapp --target win-x64 -o out/app.erebus
 #  -> out/app-win-x64.exe (stubs+runtime selected for the target OS)
 
 # Sign and encrypt
-erebus keygen --key-dir ~/.ere/keys
-erebus build ./myapp --sign --key ~/.ere/keys/*.key -o myapp.ere
-erebus build ./myapp --encrypt --key ~/.ere/keys/*.key -o myapp-secure.ere
+# `--encrypt` is obfuscation only (AES key lives in the file metadata —
+# possession of the binary decrypts it). Use `--sign` for authenticity.
+# `--encrypt` and `--enable-sisr` are mutually exclusive.
+erebus keygen --key-dir ~/.erebus/keys
+erebus build ./myapp --sign --key ~/.erebus/keys/*.key -o myapp.erebus
+erebus build ./myapp --encrypt --key ~/.erebus/keys/*.key -o myapp-secure.erebus
 
 # Self-updating binary with SISR (delta updates)
-erebus build ./myapp --enable-sisr --update-url https://updates.example.com -o myapp.ere
-#  -> myapp.ere + myapp.ere.manifest
+# `--enable-sisr` and `--encrypt` cannot be combined (Sisir chunking is
+# incompatible with full-payload AES-GCM). Use one or the other.
+erebus build ./myapp --enable-sisr --update-url https://updates.example.com -o myapp.erebus
+#  -> myapp.erebus + myapp.erebus.manifest
 
 # Persistent storage
-erebus build ./myapp --persist -o myapp.ere
+erebus build ./myapp --persist -o myapp.erebus
 #  -> ERE_PERSIST_DIR injected into app environment
 
 # Environment injection
-erebus build ./myapp --env-file .env --env KEY=VALUE -o myapp.ere
+erebus build ./myapp --env-file .env --env KEY=VALUE -o myapp.erebus
 ```
 
 ### Embedded Runtime Options
@@ -193,7 +187,7 @@ erebus build ./myapp --clear-cache
 
 ## Configuration
 
-Place a `.ere.toml` in your app directory. CLI flags override config file values.
+Place a `.erebus.toml` in your app directory. CLI flags override config file values.
 
 ```toml
 [package]
@@ -252,10 +246,11 @@ cargo build --release
 
 ## Security
 
-- **Ed25519 signing**: binaries can be signed and verified against trusted keys
-- **Encryption**: AES-256-GCM payload encryption with key derivation
+- **Ed25519 signing**: binaries can be signed and verified against trusted keys (`~/.erebus/trusted-keys/`, or `$ERE_TRUSTED_DIR`)
+- **Encryption (obfuscation only)**: `--encrypt` uses AES-256-GCM on the payload, but the key is stored in the file's own metadata — possession of the binary is sufficient to decrypt it. It deters casual inspection, **not** an attacker who holds the file. Byte authenticity is governed by `FLAG_SIGNED` + the trusted-keys directory; `--encrypt` and `--enable-sisr` are mutually exclusive.
 - **SHA-256 integrity**: footer hash verifies payload tampering at runtime
-- **Namespace isolation**: Linux builds use user/mount namespaces + optional seccomp
+- **Namespace isolation**: Linux builds use user/mount namespaces + optional seccomp (fail-closed); macOS uses App Sandbox (`macos_sandbox`); Windows uses process isolation (`win`/supervisor). `--isolation sandbox` must not silently degrade.
+- **Delta updates (Sisir)**: the stub verifies an embedded Ed25519 `SisirFooterExt.signature` (of the delta manifest) at cold start — fail-closed, with `ERE_SISR_ALLOW_UNSIGNED=1` as an explicit escape hatch for air-gapped/untrusted-update scenarios.
 - **CVE-2023-48022**: ed25519-dalek pinned to >= 2.1.0 to ensure Ed25519 bit is set
 
 ## Contributing

@@ -1,6 +1,6 @@
 mod args;
-mod deps;
-mod payload;
+pub(crate) mod deps;
+pub(crate) mod payload;
 mod pipeline;
 mod sign;
 mod sisr;
@@ -40,9 +40,8 @@ pub fn run(args: BuildArgs, verbose: bool) -> Result<()> {
         .with_context(|| format!("invalid --isolation value: '{isolation}'"))?;
 
     // Detect runtime
-    let runtime = detect::detect_runtime(&app_dir).context(
-        "could not detect runtime — supported: python, node, deno, java, ruby, dotnet, go, php, perl, binary",
-    )?;
+    let runtime = detect::detect_runtime(&app_dir)
+        .context("could not detect runtime — supported: python, binary")?;
     let runtime_name = runtime.name().to_string();
 
     eprintln!("Detected runtime: {runtime_name}");
@@ -143,12 +142,6 @@ fn print_dry_run(args: &BuildArgs, plan: &BuildPlan, target: Option<&str>, outpu
     }
     if args.update {
         eprintln!("  Update:    yes (incremental)");
-    }
-    if args.tree_shake {
-        eprintln!("  Tree-shake: yes");
-    }
-    if args.minify {
-        eprintln!("  Minify:    yes");
     }
     if args.persist {
         eprintln!("  Persist:   yes");

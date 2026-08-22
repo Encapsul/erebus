@@ -27,6 +27,7 @@ pub const FLAG_SISR: u8 = 0x04;
 
 pub const ARCH_X86_64: u8 = 0x01;
 pub const ARCH_AARCH64: u8 = 0x02;
+pub const ARCH_RISCV64: u8 = 0x03;
 
 pub const SIG_BLOCK_SIZE: usize = 68;
 pub const SIG_BLOCK_SIZE_FIELD: usize = 4;

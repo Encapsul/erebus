@@ -97,6 +97,30 @@ fn updated_binary_runs_the_new_payload() {
     );
 }
 
+/// Roadmap #45 anchor at e2e level: the binary rebuilt by a REAL update
+/// carries the remote manifest's verified signature, so it stays verifiable
+/// at rest instead of degrading to integrity-only.
+#[test]
+fn updated_binary_carries_the_publisher_signature() {
+    let e = env(BODY_V1, BODY_V2);
+    let update = run_update(&e);
+    assert!(
+        update.status.success(),
+        "{}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+
+    let data = std::fs::read(&e.app).unwrap();
+    let (ext, _) = erebus_core::sisr_header::read_sisr(&mut std::io::Cursor::new(&data))
+        .unwrap()
+        .expect("updated binary must embed a SISR section");
+    assert_ne!(ext.signature, [0u8; 64], "signature must not be zeroed");
+    assert_eq!(
+        ext.signature, e.staged.remote.signature,
+        "rebuilt binary must carry the verified remote signature"
+    );
+}
+
 /// Non-regression: the local `$ERE_SISR_MANIFEST` staging path (mission 6)
 /// still applies the delta and runs the new version.
 #[test]

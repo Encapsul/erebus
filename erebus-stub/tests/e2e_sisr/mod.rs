@@ -116,9 +116,24 @@ pub fn build_erebus(work: &Path, stub: &Path, body: &str, shared: &[u8]) {
         chunk_target_size: CHUNK_TARGET,
         signing_key: Some(key()),
     };
+    assemble(work, stub, body, shared, &config);
+}
+
+/// Same as [`build_erebus`] but with an unsigned SISR section (no key) —
+/// what `--enable-sisr` without `--key` produces.
+pub fn build_erebus_unsigned(work: &Path, stub: &Path, body: &str, shared: &[u8]) {
+    let config = SisrBuildConfig {
+        enabled: true,
+        chunk_target_size: CHUNK_TARGET,
+        signing_key: None,
+    };
+    assemble(work, stub, body, shared, &config);
+}
+
+fn assemble(work: &Path, stub: &Path, body: &str, shared: &[u8], config: &SisrBuildConfig) {
     let stub_bytes = fs::read(stub).unwrap();
     let body_bytes = payload(body, shared);
-    let artifacts = build_artifacts(&body_bytes, &config).unwrap();
+    let artifacts = build_artifacts(&body_bytes, config).unwrap();
     let out = work.join("app.erebus");
     assemble_erebus(
         &out,

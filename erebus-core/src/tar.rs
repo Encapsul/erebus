@@ -82,6 +82,36 @@ pub fn extract_tar_gz<R: io::Read>(reader: R, dest: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Extraction bound for tooling-side unpacks (hot-swap). The stub enforces
+/// its own stricter, env-tunable limits at runtime; this bound only stops a
+/// runaway/corrupt archive from filling the disk during local CLI work.
+pub const MAX_TOOL_EXTRACTION_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+/// Extract a zstd-compressed tar stream into `dest`, with entry-level path
+/// sanitization (`unpack_in` rejects traversal) and an aggregate size bound.
+///
+/// Streaming: the decompressor never buffers the full uncompressed tar.
+pub fn extract_tar_zstd<R: io::Read>(reader: R, dest: &Path) -> io::Result<()> {
+    let decoder =
+        zstd::stream::Decoder::new(reader).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let mut archive = tar::Archive::new(decoder);
+    archive.set_preserve_permissions(true);
+    archive.set_overwrite(true);
+    let mut total: u64 = 0;
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        total = total.saturating_add(entry.size());
+        if total > MAX_TOOL_EXTRACTION_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "archive exceeds tooling extraction bound",
+            ));
+        }
+        entry.unpack_in(dest)?;
+    }
+    Ok(())
+}
+
 /// Recursively collect relative paths of all files and directories.
 fn collect_entries(root: &Path) -> io::Result<Vec<String>> {
     let mut entries = Vec::new();

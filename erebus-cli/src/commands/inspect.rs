@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Args;
-use erebus_core::format::{Footer, ARCH_AARCH64, ARCH_X86_64, FLAG_ENCRYPTED};
+use erebus_core::format::{Footer, ARCH_AARCH64, ARCH_RISCV64, ARCH_X86_64, FLAG_ENCRYPTED};
 use erebus_core::paths::format_size;
 use std::path::PathBuf;
 
@@ -35,6 +35,7 @@ pub fn run(args: InspectArgs) -> Result<()> {
     let arch_name = match footer.arch {
         ARCH_X86_64 => "x86_64",
         ARCH_AARCH64 => "aarch64",
+        ARCH_RISCV64 => "riscv64",
         _ => "unknown",
     };
 

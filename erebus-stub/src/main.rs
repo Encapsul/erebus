@@ -18,6 +18,7 @@ mod health_gate;
 mod landlock;
 #[cfg(target_os = "macos")]
 mod macos_sandbox;
+mod mmap;
 #[cfg(target_os = "linux")]
 mod namespace;
 mod seccomp;
@@ -33,7 +34,7 @@ use erebus_core::sisr::health::{HealthCheckPolicy, HealthState, HealthStore};
 use erebus_core::sisr::resilience::{
     backup_path_for, create_backup, discard_backup, restore_backup,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::ffi::CString;
 use std::fs::{self, File};
@@ -46,7 +47,7 @@ use std::path::{Path, PathBuf};
 use std::process::exit;
 
 /// Standard library search paths for `LD_LIBRARY_PATH`.
-/// Kept in sync with cli/erebus/build.py `LD_LIBRARY_PATH` construction.
+/// Mirrors the search path construction of the packaged rootfs layout.
 /// Linux-only: Windows loads DLLs from the exe dir / PATH / System32.
 #[cfg(all(unix, target_arch = "x86_64"))]
 const LD_PATHS: &[&str] = &[
@@ -68,6 +69,18 @@ const LD_PATHS: &[&str] = &[
 const LD_PATHS: &[&str] = &["lib", "usr/lib", "usr/lib/i386-linux-gnu"];
 #[cfg(all(unix, target_arch = "arm"))]
 const LD_PATHS: &[&str] = &["lib", "usr/lib", "usr/lib/arm-linux-gnueabihf"];
+// RISC-V musl rootfs layout has no Debian-style triplet dirs; generic paths
+// (plus the absolute fallback below) cover it.
+#[cfg(all(
+    unix,
+    not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "x86",
+        target_arch = "arm"
+    ))
+))]
+const LD_PATHS: &[&str] = &["lib", "lib64", "usr/lib", "usr/lib64"];
 
 /// Absolute forms of `LD_PATHS`, used after `pivot_root` where the process
 /// root is the rootfs. `execvp` and the dynamic loader resolve relative PATH
@@ -106,7 +119,6 @@ pub struct Metadata {
     #[serde(default)]
     version: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)]
     runtime: String,
     #[serde(default)]
     entrypoint: Vec<String>,
@@ -152,10 +164,10 @@ impl Metadata {
     /// `entrypoint` field for legacy binaries.
     pub fn effective_entrypoint(&self) -> &[String] {
         if let Some(layer_name) = &self.entrypoint_layer {
-            if let Some(layer) = self.layers.iter().find(|l| l.name() == layer_name) {
-                if let erebus_core::layer::SerializableLayer::Runtime(rt) = layer {
-                    return &rt.entrypoint;
-                }
+            if let Some(erebus_core::layer::SerializableLayer::Runtime(rt)) =
+                self.layers.iter().find(|l| l.name() == layer_name)
+            {
+                return &rt.entrypoint;
             }
         }
         &self.entrypoint
@@ -165,14 +177,115 @@ impl Metadata {
     /// `entrypoint_layer` is set, falling back to the flat `runtime` field.
     pub fn effective_runtime(&self) -> &str {
         if let Some(layer_name) = &self.entrypoint_layer {
-            if let Some(layer) = self.layers.iter().find(|l| l.name() == layer_name) {
-                if let erebus_core::layer::SerializableLayer::Runtime(rt) = layer {
-                    return &rt.name;
-                }
+            if let Some(erebus_core::layer::SerializableLayer::Runtime(rt)) =
+                self.layers.iter().find(|l| l.name() == layer_name)
+            {
+                return &rt.name;
             }
         }
         &self.runtime
     }
+
+    /// Returns the capabilities requested by the entrypoint layer. If
+    /// `entrypoint_layer` points to a `RuntimeLayer`, its `capabilities` vec
+    /// is returned; otherwise falls back to an empty slice (legacy binaries
+    /// with no layer system).
+    pub fn effective_capabilities(&self) -> &[erebus_core::layer::Capability] {
+        if let Some(layer_name) = &self.entrypoint_layer {
+            if let Some(erebus_core::layer::SerializableLayer::Runtime(rt)) =
+                self.layers.iter().find(|l| l.name() == layer_name)
+            {
+                return &rt.capabilities;
+            }
+        }
+        &[]
+    }
+}
+
+/// Layer manifest written to cache after extraction.
+///
+/// Records which layers compose the extracted rootfs, enabling layer-aware
+/// cache validation (warm start), hot-swap, and lazy-loading (Phases 1-3).
+/// Stored as `cache_root/.erebus-layers.json`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct LayerManifest {
+    pub version: u8,
+    pub layers: Vec<LayerManifestEntry>,
+}
+
+/// A single entry in the layer manifest.
+///
+/// Mirrors the relevant subset of `SerializableLayer` for cache tracking.
+/// The `rootfs_path` is where the layer's content lives inside the extracted
+/// rootfs (e.g. `/app` for a `RuntimeLayer`, `/models/llama.gguf` for a `ModelLayer`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct LayerManifestEntry {
+    pub name: String,
+    pub kind: String,
+    pub rootfs_path: Option<String>,
+}
+
+impl LayerManifest {
+    fn from_metadata(meta: &Metadata) -> Self {
+        let layers = meta
+            .layers
+            .iter()
+            .map(|layer| {
+                let rootfs_path = layer_to_rootfs_path(layer);
+                LayerManifestEntry {
+                    name: layer.name().to_string(),
+                    kind: layer_kind_str(layer.kind()),
+                    rootfs_path,
+                }
+            })
+            .collect();
+        LayerManifest { version: 1, layers }
+    }
+}
+
+fn layer_kind_str(kind: erebus_core::layer::LayerKind) -> String {
+    match kind {
+        erebus_core::layer::LayerKind::Runtime => "runtime",
+        erebus_core::layer::LayerKind::Model => "model",
+        erebus_core::layer::LayerKind::Tool => "tool",
+        erebus_core::layer::LayerKind::Config => "config",
+        erebus_core::layer::LayerKind::Custom => "custom",
+    }
+    .to_string()
+}
+
+/// Resolve the primary rootfs path for a layer type.
+fn layer_to_rootfs_path(layer: &erebus_core::layer::SerializableLayer) -> Option<String> {
+    match layer {
+        erebus_core::layer::SerializableLayer::Runtime(_)
+        | erebus_core::layer::SerializableLayer::Config(_) => Some("/app".to_string()),
+        erebus_core::layer::SerializableLayer::Model(m) => Some(m.path.clone()),
+        erebus_core::layer::SerializableLayer::Tool(_) => None,
+        erebus_core::layer::SerializableLayer::Custom { extra, .. } => {
+            extra.get("path").and_then(|v| v.as_str()).map(String::from)
+        }
+    }
+}
+
+/// Write the layer manifest to the cache after extraction.
+///
+/// # Errors
+///
+/// Returns `io::Error` if the manifest JSON cannot be serialized or the
+/// cache directory is not writable.
+pub fn write_layer_manifest(cache_root: &Path, meta: &Metadata) -> std::io::Result<()> {
+    let manifest = LayerManifest::from_metadata(meta);
+    let path = cache_root.join(".erebus-layers.json");
+    let json = serde_json::to_string(&manifest)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(path, json)
+}
+
+/// Load the layer manifest from cache (warm start), returning None if absent.
+pub fn load_layer_manifest(cache_root: &Path) -> Option<LayerManifest> {
+    let path = cache_root.join(".erebus-layers.json");
+    let data = std::fs::read(&path).ok()?;
+    serde_json::from_slice(&data).ok()
 }
 
 #[derive(Deserialize)]
@@ -239,14 +352,14 @@ fn run() -> io::Result<()> {
 
     // Reject crafted metadata with an unknown runtime before doing any
     // extraction/update work (roadmap #40 — unknown runtime used to silently
-    // map to bash).
-    if detect::Runtime::from_name(&meta.runtime).is_none() {
+    // map to bash). Validation goes through `effective_runtime()` so a binary
+    // whose entrypoint lives in a layer is checked against THAT layer's
+    // runtime, not the legacy flat field.
+    let runtime = meta.effective_runtime().to_string();
+    if detect::Runtime::from_name(&runtime).is_none() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!(
-                "unsupported runtime '{}' in metadata — supported: python, deno, node, electron, java, ruby, dotnet, go, php, perl, hugo, wasm, binary",
-                meta.runtime
-            ),
+            format!("unsupported runtime '{runtime}' in metadata — supported: python, binary"),
         ));
     }
 
@@ -284,14 +397,33 @@ fn run() -> io::Result<()> {
     let ready_marker = cache_root.join(".ready");
 
     if ready_marker.exists() && extraction::cache_root_trustworthy(&cache_root) {
-        // Warm path: cache exists, skip payload read entirely. The cache is
-        // only trusted after `cache_root_trustworthy` (right owner, sane
-        // perms) — a foreign/writable cache falls through to a fresh
-        // extraction instead of executing unverified bytes.
-        if verbose {
-            eprintln!("[erebus] warm start: cache hit {}", hash);
+        // Verify the on-disk source still matches what was extracted:
+        // a byte-flip in the payload would keep the footer's SHA-256
+        // cache key unchanged, so we additionally bind the cache to the
+        // source file's size + mtime to detect tampering.
+        let source_meta = fs::metadata(&bin_path)
+            .unwrap_or_else(|_| fs::metadata(self_exe().unwrap_or_default()).unwrap());
+
+        let src_valid = extraction::source_manifest_matches(
+            &cache_root,
+            source_meta.len(),
+            source_meta
+                .modified()
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+        );
+
+        if src_valid {
+            if verbose {
+                eprintln!("[erebus] warm start: cache hit {}", hash);
+            }
+            return exec::exec_app(&meta, &rootfs, &app_config);
         }
-        return exec::exec_app(&meta, &rootfs, &app_config);
+
+        // Source changed since last extraction — fall through to cold path
+        // which will re-verify SHA-256 + signature and rebuild the cache.
+        if verbose {
+            eprintln!("[erebus] source changed since cache — re-verifying");
+        }
     }
 
     // 3. Cold path: read payload + verify + extract.
@@ -299,11 +431,10 @@ fn run() -> io::Result<()> {
         eprintln!("[erebus] cold start: extracting {}", meta.name);
     }
 
-    let payload = read_at(
-        &mut exe,
-        footer.payload_offset,
-        footer.payload_csize as usize,
-    )?;
+    // Lazy loading: mmap the payload range instead of heap-allocating it, so
+    // multi-GB model payloads stay in page cache rather than spiking RSS.
+    // Falls back to a plain read when mmap is unavailable or ERE_NO_MMAP=1.
+    let payload = mmap::read_payload(&exe, footer.payload_offset, footer.payload_csize as usize)?;
 
     // Verify Ed25519 signature. Enforce a consistent signature state first:
     // a sig block must exist iff FLAG_SIGNED is set — a flag without a block
@@ -330,18 +461,37 @@ fn run() -> io::Result<()> {
     // avoiding a 2× memory spike at cold start.
     crypto::verify_sha256_parts(&payload, &meta_bytes, &footer.payload_sha256)?;
 
+    // At-rest authenticity for SISR binaries (roadmap #45): the embedded
+    // delta manifest must carry a valid publisher signature and its chunk
+    // table must bind every byte of the payload. Updates keep this property
+    // because the engine carries over the remote manifest's verified
+    // signature. `ERE_SISR_ALLOW_UNSIGNED` is the explicit escape hatch for
+    // legacy unsigned builds — fail closed otherwise.
+    if footer.has_sisr() && std::env::var_os("ERE_SISR_ALLOW_UNSIGNED").is_none() {
+        let (ext, sisr_manifest) = erebus_core::sisr_header::read_sisr(&mut exe)?
+            .ok_or_else(|| err("SISR flag set but section unreadable"))?;
+        let keys = crypto::load_trusted_keys()?;
+        erebus_core::sisr_stage::verify_embedded_sisr(&ext, &sisr_manifest, &payload, &keys)?;
+        if verbose {
+            eprintln!("[erebus] SISR section verified (at-rest)");
+        }
+    }
+
     // Decrypt payload (v4+ with AES-256-GCM).
     // Happens AFTER signature + integrity verification — we only decrypt
-    // what's already proven authentic.
+    // what's already proven authentic. Decryption always materializes a heap
+    // buffer; plaintext payloads keep their mmap-backed view.
     let payload = if footer.crypto_suite() == format::CRYPTO_AES_256_GCM {
-        if let Some(ref crypto) = meta.crypto {
-            if verbose {
-                eprintln!("[erebus] decrypting AES-256-GCM payload");
+        let decrypted = match meta.crypto {
+            Some(ref crypto) => {
+                if verbose {
+                    eprintln!("[erebus] decrypting AES-256-GCM payload");
+                }
+                crypto::decrypt_aes_gcm(&payload, crypto)?
             }
-            crypto::decrypt_aes_gcm(&payload, crypto)?
-        } else {
-            return Err(err("encrypted payload but no crypto metadata"));
-        }
+            None => return Err(err("encrypted payload but no crypto metadata")),
+        };
+        mmap::PayloadBuf::Heap(decrypted)
     } else {
         payload
     };
@@ -358,11 +508,25 @@ fn run() -> io::Result<()> {
         let _ = gc_extraction_cache(gc_limit);
         let is_squashfs = meta.payload_format == format::PAYLOAD_FORMAT_SQUASHFS;
         if is_squashfs {
-            extract_squashfs_atomic(&[payload.as_slice()], &cache_root)?;
+            extract_squashfs_atomic(&[&payload], &cache_root)?;
         } else {
-            extract_atomic(&[payload.as_slice()], &cache_root)?;
+            extract_atomic(&[&payload], &cache_root, declared_model_bytes(&meta))?;
         }
+        write_layer_manifest(&cache_root, &meta)?;
     }
+
+    // Record source identity after every successful verification/extraction
+    // so the warm path can detect payload tampering (byte-flips that don't
+    // change the footer's SHA-256 cache key).
+    let src_meta = fs::metadata(&bin_path)
+        .unwrap_or_else(|_| fs::metadata(self_exe().unwrap_or_default()).unwrap());
+    let _ = extraction::write_source_manifest(
+        &cache_root,
+        src_meta.len(),
+        src_meta
+            .modified()
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+    );
 
     // 4. Post-update health gate. A `Pending` record means an update was
     // applied but not yet validated: run the new version supervised and roll
@@ -483,7 +647,14 @@ fn maybe_apply_sisr_update() -> io::Result<Option<PathBuf>> {
     refuse_quarantined_target(&store, &current, &remote.manifest, &fetcher)?;
 
     let updated = apply_with_rollback_snapshot(&current, &store, |path| {
-        erebus_core::sisr::engine::SisrEngine.apply_update(path, &remote.manifest, &fetcher)
+        erebus_core::sisr::engine::SisrEngine.apply_update(
+            path,
+            &remote.manifest,
+            &fetcher,
+            // Carried into the rebuilt binary's SISR extension so the
+            // updated binary keeps its at-rest authenticity (roadmap #45).
+            &remote.signature,
+        )
     })?;
     Ok(Some(updated))
 }
@@ -902,6 +1073,8 @@ fn remote_update(base: &str) -> io::Result<()> {
             path,
             &remote.manifest,
             &fetcher,
+            // Publisher-signed link embedded in the rebuilt binary (roadmap #45).
+            &remote.signature,
         )?;
         eprintln!(
             "[erebus] update applied: {} chunks reused ({}), {} chunks fetched ({}), total {total}",
@@ -1114,8 +1287,21 @@ fn gc_extraction_cache(max_entries: usize) -> io::Result<()> {
     Ok(())
 }
 
-fn extract_atomic(blobs: &[&[u8]], cache_root: &Path) -> io::Result<()> {
-    extraction::extract_atomic(blobs, cache_root)
+fn extract_atomic(blobs: &[&[u8]], cache_root: &Path, model_bytes: u64) -> io::Result<()> {
+    extraction::extract_atomic(blobs, cache_root, model_bytes)
+}
+
+/// Sum of declared `ModelLayer` sizes in the artifact metadata. These bytes are
+/// legitimate payload (AI weights), not a decompression bomb, so extraction
+/// limits are raised to accommodate them.
+fn declared_model_bytes(meta: &Metadata) -> u64 {
+    meta.layers
+        .iter()
+        .filter_map(|l| match l {
+            erebus_core::layer::SerializableLayer::Model(m) => Some(m.size),
+            _ => None,
+        })
+        .fold(0u64, u64::saturating_add)
 }
 
 fn extract_squashfs_atomic(blobs: &[&[u8]], cache_root: &Path) -> io::Result<()> {
@@ -1366,5 +1552,92 @@ mod tests {
             result.is_ok(),
             "a sig-sized gap without size field 64 is not a signature block"
         );
+    }
+
+    #[test]
+    fn layer_manifest_roundtrip_from_metadata() {
+        let rt = erebus_core::layer::RuntimeLayer {
+            name: "python3".into(),
+            interpreter: "python3".into(),
+            entrypoint: vec!["python3 /app/main.py".into()],
+            version: Some("3.11".into()),
+            env: vec![("FOO".into(), "bar".into())],
+            capabilities: vec![erebus_core::layer::Capability::ReadFile],
+        };
+        let model = erebus_core::layer::ModelLayer {
+            name: "llama".into(),
+            format: "gguf".into(),
+            path: "models/llama.gguf".into(),
+            size: 4_000_000_000,
+            metadata: None,
+        };
+        let meta = Metadata {
+            name: "test-app".into(),
+            version: None,
+            runtime: "python3".into(),
+            entrypoint: vec![],
+            env: std::collections::BTreeMap::new(),
+            cwd: None,
+            isolation: 0,
+            seccomp: false,
+            landlock: false,
+            gui: false,
+            services: vec![],
+            crypto: None,
+            payload_format: "zstd+tar".into(),
+            health_check: None,
+            update_url: None,
+            layers: vec![
+                erebus_core::layer::SerializableLayer::Runtime(rt),
+                erebus_core::layer::SerializableLayer::Model(model),
+            ],
+            entrypoint_layer: Some("python3".into()),
+        };
+        let manifest = LayerManifest::from_metadata(&meta);
+        assert_eq!(manifest.version, 1);
+        assert_eq!(manifest.layers.len(), 2);
+        assert_eq!(manifest.layers[0].name, "python3");
+        assert_eq!(manifest.layers[0].kind, "runtime");
+        assert_eq!(manifest.layers[0].rootfs_path, Some("/app".to_string()));
+        assert_eq!(manifest.layers[1].name, "llama");
+        assert_eq!(manifest.layers[1].kind, "model");
+        assert_eq!(
+            manifest.layers[1].rootfs_path,
+            Some("models/llama.gguf".to_string())
+        );
+        // Round-trip through JSON
+        let json = serde_json::to_string(&manifest).unwrap();
+        let parsed: LayerManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, manifest);
+    }
+
+    #[test]
+    fn write_layer_manifest_creates_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let meta = Metadata {
+            name: "test".into(),
+            version: None,
+            runtime: "python3".into(),
+            entrypoint: vec![],
+            env: std::collections::BTreeMap::new(),
+            cwd: None,
+            isolation: 0,
+            seccomp: false,
+            landlock: false,
+            gui: false,
+            services: vec![],
+            crypto: None,
+            payload_format: "zstd+tar".into(),
+            health_check: None,
+            update_url: None,
+            layers: vec![],
+            entrypoint_layer: None,
+        };
+        write_layer_manifest(tmp.path(), &meta).unwrap();
+        assert!(tmp.path().join(".erebus-layers.json").is_file());
+        // Should be loadable back
+        let loaded = load_layer_manifest(tmp.path()).unwrap();
+        assert_eq!(loaded.version, 1);
+        assert!(loaded.layers.is_empty());
     }
 }

@@ -4,6 +4,7 @@
 
 use ed25519_dalek::SigningKey;
 use erebus_core::sisr_stage::sign;
+use std::process::Command;
 
 use super::{env, footer_sha, run_update, BODY_V1, BODY_V2};
 
@@ -54,6 +55,25 @@ fn untrusted_signature_is_refused() {
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(!out.status.success(), "untrusted signature must fail");
     assert_refused(&e, &stderr, "signature verification failed");
+}
+
+/// An unsigned remote manifest (all-zeros signature — what a build without
+/// `--key` produces) must be refused before any write: the update channel
+/// cannot introduce a binary that would fail at-rest verification.
+#[test]
+fn unsigned_remote_manifest_is_refused() {
+    let e = env(BODY_V1, BODY_V2);
+    let unsigned = erebus_core::sisr_stage::RemoteManifest {
+        merkle_root: e.staged.remote.merkle_root,
+        signature: [0u8; 64],
+        manifest: e.staged.remote.manifest.clone(),
+    };
+    e.server.route_manifest(&unsigned.to_bytes().unwrap());
+
+    let out = run_update(&e);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!out.status.success(), "unsigned manifest must fail");
+    assert_refused(&e, &stderr, "signature");
 }
 
 /// Garbage at `/manifest` must be rejected before any write.
@@ -122,4 +142,45 @@ fn merkle_root_mismatch_is_refused() {
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(!out.status.success(), "merkle mismatch must fail");
     assert_refused(&e, &stderr, "Merkle");
+}
+
+/// An unsigned SISR binary (built without `--key`) must be refused at cold
+/// start — at-rest authenticity is mandatory unless explicitly waived.
+#[test]
+fn unsigned_sisr_binary_is_refused_at_cold_start() {
+    let tmp = tempfile::tempdir().unwrap();
+    let work = tmp.path();
+    super::setup_trusted_keys(work);
+    let stub = std::path::PathBuf::from(env!("CARGO_BIN_EXE_erebus-stub"));
+    let shared = super::random_buf(256 << 10, 42);
+    super::build_erebus_unsigned(work, &stub, BODY_V1, &shared);
+    let app = work.join("app.erebus");
+
+    // Default: fail closed.
+    let out = Command::new(&app)
+        .env("ERE_TRUSTED_DIR", work.join("trusted"))
+        .env("XDG_CACHE_HOME", work.join("cache"))
+        .env("XDG_DATA_HOME", work.join("data"))
+        .output()
+        .expect("failed to spawn the unsigned erebus app");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success(),
+        "unsigned SISR must be refused: {stderr}"
+    );
+    assert!(stderr.contains("unsigned"), "stderr must say why: {stderr}");
+
+    // Explicit waiver: the legacy escape hatch lets it run.
+    let out = Command::new(&app)
+        .env("ERE_TRUSTED_DIR", work.join("trusted"))
+        .env("XDG_CACHE_HOME", work.join("cache"))
+        .env("XDG_DATA_HOME", work.join("data"))
+        .env("ERE_SISR_ALLOW_UNSIGNED", "1")
+        .output()
+        .expect("failed to spawn the waived erebus app");
+    assert!(
+        out.status.success(),
+        "waived run must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

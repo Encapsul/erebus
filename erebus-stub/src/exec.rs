@@ -17,7 +17,7 @@ use crate::Metadata;
 #[cfg(unix)]
 use crate::{cstr, to_ptr_vec};
 use erebus_core::detect;
-
+use erebus_core::layer::Capability;
 /// Enter user + mount namespace if isolation >= 2; no-op otherwise.
 /// No-op on non-Linux platforms (no namespaces available).
 #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
@@ -118,51 +118,22 @@ pub fn setup_env(
         env.insert("DATABASE_URL".into(), url);
     }
 
-    // Framework-specific defaults (fill gaps only — .env and operator config win)
-    match meta.runtime.as_str() {
-        "python" => {
-            if !env.contains_key("PYTHONUNBUFFERED") {
-                env.insert("PYTHONUNBUFFERED".into(), "1".into());
-            }
-            if !env.contains_key("DJANGO_SETTINGS_MODULE") {
-                if let Some(settings) = detect_django_settings(rootfs) {
-                    env.insert("DJANGO_SETTINGS_MODULE".into(), settings);
-                }
+    // Framework-specific defaults (fill gaps only — .env and operator config win).
+    // Uses the effective runtime so layer-based binaries get the right defaults.
+    if meta.effective_runtime() == "python" {
+        if !env.contains_key("PYTHONUNBUFFERED") {
+            env.insert("PYTHONUNBUFFERED".into(), "1".into());
+        }
+        if !env.contains_key("DJANGO_SETTINGS_MODULE") {
+            if let Some(settings) = detect_django_settings(rootfs) {
+                env.insert("DJANGO_SETTINGS_MODULE".into(), settings);
             }
         }
-        "node" => {
-            if !env.contains_key("NODE_ENV") {
-                env.insert("NODE_ENV".into(), "production".into());
-            }
-        }
-        "php" => {
-            if !env.contains_key("APP_ENV") {
-                env.insert("APP_ENV".into(), "production".into());
-            }
-            if !env.contains_key("APP_DEBUG") {
-                env.insert("APP_DEBUG".into(), "0".into());
-            }
-        }
-        "ruby" => {
-            if !env.contains_key("RAILS_ENV") {
-                env.insert("RAILS_ENV".into(), "production".into());
-            }
-            if !env.contains_key("RACK_ENV") {
-                env.insert("RACK_ENV".into(), "production".into());
-            }
-        }
-        "java" if !env.contains_key("JAVA_TOOL_OPTIONS") => {
-            if let Ok(java_opts) = std::env::var("JAVA_OPTS").or_else(|_| std::env::var("JVM_OPTS"))
-            {
-                env.insert("JAVA_TOOL_OPTIONS".into(), java_opts);
-            }
-        }
-        _ => {}
     }
 
     // Ensure PORT is set for web frameworks
     if !env.contains_key("PORT") {
-        if let Some(port) = detect_web_port(rootfs, &meta.runtime) {
+        if let Some(port) = detect_web_port(rootfs, meta.effective_runtime()) {
             env.insert("PORT".into(), port.to_string());
         }
     }
@@ -268,50 +239,18 @@ pub fn detect_django_settings(app_dir: &Path) -> Option<String> {
 
 /// Detect default web port from app configuration files.
 pub fn detect_web_port(app_dir: &Path, runtime: &str) -> Option<u16> {
-    match runtime {
-        "python" => {
-            if app_dir.join("manage.py").is_file() {
-                return Some(8000);
+    if runtime == "python" {
+        if app_dir.join("manage.py").is_file() {
+            return Some(8000);
+        }
+        if let Ok(content) = std::fs::read_to_string(app_dir.join("requirements.txt")) {
+            if content.contains("streamlit") {
+                return Some(8501);
             }
-            if let Ok(content) = std::fs::read_to_string(app_dir.join("requirements.txt")) {
-                if content.contains("streamlit") {
-                    return Some(8501);
-                }
-                if content.contains("gradio") {
-                    return Some(7860);
-                }
+            if content.contains("gradio") {
+                return Some(7860);
             }
         }
-        "php" => {
-            if app_dir.join("artisan").is_file() {
-                return Some(8000);
-            }
-            return Some(8080);
-        }
-        "node" => {
-            if let Ok(content) = std::fs::read_to_string(app_dir.join("package.json")) {
-                if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(port) = pkg
-                        .get("scripts")
-                        .and_then(|s| s.get("start"))
-                        .and_then(|v| v.as_str())
-                        .and_then(|cmd| {
-                            if let Some(port_str) = cmd.split("--port").nth(1) {
-                                let port_str = port_str.split_whitespace().next()?;
-                                let port_str = port_str.strip_prefix('=').unwrap_or(port_str);
-                                port_str.parse::<u16>().ok()
-                            } else {
-                                None
-                            }
-                        })
-                    {
-                        return Some(port);
-                    }
-                }
-            }
-        }
-        "ruby" if app_dir.join("bin").join("rails").is_file() => return Some(3000),
-        _ => {}
     }
     None
 }
@@ -601,8 +540,11 @@ fn enter_pivot_sandbox(rootfs: &Path, meta: &Metadata) -> io::Result<()> {
     }
 
     crate::pivot_root_into(rootfs)?;
+
+    let caps = meta.effective_capabilities();
+
     if meta.seccomp {
-        crate::seccomp::install_seccomp_denylist().map_err(|e| {
+        crate::seccomp::install_seccomp_with_capabilities(caps).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::Other,
                 format!("seccomp unavailable, refusing to run without syscall filter: {e}"),
@@ -610,7 +552,7 @@ fn enter_pivot_sandbox(rootfs: &Path, meta: &Metadata) -> io::Result<()> {
         })?;
     }
     if let Some(root) = root_guard {
-        crate::landlock::sandbox(&root).map_err(|e| {
+        crate::landlock::sandbox_with_capabilities(&root, caps).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::Other,
                 format!("landlock unavailable, refusing to run without filesystem sandbox: {e}"),
@@ -623,7 +565,10 @@ fn enter_pivot_sandbox(rootfs: &Path, meta: &Metadata) -> io::Result<()> {
 /// Launch the app entrypoint. Blocks until the app exits (or never returns on
 /// successful execvp).
 pub fn exec_app(meta: &Metadata, rootfs: &Path, app_config: &AppConfig) -> io::Result<()> {
-    if meta.entrypoint.is_empty() {
+    // Single source of truth for the argv template: the layer system when
+    // `entrypoint_layer` is set, the flat field for legacy binaries.
+    let entrypoint = meta.effective_entrypoint();
+    if entrypoint.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "empty entrypoint",
@@ -712,7 +657,7 @@ pub fn exec_app(meta: &Metadata, rootfs: &Path, app_config: &AppConfig) -> io::R
         let mut argv: Vec<CString> = Vec::new();
         if direct_exec {
             argv.push(prog_c.clone());
-            for a in &meta.entrypoint[1..] {
+            for a in &entrypoint[1..] {
                 if let Some(expanded) = expand_env_arg(a, &env) {
                     argv.push(cstr(resolve(&expanded).as_os_str().as_bytes())?);
                 }
@@ -728,7 +673,7 @@ pub fn exec_app(meta: &Metadata, rootfs: &Path, app_config: &AppConfig) -> io::R
                 ));
             }
             argv.push(cstr(interpreter_name.as_bytes())?);
-            for a in &meta.entrypoint[1..] {
+            for a in &entrypoint[1..] {
                 if let Some(expanded) = expand_env_arg(a, &env) {
                     argv.push(cstr(resolve(&expanded).as_os_str().as_bytes())?);
                 }
@@ -747,6 +692,80 @@ pub fn exec_app(meta: &Metadata, rootfs: &Path, app_config: &AppConfig) -> io::R
         }
 
         let argv_ptrs = to_ptr_vec(&argv);
+
+        // Phase 5b: Exec capability enforcement.
+        //
+        // When `Capability::Exec` is absent, the seccomp filter installed by
+        // `enter_pivot_sandbox` denies `execve`. The stub's own `execvp` would
+        // be killed by `SECCOMP_RET_KILL_PROCESS`, so we `fork()` first: the
+        // child inherits the filter, its `execvp` is blocked, and the parent
+        // detects the child's exit (126) to refuse the launch cleanly.
+        //
+        // When Exec is absent but seccomp is NOT active, refuse outright —
+        // the application should not be launched without an exec capability.
+        //
+        // Legacy binaries (no layer system) always get a pass here.
+        let caps = meta.effective_capabilities();
+        let has_exec = caps.contains(&Capability::Exec);
+        let layers_active = !meta.layers.is_empty() && meta.entrypoint_layer.is_some();
+
+        #[cfg(target_os = "linux")]
+        let seccomp_blocks_exec = layers_active && !has_exec && meta.seccomp && use_pivot;
+        #[cfg(not(target_os = "linux"))]
+        let seccomp_blocks_exec = false;
+
+        if layers_active && !has_exec && !seccomp_blocks_exec {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Exec capability absent — application launch refused",
+            ));
+        }
+
+        if seccomp_blocks_exec {
+            // SAFETY: fork(2) creates a child process. The child attempts
+            // libc_execvp which is blocked by seccomp (execve denied).
+            // The parent waits for the child via waitpid.
+            let pid = unsafe { libc::fork() };
+            if pid < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if pid == 0 {
+                // Child: execvp will fail (execve denied by seccomp).
+                unsafe {
+                    crate::libc_execvp(prog_c.as_ptr(), argv_ptrs.as_ptr());
+                }
+                eprintln!("[erebus] execvp blocked — Exec capability absent (seccomp)");
+                unsafe {
+                    libc::_exit(126);
+                }
+            }
+            // Parent: wait for child and inspect exit status.
+            let mut status: libc::c_int = 0;
+            unsafe {
+                libc::waitpid(pid, &mut status, 0);
+            }
+            if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 126 {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "Exec capability absent — application launch refused (seccomp blocked execve)",
+                ));
+            }
+            if libc::WIFSIGNALED(status) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "Exec capability absent — child killed by signal {} (seccomp)",
+                        libc::WTERMSIG(status)
+                    ),
+                ));
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("unexpected child exit status: {}", status),
+            ));
+        }
+
+        // Exec capability present, or seccomp not active: standard execvp.
         // SAFETY: execvp(3) replaces the current process. prog_c is a valid
         // CString, argv_ptrs is null-terminated. We never return on success.
         // execvp searches PATH for bare command names (e.g. "python3") and
@@ -769,20 +788,10 @@ pub fn exec_app(meta: &Metadata, rootfs: &Path, app_config: &AppConfig) -> io::R
 /// Resolve the entrypoint program + interpreter details shared by the
 /// single-app and service-supervisor launch paths.
 /// Canonical interpreter binary name for each interpreted runtime. Compiled
-/// runtimes (`go`, `binary`) return `None` — their entrypoint is the program.
+/// runtimes (`binary`) return `None` — their entrypoint is the program.
 fn runtime_interpreter(runtime: &str) -> Option<&'static str> {
     match runtime {
         "python" => Some("python3"),
-        "node" => Some("node"),
-        "electron" => Some("electron"),
-        "deno" => Some("deno"),
-        "java" => Some("java"),
-        "ruby" => Some("ruby"),
-        "dotnet" => Some("dotnet"),
-        "php" => Some("php"),
-        "perl" => Some("perl"),
-        "hugo" => Some("hugo"),
-        "wasm" => Some("wasmtime"),
         _ => None,
     }
 }
@@ -792,47 +801,29 @@ fn runtime_interpreter(runtime: &str) -> Option<&'static str> {
 /// metadata carries a runtime the stub never heard of — fail loudly instead of
 /// silently launching under bash (upstream fix for roadmap #40).
 ///
-/// When `meta.entrypoint_layer` is set, the interpreter and argv template are
-/// extracted from the layer system instead of the flat `meta.runtime`/`meta.entrypoint`
-/// fields. This enables the core `RuntimeEntrypoint` abstraction while remaining
-/// backward-compatible with legacy binaries that have no layers.
+/// The runtime name and argv template come from `Metadata::effective_runtime` /
+/// `Metadata::effective_entrypoint`: the layer system when `entrypoint_layer`
+/// is set, the flat fields for legacy binaries. This is the single resolution
+/// path — callers must not re-implement layer lookup.
 pub fn resolve_entrypoint(
     meta: &Metadata,
     rootfs: &Path,
     use_pivot: bool,
 ) -> io::Result<(PathBuf, bool, String)> {
-    // Extract runtime name and entrypoint from layers when available.
-    let (runtime_str, entrypoint_vec) = if let Some(layer_name) = &meta.entrypoint_layer {
-        let layer = meta
-            .layers
-            .iter()
-            .find(|l| l.name() == layer_name)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("entrypoint layer '{}' not found in layers", layer_name),
-                )
-            })?;
-        match layer {
-            erebus_core::layer::SerializableLayer::Runtime(rt) => {
-                (rt.name.clone(), rt.entrypoint.clone())
-            }
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("entrypoint layer '{}' is not a runtime layer", layer_name),
-                ));
-            }
-        }
-    } else {
-        (meta.runtime.clone(), meta.entrypoint.clone())
-    };
+    let runtime_str = meta.effective_runtime().to_string();
+    let entrypoint_vec = meta.effective_entrypoint().to_vec();
+    if entrypoint_vec.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "empty entrypoint",
+        ));
+    }
 
     if detect::Runtime::from_name(&runtime_str).is_none() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "unsupported runtime '{}' in metadata — supported: python, deno, node, electron, java, ruby, dotnet, go, php, perl, hugo, wasm, binary",
+                "unsupported runtime '{}' in metadata — supported: python, binary",
                 runtime_str
             ),
         ));
@@ -840,9 +831,9 @@ pub fn resolve_entrypoint(
     let resolve = make_resolve(rootfs, use_pivot);
     let mut prog = resolve(&entrypoint_vec[0]);
 
-    // Compiled binaries (go/binary) exec `entrypoint[0]` directly; interpreted
-    // runtimes get their interpreter prepended to argv.
-    let direct_exec = matches!(runtime_str.as_str(), "go" | "binary");
+    // Compiled binaries (`binary`) exec `entrypoint[0]` directly;
+    // interpreted runtimes get their interpreter prepended to argv.
+    let direct_exec = matches!(runtime_str.as_str(), "binary");
     let interpreter_name = runtime_interpreter(&runtime_str)
         .map(str::to_string)
         .unwrap_or_else(|| {
@@ -887,13 +878,14 @@ pub fn spawn_app_windows(
     app_config: &AppConfig,
 ) -> io::Result<crate::win::Child> {
     let (prog, direct_exec, interpreter_name) = resolve_entrypoint(meta, rootfs, false)?;
+    let entrypoint = meta.effective_entrypoint();
     let env = setup_env(meta, rootfs, false, None, app_config)?;
     let cwd = meta.cwd.as_ref().map(|c| make_resolve(rootfs, false)(c));
     let resolve = make_resolve(rootfs, false);
 
     let mut cmd = prog;
     if !is_executable_path(&cmd) {
-        cmd = find_in_bin_paths(rootfs, &meta.entrypoint[0]).ok_or_else(|| {
+        cmd = find_in_bin_paths(rootfs, &entrypoint[0]).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 format!(
@@ -911,7 +903,7 @@ pub fn spawn_app_windows(
     } else {
         argv.push(std::ffi::OsString::from(interpreter_name));
     }
-    for a in &meta.entrypoint[1..] {
+    for a in &entrypoint[1..] {
         if let Some(expanded) = expand_env_arg(a, &env) {
             argv.push(resolve(&expanded).into_os_string());
         }
@@ -1357,14 +1349,6 @@ mod tests {
     }
 
     #[test]
-    fn detect_web_port_returns_3000_for_rails() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("bin")).unwrap();
-        std::fs::write(tmp.path().join("bin").join("rails"), "").unwrap();
-        assert_eq!(detect_web_port(tmp.path(), "ruby"), Some(3000));
-    }
-
-    #[test]
     fn detect_django_settings_handles_commas_and_parens() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -1391,7 +1375,7 @@ mod tests {
         let meta = Metadata {
             name: "test".into(),
             version: None,
-            runtime: "node".into(),
+            runtime: "python".into(),
             entrypoint: Vec::new(),
             env: {
                 let mut m = BTreeMap::new();
@@ -1408,6 +1392,8 @@ mod tests {
             payload_format: String::new(),
             health_check: None,
             update_url: None,
+            entrypoint_layer: None,
+            layers: Vec::new(),
         };
 
         let app_config = AppConfig {
@@ -1427,19 +1413,8 @@ mod tests {
             env.get("DATABASE_URL").map(String::as_str),
             Some("postgres://config/db")
         );
-        // .env still fills gaps; the node production default loses to it.
+        // .env still fills gaps.
         assert_eq!(env.get("NODE_ENV").map(String::as_str), Some("staging"));
-    }
-
-    #[test]
-    fn detect_web_port_handles_port_equals_syntax() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(
-            tmp.path().join("package.json"),
-            r#"{"scripts":{"start":"next start --port=3000"}}"#,
-        )
-        .unwrap();
-        assert_eq!(detect_web_port(tmp.path(), "node"), Some(3000));
     }
 
     #[test]
@@ -1555,6 +1530,8 @@ mod tests {
             payload_format: String::new(),
             health_check: None,
             update_url: None,
+            entrypoint_layer: None,
+            layers: Vec::new(),
         };
         let err = resolve_entrypoint(&meta, tmp.path(), false).unwrap_err();
         assert!(err.to_string().contains("unsupported runtime 'cobol'"));
@@ -1562,15 +1539,9 @@ mod tests {
 
     #[test]
     fn runtime_interpreter_covers_all_interpreted_runtimes() {
-        for name in [
-            "python", "node", "electron", "deno", "java", "ruby", "dotnet", "php", "perl", "hugo",
-            "wasm",
-        ] {
-            assert!(runtime_interpreter(name).is_some(), "runtime: {name}");
-        }
-        for name in ["go", "binary"] {
+        assert!(runtime_interpreter("python").is_some(), "runtime: python");
+        for name in ["binary", "cobol", "wasm"] {
             assert!(runtime_interpreter(name).is_none(), "runtime: {name}");
         }
-        assert!(runtime_interpreter("cobol").is_none());
     }
 }

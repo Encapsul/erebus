@@ -89,6 +89,12 @@ The manifest is **authenticated before a single byte is written**:
 3. Per-chunk, inside the engine: every byte written — whether **reused** from
    the current binary or **fetched** — must SHA-256 to its `ChunkEntry.hash`.
    A fetched chunk of the wrong length or hash is rejected on the spot.
+4. At rest, on every cold start: the rebuilt binary embeds the manifest
+   signature from step 1 in its `SisrFooterExt`; the launcher re-verifies it
+   offline (signature → Merkle root → per-chunk payload hashes) before
+   extracting. An updated binary therefore keeps its at-rest authenticity
+   instead of degrading to integrity-only. Unsigned SISR sections are refused
+   unless `ERE_SISR_ALLOW_UNSIGNED=1` is set explicitly.
 
 Only then does the engine assemble and atomically swap.
 
@@ -139,6 +145,7 @@ state machine.
 | metadata          | copied verbatim from the current binary (deltas never change metadata) |
 | `DeltaManifest` + `SisrFooterExt` | rebuilt from the fetched manifest and chunk table |
 | footer            | rebuilt: `flags = (old & ~FLAG_SIGNED) \| FLAG_SISR`, payload SHA-256 = `SHA-256(payload ‖ meta)`, signature offset zeroed |
+| `SisrFooterExt.signature` | carries over the remote manifest's Ed25519 signature (verified in step 1), so the rebuilt binary stays authentic at rest |
 
 A pre-SISR (legacy) binary is handled too: there is no embedded chunk index, so
 the engine falls back to fetching every chunk — correct, just not incremental.
@@ -153,6 +160,7 @@ the engine falls back to fetching every chunk — correct, just not incremental.
 | Signature fails (no trusted key verifies) | update refused before any write |
 | Merkle root mismatch | update refused before any write |
 | Fetched chunk wrong length or SHA-256 | engine errors, binary untouched |
+| Embedded SISR section unsigned / untrusted / payload mismatch at cold start | launcher exits (override: `ERE_SISR_ALLOW_UNSIGNED=1`) |
 | Chunk missing from `chunks/` (local) or 404s (remote) | engine errors, binary untouched |
 | `rename` fails (read-only dir) | engine errors, binary untouched |
 | Power loss / `SIGKILL` mid-write | `.tmp` may remain, binary untouched |

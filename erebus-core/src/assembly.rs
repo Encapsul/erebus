@@ -38,6 +38,7 @@ pub fn resolve_arch(target_arch: Option<&str>) -> u8 {
         .unwrap_or_else(|| std::env::consts::ARCH);
     match arch {
         "aarch64" | "arm64" => format::ARCH_AARCH64,
+        "riscv64" | "riscv64gc" => format::ARCH_RISCV64,
         _ => format::ARCH_X86_64,
     }
 }
@@ -111,11 +112,6 @@ pub fn build_meta_json(
 
     if bun_features.embedded_runtime.interpreter.is_some() {
         meta["embedded_runtime"] = serde_json::to_value(&bun_features.embedded_runtime)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    }
-
-    if bun_features.wasm.enabled {
-        meta["wasm"] = serde_json::to_value(&bun_features.wasm)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     }
 
@@ -421,6 +417,22 @@ mod tests {
     #[test]
     fn resolve_arch_x86_64() {
         assert_eq!(resolve_arch(Some("x86_64")), format::ARCH_X86_64);
+    }
+
+    #[test]
+    fn resolve_arch_riscv64() {
+        // Both the bare arch and the Rust triple prefix must map to 0x03.
+        assert_eq!(resolve_arch(Some("riscv64")), format::ARCH_RISCV64);
+        assert_eq!(
+            resolve_arch(Some("riscv64gc-unknown-linux-musl")),
+            format::ARCH_RISCV64
+        );
+    }
+
+    #[test]
+    fn resolve_arch_unknown_degrades_to_x86_64() {
+        assert_eq!(resolve_arch(Some("mips")), format::ARCH_X86_64);
+        assert_eq!(resolve_arch(None), format::ARCH_X86_64);
     }
 
     #[test]

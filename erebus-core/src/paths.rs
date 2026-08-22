@@ -213,20 +213,6 @@ pub fn default_key_dir() -> PathBuf {
     }
 }
 
-pub fn default_trusted_dir() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-        PathBuf::from(xdg).join("erebus").join("trusted-keys")
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home)
-            .join(".local")
-            .join("share")
-            .join("erebus")
-            .join("trusted-keys")
-    } else {
-        PathBuf::from(".erebus").join("trusted-keys")
-    }
-}
-
 /// Directory the stub launcher reads trusted Ed25519 public keys from.
 ///
 /// Mirrors `erebus-stub`'s `trusted_keys_dir()` exactly so that

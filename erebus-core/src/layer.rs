@@ -26,11 +26,11 @@ pub enum LayerError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LayerKind {
-    /// Language runtime (python, node, deno, java, etc.)
+    /// Language runtime (python, binary)
     Runtime,
     /// AI model weights (GGUF, safetensors, etc.)
     Model,
-    /// Tool/plugin binary (WASM, native, etc.)
+    /// Tool/plugin binary (native binary, etc.)
     Tool,
     /// Configuration/data layer
     Config,
@@ -246,11 +246,11 @@ impl Default for EntrypointRegistry {
     }
 }
 
-/// Concrete runtime layer (Python, Node, etc.)
+/// Concrete runtime layer (Python, etc.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeLayer {
     pub name: String,
-    pub interpreter: String,     // bare name: "python3", "node", etc.
+    pub interpreter: String,     // bare name: "python3", etc.
     pub entrypoint: Vec<String>, // argv template with {app} placeholder
     pub version: Option<String>,
     pub env: Vec<(String, String)>,
@@ -366,7 +366,7 @@ impl Layer for ModelLayer {
     }
 }
 
-/// Tool layer (WASM plugin, native binary tool)
+/// Tool layer (native binary tool)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolLayer {
     pub name: String,

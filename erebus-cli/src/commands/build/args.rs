@@ -32,6 +32,9 @@ pub(crate) fn parse_target(target: &str) -> (String, String) {
             Some("x64" | "amd64") => "x86_64",
             Some("arm64" | "aarch64") => "aarch64",
             Some("x86" | "i686" | "i386") => "x86",
+            // The real Rust triple is riscv64gc-unknown-linux-musl; keep the
+            // `riscv64gc` spelling so stub discovery finds the build dir.
+            Some("riscv64" | "riscv64gc") => "riscv64gc",
             _ => std::env::consts::ARCH,
         }
     } else {
@@ -39,6 +42,8 @@ pub(crate) fn parse_target(target: &str) -> (String, String) {
             Some("x86_64" | "amd64") => "x86_64",
             Some("aarch64" | "arm64") => "aarch64",
             Some("i686" | "x86" | "i386") => "x86",
+            // Pass through verbatim: `riscv64gc` (and bare `riscv64`) must
+            // reach stub discovery as the exact Rust triple prefix.
             Some(other) => other,
             None => std::env::consts::ARCH,
         }
@@ -228,8 +233,6 @@ pub(crate) fn config_fingerprint(args: &BuildArgs, plan: &BuildPlan) -> String {
     if let Some(p) = &args.interpreter_path {
         canonical.push(format!("interpreter_path={p}"));
     }
-    canonical.push(format!("tree_shake={}", args.tree_shake));
-    canonical.push(format!("minify={}", args.minify));
     if let Some(ep) = &args.otel_endpoint {
         canonical.push(format!("otel={ep}/{}", args.otel_protocol));
     }
@@ -374,14 +377,6 @@ pub struct BuildArgs {
     #[arg(long)]
     pub persist: bool,
 
-    /// Remove unused `node_modules` packages (tree-shaking)
-    #[arg(long)]
-    pub tree_shake: bool,
-
-    /// Minify JS/TS/CSS files before packaging
-    #[arg(long)]
-    pub minify: bool,
-
     /// Health check HTTP port (sets `ERE_HEALTH_PORT`)
     #[arg(long)]
     pub health_port: Option<u16>,
@@ -410,7 +405,7 @@ pub struct BuildArgs {
     #[arg(long)]
     pub json: bool,
 
-    /// Embed interpreter in the binary (python3, node, deno, ruby, php, perl, java, go, wasm, custom)
+    /// Embed interpreter in the binary (python3, custom path)
     #[arg(long)]
     pub embed_interpreter: Option<String>,
 
@@ -421,22 +416,6 @@ pub struct BuildArgs {
     /// Override entrypoint command (repeatable): --entrypoint python3,main.py
     #[arg(long = "entrypoint", action = clap::ArgAction::Append)]
     pub entrypoint: Vec<String>,
-
-    /// Enable WASM support with wasmtime (NOT YET IMPLEMENTED IN STUB)
-    #[arg(long, hide = true)]
-    pub wasm: bool,
-
-    /// Path to wasmtime binary (NOT YET IMPLEMENTED IN STUB)
-    #[arg(long, hide = true)]
-    pub wasmtime_path: Option<PathBuf>,
-
-    /// Enable WASI for WASM modules (WebAssembly System Interface) (NOT YET IMPLEMENTED IN STUB)
-    #[arg(long, hide = true)]
-    pub wasi: bool,
-
-    /// Enable WASM component model support (NOT YET IMPLEMENTED IN STUB)
-    #[arg(long, hide = true)]
-    pub component_model: bool,
 
     /// Cross-compile for target architectures (comma-separated, e.g., aarch64,arm64) (NOT YET IMPLEMENTED IN STUB)
     #[arg(long, hide = true)]
@@ -470,11 +449,6 @@ pub struct BuildArgs {
     /// 16 MiB for efficient SISR delta updates on multi-GB model payloads.
     #[arg(long)]
     pub embed_model: Option<PathBuf>,
-
-    /// Generate desktop packaging files (flatpak: flatpak-manifest.json + .desktop,
-    /// snap: snapcraft.yaml) alongside the erebus bundle
-    #[arg(long, value_parser = ["erebus", "flatpak", "snap"], default_value = "erebus")]
-    pub package_format: String,
 }
 
 #[derive(Default, Deserialize)]
@@ -585,6 +559,21 @@ mod tests {
         assert_eq!(
             parse_target("linux-arm64"),
             ("aarch64".into(), "linux".into())
+        );
+    }
+
+    #[test]
+    fn parse_target_riscv64() {
+        // Triple passes through verbatim so stub discovery finds the exact
+        // `riscv64gc-unknown-linux-musl` build dir.
+        assert_eq!(
+            parse_target("riscv64gc-unknown-linux-musl"),
+            ("riscv64gc".into(), "linux".into())
+        );
+        // Shorthands normalize to the Rust triple prefix.
+        assert_eq!(
+            parse_target("linux-riscv64"),
+            ("riscv64gc".into(), "linux".into())
         );
     }
 
@@ -715,8 +704,6 @@ mod tests {
             update: false,
             include: Vec::new(),
             persist: false,
-            tree_shake: false,
-            minify: false,
             health_port: None,
             otel_endpoint: None,
             otel_protocol: "grpc".into(),
@@ -724,10 +711,6 @@ mod tests {
             redetect: false,
             embed_interpreter: None,
             interpreter_path: None,
-            wasm: false,
-            wasmtime_path: None,
-            wasi: false,
-            component_model: false,
             cross_compile: None,
             use_cache: false,
             clear_cache: false,
@@ -738,7 +721,6 @@ mod tests {
             json: false,
             quiet: false,
             embed_model: None,
-            package_format: "erebus".into(),
             entrypoint: Vec::new(),
         }
     }

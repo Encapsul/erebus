@@ -13,6 +13,10 @@ use crate::nanos;
 
 /// Default maximum total decompressed bytes across all tar entries (1 GB).
 const DEFAULT_MAX_DECOMPRESSED_BYTES: u64 = 1024 * 1024 * 1024;
+/// Slack added on top of declared model-layer sizes so a payload containing
+/// multi-GB model weights extracts without operator intervention, while the
+/// bomb limit still applies to everything else.
+const MODEL_ALLOWANCE_SLACK: u64 = 64 * 1024 * 1024;
 /// Default maximum number of files in a single tar archive.
 const DEFAULT_MAX_FILES: usize = 50_000;
 
@@ -25,17 +29,23 @@ const DEFAULT_MAX_FILES: usize = 50_000;
 /// The env vars are read once per extraction and only from the launcher's own
 /// process environment — they are NOT parsed from the (untrusted) payload, so
 /// an attacker cannot weaken the limits by smuggling values into the erebus.
+///
+/// `extra_allowance` is the sum of declared `ModelLayer` sizes from the
+/// integrity-verified metadata: legitimate AI payloads legitimately exceed
+/// the default bomb ceiling, so the effective byte limit is raised to fit
+/// them (plus slack). Everything else stays under the configured cap.
 struct ExtractLimits {
     max_bytes: u64,
     max_files: usize,
 }
 
 impl ExtractLimits {
-    fn from_env() -> Self {
-        let max_bytes = std::env::var("ERE_MAX_EXTRACT_SIZE")
+    fn from_env(extra_allowance: u64) -> Self {
+        let configured = std::env::var("ERE_MAX_EXTRACT_SIZE")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(DEFAULT_MAX_DECOMPRESSED_BYTES);
+        let max_bytes = configured.max(extra_allowance.saturating_add(MODEL_ALLOWANCE_SLACK));
         let max_files = std::env::var("ERE_MAX_EXTRACT_FILES")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
@@ -78,10 +88,67 @@ pub fn cache_root_trustworthy(_cache_root: &Path) -> bool {
     true
 }
 
+/// Check whether the on-disk source binary still matches the cache.
+///
+/// Stores the source file's size + mtime in `<cache_root>/.source` (JSON).
+/// On warm-start this detects byte-flips in the payload that would keep the
+/// footer's SHA-256 cache key unchanged.
+pub fn source_manifest_matches(
+    cache_root: &Path,
+    expected_size: u64,
+    expected_mtime: std::time::SystemTime,
+) -> bool {
+    let manifest_path = cache_root.join(".source");
+    let content = match std::fs::read_to_string(&manifest_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let Ok(manifest) = serde_json::from_str::<SourceManifest>(&content) else {
+        return false;
+    };
+    manifest.size == expected_size
+        && manifest.mtime_ns
+            == expected_mtime
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct SourceManifest {
+    size: u64,
+    mtime_ns: u128,
+}
+
+/// Record the source file's identity after a successful extraction so the
+/// warm path can detect tampering.
+pub fn write_source_manifest(
+    cache_root: &Path,
+    size: u64,
+    mtime: std::time::SystemTime,
+) -> io::Result<()> {
+    let manifest = SourceManifest {
+        size,
+        mtime_ns: mtime
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    };
+    let path = cache_root.join(".source");
+    let json = serde_json::to_string(&manifest)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("serde_json: {e}")))?;
+    std::fs::write(path, json)
+}
+
 /// Extract zstd-compressed tar blobs atomically into `cache_root/rootfs`.
-pub fn extract_atomic(blobs: &[&[u8]], cache_root: &Path) -> io::Result<()> {
+///
+/// `model_bytes` is the total declared size of model layers in the
+/// integrity-verified metadata; the extraction byte ceiling is raised to fit
+/// them (plus slack), so multi-GB model payloads extract without operator
+/// intervention while the decompression-bomb cap still applies otherwise.
+pub fn extract_atomic(blobs: &[&[u8]], cache_root: &Path, model_bytes: u64) -> io::Result<()> {
     atomic_extract(cache_root, |tmp_rootfs| {
-        let limits = ExtractLimits::from_env();
+        let limits = ExtractLimits::from_env(model_bytes);
         let mut total_bytes: u64 = 0;
         let mut file_count: usize = 0;
         for blob in blobs {
@@ -205,6 +272,114 @@ mod tests {
     fn write_app(tmp_rootfs: &Path) -> io::Result<()> {
         fs::create_dir_all(tmp_rootfs.join("app"))?;
         fs::write(tmp_rootfs.join("app/app.py"), b"print('hi')")
+    }
+
+    // ── Chaos: decompression-bomb limit math ────────────────────────────
+
+    #[test]
+    fn limits_default_without_model_allowance() {
+        let l = ExtractLimits::from_env(0);
+        assert_eq!(l.max_bytes, DEFAULT_MAX_DECOMPRESSED_BYTES);
+        assert_eq!(l.max_files, DEFAULT_MAX_FILES);
+    }
+
+    #[test]
+    fn limits_raise_ceiling_for_declared_models() {
+        let model = 3u64 * 1024 * 1024 * 1024; // 3 GB of declared weights
+        let l = ExtractLimits::from_env(model);
+        assert_eq!(l.max_bytes, model + MODEL_ALLOWANCE_SLACK);
+    }
+
+    #[test]
+    fn limits_env_cap_wins_when_larger_than_models() {
+        std::env::set_var("ERE_MAX_EXTRACT_SIZE", "9000000000");
+        let l = ExtractLimits::from_env(1024);
+        std::env::remove_var("ERE_MAX_EXTRACT_SIZE");
+        assert_eq!(l.max_bytes, 9_000_000_000);
+    }
+
+    #[test]
+    fn limits_saturate_on_huge_declaration() {
+        let l = ExtractLimits::from_env(u64::MAX);
+        assert_eq!(l.max_bytes, u64::MAX);
+    }
+
+    /// A payload whose entries exceed the configured byte ceiling is rejected.
+    /// Uses an explicit 64 KiB ceiling (no env dependency for determinism).
+    #[test]
+    fn extract_rejects_bomb_without_model_allowance() {
+        let dir = TempDir::new().unwrap();
+        let cache_root = dir.path().join("hash");
+
+        // 2 MiB of zeros compresses to a few KB — classic bomb shape.
+        let mut builder = tar::Builder::new(zstd::Encoder::new(Vec::new(), 1).unwrap());
+        let big = vec![0u8; 2 * 1024 * 1024];
+        let mut header = tar::Header::new_gnu();
+        header.set_size(big.len() as u64);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "app/bomb.bin", big.as_slice())
+            .unwrap();
+        let encoder = builder.into_inner().unwrap();
+        let blob = encoder.finish().unwrap();
+
+        let res = atomic_extract(&cache_root, |tmp| {
+            let limits = ExtractLimits {
+                max_bytes: 64 * 1024,
+                max_files: DEFAULT_MAX_FILES,
+            };
+            let decoder = zstd::Decoder::new(io::Cursor::new(&blob)).unwrap();
+            let mut archive = tar::Archive::new(decoder);
+            let mut total: u64 = 0;
+            for entry in archive.entries().unwrap() {
+                let mut e = entry.unwrap();
+                total = total.saturating_add(e.size());
+                if total > limits.max_bytes {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "bomb"));
+                }
+                e.unpack_in(tmp)?;
+            }
+            Ok(())
+        });
+        assert!(res.is_err(), "undeclared bomb must be rejected");
+        assert!(
+            !cache_root.exists(),
+            "failed extraction must not leave cache"
+        );
+    }
+
+    /// Same bomb passes when model bytes are declared (ceiling raised).
+    #[test]
+    fn extract_accepts_bomb_with_matching_model_allowance() {
+        let dir = TempDir::new().unwrap();
+        let cache_root = dir.path().join("hash");
+
+        let big = vec![0u8; 2 * 1024 * 1024];
+        let mut builder = tar::Builder::new(zstd::Encoder::new(Vec::new(), 1).unwrap());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(big.len() as u64);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "models/agent.gguf", big.as_slice())
+            .unwrap();
+        let blob = builder.into_inner().unwrap().finish().unwrap();
+
+        atomic_extract(&cache_root, |tmp| {
+            let limits = ExtractLimits::from_env(big.len() as u64);
+            assert!(
+                limits.max_bytes >= big.len() as u64,
+                "allowance must cover declared models"
+            );
+            let decoder = zstd::Decoder::new(io::Cursor::new(&blob)).unwrap();
+            let mut archive = tar::Archive::new(decoder);
+            for entry in archive.entries().unwrap() {
+                let mut e = entry.unwrap();
+                e.unpack_in(tmp)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert!(cache_root.join("rootfs/models/agent.gguf").is_file());
     }
 
     #[test]

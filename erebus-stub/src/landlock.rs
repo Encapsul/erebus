@@ -3,11 +3,16 @@
 //! Implements Landlock (Linux 5.13+ — ABI v1) using raw syscalls, with an
 //! ABI bump for `REFER` (v2, 5.19) and `TRUNCATE` (v3, 6.2). Restricts
 //! filesystem access after `pivot_root`: full R/W on rootfs, read-only
-//! everywhere else.
+//! everywhere else by default. With capabilities:
+//! - `ReadFile` absent → deny all access outside rootfs
+//! - `WriteFile` absent → deny write outside rootfs (default)
+//! - `WriteFile` present → allow write outside rootfs
 
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+
+use erebus_core::layer::Capability;
 
 // ---------------------------------------------------------------------------
 // Landlock structs (ABI v1, Linux 5.13)
@@ -93,6 +98,15 @@ mod sys {
     pub const LANDLOCK_RESTRICT_SELF: libc::c_long = 446;
 }
 
+// Generic numbers apply to riscv64 too: the ABI was added after all modern
+// 64-bit architectures unified their syscall tables.
+#[cfg(target_arch = "riscv64")]
+mod sys {
+    pub const LANDLOCK_CREATE_RULESET: libc::c_long = 444;
+    pub const LANDLOCK_ADD_RULE: libc::c_long = 445;
+    pub const LANDLOCK_RESTRICT_SELF: libc::c_long = 446;
+}
+
 const LANDLOCK_RULE_PATH_BENEATH: u32 = 1;
 
 #[repr(C)]
@@ -133,6 +147,48 @@ impl Drop for RootfsGuard {
     }
 }
 
+/// Install Landlock sandbox with capability-driven filesystem access.
+///
+/// `root` is the pre-opened `O_PATH` fd to the rootfs.
+///
+/// Rules:
+/// - Rootfs: always full access (handled FS bits)
+/// - Outside rootfs:
+///   - `ReadFile` present → read-only (or read+write if `WriteFile` also present)
+///   - `ReadFile` absent → nothing outside rootfs is accessible at all
+///   - `WriteFile` controls whether write is granted outside rootfs
+///
+/// If `capabilities` is empty (legacy binary without layer system), defaults to
+/// the backward-compatible read-only-everywhere policy.
+pub fn sandbox_with_capabilities(
+    root: &RootfsGuard,
+    capabilities: &[Capability],
+) -> io::Result<()> {
+    let (handled, ruleset_fd) = create_ruleset()?;
+
+    add_fd_beneath(ruleset_fd, root.fd, handled)?;
+
+    let has_read = capabilities.contains(&Capability::ReadFile);
+    let has_write = capabilities.contains(&Capability::WriteFile);
+    let has_any_cap = !capabilities.is_empty();
+
+    if !has_any_cap {
+        add_path_beneath(ruleset_fd, Path::new("/"), READ_ONLY)?;
+    } else if has_read {
+        let host_access = if has_write {
+            READ_ONLY | LANDLOCK_ACCESS_FS_WRITE_FILE
+        } else {
+            READ_ONLY
+        };
+        add_path_beneath(ruleset_fd, Path::new("/"), host_access)?;
+    }
+    // has_any_cap && !has_read → no "/" rule, everything outside rootfs denied.
+
+    restrict_self(ruleset_fd)?;
+
+    Ok(())
+}
+
 /// Install Landlock sandbox: rootfs gets full access, everything else is
 /// read-only.
 ///
@@ -142,21 +198,9 @@ impl Drop for RootfsGuard {
 ///
 /// Fail-closed: any error returns `Err` — the caller must not run the app
 /// without the requested filesystem sandbox.
+#[allow(dead_code)]
 pub fn sandbox(root: &RootfsGuard) -> io::Result<()> {
-    let (handled, ruleset_fd) = create_ruleset()?;
-
-    // Allow full access to rootfs. `allowed_access` must be a subset of the
-    // ruleset's handled set, so grant exactly the bits that were handled.
-    add_fd_beneath(ruleset_fd, root.fd, handled)?;
-
-    // Allow read-only everywhere else (after pivot_root, "/" is rootfs, so
-    // this only matters for future bind mounts).
-    add_path_beneath(ruleset_fd, Path::new("/"), READ_ONLY)?;
-
-    // Enforce the ruleset on this process
-    restrict_self(ruleset_fd)?;
-
-    Ok(())
+    sandbox_with_capabilities(root, &[])
 }
 
 /// Create the ruleset, negotiating the highest supported ABI.
