@@ -54,7 +54,6 @@ ed25519-dalek = { version = "2.1", default-features = false, features = ["alloc"
 zstd-sys = { version = "2.0.16", features = ["no_asm"] }
 
 [lints.clippy]
-pedantic = { level = "warn", priority = -1 }
 # Allow style lints that are too noisy for a binary crate
 module_name_repetitions = "allow"
 must_use_candidate = "allow"

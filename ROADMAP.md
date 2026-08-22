@@ -84,7 +84,7 @@ foo.erebus (universal file)
 3. Runtime : detect `uname -s`/`uname -m` → extract right slice → `execve`
 4. Test via Docker+QEMU (déjà installé : `qemu-aarch64` + `docker --platform linux/arm64/v8`)
 
-**Status :** 30% — cross-compilation validée (seccomp.rs fix), wrapper polyglot pas implémenté.
+**Status :** 70% — `polyglot.rs` implémenté + testé avec vrais slices (2×18.2MB → 36.4MB universal). Reste: polyglot stub (uname → seek → execve), build matrix zigbuild 4 targets, CI QEMU.
 
 ## Ce qui est NOUVEAU — livré cette semaine
 
@@ -124,6 +124,7 @@ Registre content-addressable local (`~/.cache/erebus/layers/`, overridable via `
 
 - Binaire réel 21 Mo construit → hot-swap modèle 3 Mo → inspect/verify OK → exécution OK (« v1 »)
 - Warm start OK ; `ERE_NO_MMAP=1` OK ; layer push/list/pull/remove roundtrip byte-identique
+- **Polyglot assembly validé** : 2 slices Python (linux-x86_64 + linux-aarch64, 18.2MB chacun) → universal 36.4MB, SHA-256 integrity OK, slice table correct
 
 ### 🔬 RISC-V 64 — support partiel (nouveau)
 
