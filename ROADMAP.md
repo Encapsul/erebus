@@ -166,6 +166,70 @@ stub-level, pas un agent natif. Node n'a pas ce problème (téléchargement targ
 - ⚠️ Metrics Prometheus — `otel.rs` (121 l.) existe encore, non prioritaire
 - ❌ Edge/IoT OTA channels — SISR le couvre déjà
 
+## 🎯 NOUVELLES PRIORITÉS (analyse concurrentielle août 2026)
+
+### 5. OpenAI-compatible API Server mode (`erebus serve`) — 2 jours
+**Gap vs llamafile/ollama** : pas de `--serve` pour exposer `/v1/chat/completions`
+- Stub lance `llama-server` embarqué + health check `/health`
+- Auto-detect GPU (`--ngl 9999`) + fallback CPU
+- Compatible code existant (OpenAI SDK, LangChain, etc.)
+
+### 6. Model Registry public + `erebus pull` — 3 jours
+**Gap vs ollama/llamafile** : découvrabilité modèles (`ollama pull llama3`)
+- Registry HTTP (`registry.erebus.dev` ou self-hosted)
+- Index JSON : nom → {sha256, size, quant, arch, runtime_deps}
+- `erebus pull llama.cpp:musl-x64` → layer runtime prêt à l'emploi
+- `erebus pull baguettotron:q4_k_s` → modèle + ModelLayer metadata
+
+### 7. Agentfile.yaml (déclaratif) — 2 jours
+**Gap vs ollama Modelfile / offline-ai PPE** : config unique source de vérité
+```yaml
+# .erebus/agent.yaml
+model: hf://PleIAs/Baguettotron-Q4_K_S.gguf
+runtime: python
+server: fastapi
+system_prompt: "Tu es un agent IA local..."
+tools: [web_search, code_exec]
+gpu: auto
+sisr: true
+```
+- `erebus build` sans flags → lit Agentfile
+- `erebus init --template rag|chat|coding` → scaffolding
+
+### 8. GPU auto-detect + `--ngl` dans stub — 1 jour
+**Gap vs llamafile** : "just works" sur NVIDIA/Metal/ROCm
+- Stub detecte `/dev/nvidia*`, `libcuda.so`, Metal, ROCm
+- Injecte `LLAMA_GPU_LAYERS` env var avant execvp
+
+### 9. Built-in Chat UI (terminal + web) — 2 jours
+**Gap vs llamafile v0.8.14** : UX zéro-config
+- Terminal: TUI colorée (ratatui/crossterm) si TTY
+- Web: sert UI statique embarquée sur `/` (port configurable)
+
+---
+
+## Universal Binary — Stratégie clarifiée (NON: pas de réécriture Cosmopolitan)
+
+**On n'a PAS besoin de réécrire Cosmopolitan libc.** Deux approches :
+
+| Approche | Comment | Pour nous |
+|----------|---------|-----------|
+| **A. Polyglot wrapper (notre plan actuel)** | ELF + PE + Mach-O header overlap. Chaque slice = stub natif + payload natif. Header "MZqFbz" reconnu par Linux/Windows/macOS. | ✅ **Choisi** — simple, pas de dépendance C, stubs Rust existants |
+| **B. Cosmopolitan libc (llamafile)** | Un SEUL binaire C qui tourne partout via Cosmopolitan runtime. Nécessite compiler Rust → Cosmopolitan (complexe, `rustc` target tiers). | ❌ Pas nécessaire — notre wrapper polyglot fait le job |
+
+**Implémentation Polyglot (3-4j) :**
+1. `cargo zigbuild` × 4 targets → 4 stubs musl static (linux-x64, linux-arm64, macos-arm64, windows-x64)
+2. `cargo zigbuild` × 4 → 4 Python builds (python-build-standalone ou cross-compile)
+3. `cargo zigbuild` × 4 → 4 llama.cpp static builds (musl)
+4. Assembleur Rust : lit 4 stubs + 4 payloads → écrit wrapper polyglot
+   - Offset table en footer polyglot
+   - Magic `ERE\x01` + `BEEF_CAFE` + arch bitmap
+5. Runtime stub (premier slice exécuté) : `uname` → seek offset → `execve` slice natif
+
+**Dépendances nouvelles :** `goblin` (PE/Mach-O parsing), `object` (ELF), `zip` (payloads)
+
+---
+
 ## Risques & mitigations
 
 | Risque | Mitigation | Status |
