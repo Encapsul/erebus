@@ -53,6 +53,34 @@ prefix, zeroed regions up to 4 KiB at random offsets ≥25% into the file.
 Every corrupted copy must exit non-zero and must never print the embedded
 encryption key.
 
+## Registry / pull / serve chaos (`scripts/chaos_registry_serve.sh`)
+
+Second harness covering the #5/#6 features; 22 checks, latest verdict:
+
+```
+── registry hardening
+✓ GET traversal rejected            ✓ non-multipart POST rejected
+✓ upload filename sanitized
+── publish → index → pull
+✓ index reflects upload instantly   ✓ unknown package fails clean
+✓ pull roundtrip byte-identical     ✓ cache short-circuit on re-pull
+✓ pull name traversal rejected      ✓ dead registry fails clean
+── lying static index
+✓ size mismatch → rejected, no artifact left
+✓ sha mismatch  → rejected, no artifact left
+── serve chaos
+✓ corrupted bundle refused by SHA-256
+✓ model-less bundle errors cleanly  ✓ missing engine errors with hint
+✓ engine death during health-wait aborts non-zero
+── resilience
+✓ SIGKILL mid-extraction → next run self-heals (no poisoned .ready)
+CHAOS REGISTRY/SERVE VERDICT: SURVIVED
+```
+
+Bugs this battery caught in the harness itself (not the product):
+`timeout VAR=x cmd` without `env` silently never runs the command, and a
+self-heal probe needs a bundle that actually contains a model.
+
 ## Dependency audit
 
 `cargo audit` → RC 0. Accepted warnings, documented:
