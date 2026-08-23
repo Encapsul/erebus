@@ -37,7 +37,13 @@ def run_inference(prompt: str, max_tokens: int = 512) -> str:
             "-c", "2048",
             "--no-display-prompt",
         ]
-        
+
+        # GPU offload: the erebus stub probes the host at launch and exports
+        # ERE_NGL (auto-tuned from VRAM) or the value pinned via --ngl.
+        ngl = os.environ.get("ERE_NGL", "")
+        if ngl.isdigit() and int(ngl) > 0:
+            cmd += ["-ngl", ngl]
+
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         
         if result.returncode != 0:
@@ -71,12 +77,18 @@ def health():
     # Check if model and llama-cli exist
     model_exists = Path(MODEL_PATH).exists()
     llama_exists = Path(LLAMA_CLI).exists() if LLAMA_CLI else False
+    gpu = {
+        "vendor": os.environ.get("ERE_GPU", "unknown"),
+        "vram_mb": os.environ.get("ERE_VRAM_MB"),
+        "ngl": os.environ.get("ERE_NGL"),
+    }
     return jsonify({
         "status": "ok" if model_exists and llama_exists else "degraded",
         "model_exists": model_exists,
         "llama_cli_exists": llama_exists,
         "model_path": MODEL_PATH,
-        "llama_cli_path": LLAMA_CLI
+        "llama_cli_path": LLAMA_CLI,
+        "gpu": gpu
     })
 
 @app.route("/infer", methods=["POST"])

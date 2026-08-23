@@ -434,6 +434,11 @@ pub(crate) fn build_single_target(
 
     if encrypt {
         // Generate a fresh random encryption key — never reuse the signing seed.
+        // Raw form lives only in a Zeroizing slot. The hex form below IS the
+        // product's documented model (--encrypt = tamper-evidence/obfuscation,
+        // NOT confidentiality): it lands in meta bytes inside the binary and
+        // flows through serde_json clones we cannot track. Real
+        // confidentiality requires an out-of-band key.
         let encryption_key = erebus_core::encrypt::generate_encryption_key();
 
         if args.enable_sisr {
@@ -528,6 +533,26 @@ pub(crate) fn build_single_target(
     for entry in &args.define {
         if let Some((k, v)) = entry.split_once('=') {
             env_map.insert(k.trim().into(), v.trim().into());
+        }
+    }
+
+    // ── GPU offload policy (--ngl) ────────────────────────────────────
+    //
+    // "auto" (the default when unset) bakes nothing: the stub probes the
+    // launch machine and exports ERE_GPU / ERE_VRAM_MB / ERE_NGL itself.
+    if let Some(raw) = args.ngl.as_deref() {
+        use super::args::NglPolicy;
+        match NglPolicy::parse(raw)? {
+            NglPolicy::Auto => {}
+            NglPolicy::Off => {
+                env_map.insert("ERE_GPU".into(), serde_json::Value::from("none"));
+                env_map.insert("ERE_NGL".into(), serde_json::Value::from("0"));
+            }
+            NglPolicy::Fixed(n) => {
+                // Values must be JSON strings: meta.env serializes through
+                // as_str() and would silently drop numeric entries.
+                env_map.insert("ERE_NGL".into(), serde_json::Value::from(n.to_string()));
+            }
         }
     }
 

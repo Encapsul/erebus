@@ -13,6 +13,7 @@ mod config;
 mod crypto;
 mod exec;
 mod extraction;
+mod gpu;
 mod health_gate;
 #[cfg(target_os = "linux")]
 mod landlock;

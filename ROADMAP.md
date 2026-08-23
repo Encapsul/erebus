@@ -201,25 +201,31 @@ stub-level, pas un agent natif. Node n'a pas ce problème (téléchargement targ
 - `erebus pull llama.cpp:musl-x64` → layer runtime prêt à l'emploi
 - `erebus pull baguettotron:q4_k_s` → modèle + ModelLayer metadata
 
-### 7. Agentfile.yaml (déclaratif) — 2 jours
+### 7. Agentfile.yaml (déclaratif) — ✅ TERMINÉ
 **Gap vs ollama Modelfile / offline-ai PPE** : config unique source de vérité
-```yaml
-# .erebus/agent.yaml
-model: hf://PleIAs/Baguettotron-Q4_K_S.gguf
-runtime: python
-server: fastapi
-system_prompt: "Tu es un agent IA local..."
-tools: [web_search, code_exec]
-gpu: auto
-sisr: true
-```
-- `erebus build` sans flags → lit Agentfile
-- `erebus init --template rag|chat|coding` → scaffolding
+- `Agentfile.yaml` (ou `.yml`, ou legacy `.erebus.toml`) parsé dans la MÊME
+  struct `XbinConfig` (YAML→JSON→serde, un seul schéma pour les 2 formats)
+- Champs agent : `model.path` (=--embed-model), `model.ngl`, `build.entrypoint`,
+  `build.env` (map), `build.include`, `build.health_port` — plus les champs
+  build/package historiques
+- Précédence stricte CLI > Agentfile > détection (env config prépendée :
+  `--env KEY=V` gagne clé par clé)
+- Exemple complet : `examples/real-agent/Agentfile.yaml`
+- Reste optionnel : `erebus init --template rag|chat|coding` (scaffolding),
+  fetch `hf://…`
 
-### 8. GPU auto-detect + `--ngl` dans stub — 1 jour
+### 8. GPU auto-detect + `--ngl` dans stub — ✅ TERMINÉ
 **Gap vs llamafile** : "just works" sur NVIDIA/Metal/ROCm
-- Stub detecte `/dev/nvidia*`, `libcuda.so`, Metal, ROCm
-- Injecte `LLAMA_GPU_LAYERS` env var avant execvp
+- `erebus-stub/src/gpu.rs` au lancement : nvidia-smi (VRAM MB) → `/dev/kfd`
+  (ROCm) → Metal (macOS) → sinon `ERE_GPU=none`
+- Exporte `ERE_GPU` + `ERE_VRAM_MB` + `ERE_NGL` = min(999, 100×vram/modèle)
+  (heuristique saturante : full offload dès que la VRAM couvre le modèle) ;
+  les clés déjà présentes dans meta.env ne sont JAMAIS écrasées
+- CLI `--ngl auto|off|<N>` : `off` cuit ERE_GPU=none+ERE_NGL=0, `<N>` cuit
+  ERE_NGL=N, `auto` ne cuit rien (sonde stub) ; idem via Agentfile `model.ngl`
+- `examples/real-agent/app.py` consomme ERE_NGL (`-ngl N`) et expose gpu dans
+  /health ; shim ProcessPrng compatible Win7/Wine inclus
+- Reste optionnel : sonde rocm-smi (VRAM AMD), test sur GPU réel
 
 ### 9. Built-in Chat UI (terminal + web) — 2 jours
 **Gap vs llamafile v0.8.14** : UX zéro-config

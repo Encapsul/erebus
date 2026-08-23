@@ -30,6 +30,11 @@ pub fn run(args: BuildArgs, verbose: bool) -> Result<()> {
     // Load .erebus.toml config if present
     let config = load_config(&app_dir);
 
+    // Agentfile/.erebus.toml agent fields (model, env, entrypoint, ngl...)
+    // merged onto args — explicit CLI flags keep precedence.
+    let mut args = args;
+    args::apply_config_overrides(&mut args, &config);
+
     // Apply config defaults (CLI flags override). Clone the args fields so
     // `&args` stays borrowable for the per-target loop below.
     let isolation = if args.isolation != "sandbox" {

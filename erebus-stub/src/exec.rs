@@ -190,6 +190,10 @@ pub fn setup_env(
         }
     }
 
+    // GPU facts for inference apps (ERE_GPU / ERE_VRAM_MB / ERE_NGL);
+    // payload-pinned keys always win over runtime probes.
+    crate::gpu::apply(&mut env, meta);
+
     Ok(env)
 }
 

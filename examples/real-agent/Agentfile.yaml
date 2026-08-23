@@ -1,0 +1,33 @@
+# Agentfile.yaml — declarative build config for erebus.
+#
+# Precedence: explicit CLI flags > this file > auto-detection.
+# Legacy `.erebus.toml` is still honored when no Agentfile is present.
+#
+# Build:  erebus build .
+
+agent:
+  # Identity baked into package metadata
+  version: "1.0.0"
+  description: "Self-contained llama.cpp agent with TinyLlama weights"
+  author: "erebus"
+
+model:
+  # Embedded as a ModelLayer (FastCDC chunking tuned for SISR deltas)
+  path: models/model.gguf
+  # GPU offload policy: auto | off | <layer count>
+  #   auto (default) — stub probes VRAM at launch, exports ERE_NGL
+  #   off            — force CPU-only (ERE_GPU=none, ERE_NGL=0)
+  #   33             — pin --n-gpu-layers to 33
+  ngl: auto
+
+build:
+  entrypoint:
+    - python3
+    - app.py
+  isolation: sandbox
+  seccomp: true
+  landlock: true
+  health_port: 8000
+  env:
+    LLAMA_CLI: /app/bin/llama-cli
+    PORT: "8000"

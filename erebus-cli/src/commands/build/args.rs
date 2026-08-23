@@ -458,6 +458,35 @@ pub struct BuildArgs {
     /// 16 MiB for efficient SISR delta updates on multi-GB model payloads.
     #[arg(long)]
     pub embed_model: Option<PathBuf>,
+
+    /// GPU offload policy baked into the payload: "off" (force CPU), a fixed
+    /// layer count (e.g., "33"), or unset (stub auto-detects VRAM at launch
+    /// and exports `ERE_GPU` / `ERE_VRAM_MB` / `ERE_NGL`).
+    #[arg(long)]
+    pub ngl: Option<String>,
+}
+
+/// GPU offload policy parsed from `--ngl` / Agentfile `model.ngl`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NglPolicy {
+    /// Stub detects VRAM at launch and exports `ERE_NGL`.
+    Auto,
+    /// Pin `ERE_GPU=none` + `ERE_NGL=0` (CPU-only).
+    Off,
+    /// Pin `ERE_NGL=<N>` (llama.cpp `--n-gpu-layers`).
+    Fixed(u32),
+}
+
+impl NglPolicy {
+    pub(crate) fn parse(raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(NglPolicy::Auto),
+            "off" | "cpu" | "none" => Ok(NglPolicy::Off),
+            other => other.parse::<u32>().map(NglPolicy::Fixed).map_err(|_| {
+                anyhow::anyhow!("invalid --ngl '{raw}' — expected auto, off, or a layer count")
+            }),
+        }
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -466,6 +495,17 @@ pub(crate) struct XbinConfig {
     pub(crate) build: BuildConfig,
     #[serde(default)]
     pub(crate) package: PackageConfig,
+    /// Agentfile.yaml `model:` section (GGUF weights + GPU policy)
+    #[serde(default)]
+    pub(crate) model: ModelConfig,
+}
+
+#[derive(Default, Deserialize)]
+pub(crate) struct ModelConfig {
+    /// Large model file to embed as a model layer (= `--embed-model`)
+    pub path: Option<String>,
+    /// GPU offload policy: auto | off | <layer count>
+    pub ngl: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -479,6 +519,19 @@ pub(crate) struct BuildConfig {
     pub target: Option<String>,
     pub no_install: Option<bool>,
     pub env_file: Option<String>,
+    // ── Agent-oriented extensions (Agentfile.yaml / .erebus.toml) ──
+    /// Large model file to embed as a model layer (e.g., GGUF weights)
+    pub embed_model: Option<String>,
+    /// Entrypoint command (e.g., ["python3", "app.py"])
+    pub entrypoint: Option<Vec<String>>,
+    /// Extra files/directories copied into the rootfs
+    pub include: Option<Vec<String>>,
+    /// Environment variables baked into the payload
+    pub env: Option<std::collections::BTreeMap<String, String>>,
+    /// Health check HTTP port (sets `ERE_HEALTH_PORT`)
+    pub health_port: Option<u16>,
+    /// GPU offload policy: auto | off | <layer count>
+    pub ngl: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -490,6 +543,15 @@ pub(crate) struct PackageConfig {
 }
 
 pub(crate) fn load_config(app_dir: &Path) -> XbinConfig {
+    // Agentfile.yaml is the agent-first spelling; .erebus.toml stays the
+    // legacy/general format. When both exist the Agentfile wins loudly so
+    // users are never surprised about which file drove the build.
+    for name in ["Agentfile.yaml", "Agentfile.yml"] {
+        let path = app_dir.join(name);
+        if path.exists() {
+            return load_yaml_config(&path).unwrap_or_default();
+        }
+    }
     let config_path = app_dir.join(".erebus.toml");
     if !config_path.exists() {
         return XbinConfig::default();
@@ -501,6 +563,105 @@ pub(crate) fn load_config(app_dir: &Path) -> XbinConfig {
         }),
         Err(_) => XbinConfig::default(),
     }
+}
+
+/// Parse an `Agentfile.yaml` into the shared config struct by converting the
+/// YAML tree to JSON first — one schema definition serves both file formats.
+fn load_yaml_config(path: &Path) -> Option<XbinConfig> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[erebus] warning: cannot read {}: {e}", path.display());
+            return None;
+        }
+    };
+    let docs = match yaml_rust2::YamlLoader::load_from_str(&content) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[erebus] warning: invalid {}: {e}", path.display());
+            return None;
+        }
+    };
+    let doc = docs.into_iter().next()?;
+    match serde_json::from_value(yaml_to_json(&doc)) {
+        Ok(cfg) => Some(cfg),
+        Err(e) => {
+            eprintln!("[erebus] warning: invalid {}: {e}", path.display());
+            None
+        }
+    }
+}
+
+/// Convert a parsed YAML document into dynamic JSON for serde consumption.
+fn yaml_to_json(value: &yaml_rust2::Yaml) -> serde_json::Value {
+    use yaml_rust2::Yaml;
+    match value {
+        Yaml::Real(s) => s.parse::<f64>().map_or(serde_json::Value::Null, |n| {
+            serde_json::Number::from_f64(n).map_or(serde_json::Value::Null, Into::into)
+        }),
+        Yaml::Integer(i) => serde_json::Value::from(*i),
+        Yaml::String(s) => serde_json::Value::from(s.as_str()),
+        Yaml::Boolean(b) => serde_json::Value::from(*b),
+        Yaml::Array(items) => serde_json::Value::Array(items.iter().map(yaml_to_json).collect()),
+        Yaml::Hash(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(k, v)| (key_string(k), yaml_to_json(v)))
+                .collect(),
+        ),
+        _ => serde_json::Value::Null,
+    }
+}
+
+fn key_string(key: &yaml_rust2::Yaml) -> String {
+    match key {
+        yaml_rust2::Yaml::String(s) => s.clone(),
+        yaml_rust2::Yaml::Integer(i) => i.to_string(),
+        yaml_rust2::Yaml::Real(s) => s.clone(),
+        other => other.as_str().unwrap_or("").to_string(),
+    }
+}
+
+/// Apply Agentfile/.erebus.toml agent-oriented fields onto `args`.
+///
+/// Precedence is explicit-CLI-wins: `Option` fields are only filled when the
+/// flag was absent, and config env entries are *prepended* so later `--env`
+/// flags override them key-for-key during pipeline env construction.
+pub(crate) fn apply_config_overrides(args: &mut BuildArgs, config: &XbinConfig) {
+    let build = &config.build;
+    // model.* (Agentfile spelling) wins over build.embed_model/ngl (legacy)
+    if args.embed_model.is_none() {
+        args.embed_model = config
+            .model
+            .path
+            .as_ref()
+            .or(build.embed_model.as_ref())
+            .map(PathBuf::from);
+    }
+    if args.ngl.is_none() {
+        args.ngl = config.model.ngl.clone().or_else(|| build.ngl.clone());
+    }
+    if args.entrypoint.is_empty() {
+        if let Some(entrypoint) = &build.entrypoint {
+            args.entrypoint = entrypoint.clone();
+        }
+    }
+    for path in build.include.iter().flatten() {
+        let p = PathBuf::from(path);
+        if !args.include.contains(&p) {
+            args.include.push(p);
+        }
+    }
+    if args.health_port.is_none() {
+        args.health_port = build.health_port;
+    }
+    let mut env_entries: Vec<String> = build
+        .env
+        .iter()
+        .flat_map(|m| m.iter())
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
+    env_entries.append(&mut args.env);
+    args.env = env_entries;
 }
 
 #[cfg(test)]
@@ -740,7 +901,100 @@ mod tests {
             quiet: false,
             embed_model: None,
             entrypoint: Vec::new(),
+            ngl: None,
         }
+    }
+
+    #[test]
+    fn ngl_policy_parses_all_forms() {
+        use super::NglPolicy;
+        assert_eq!(NglPolicy::parse("auto").unwrap(), NglPolicy::Auto);
+        assert_eq!(NglPolicy::parse("OFF").unwrap(), NglPolicy::Off);
+        assert_eq!(NglPolicy::parse("cpu").unwrap(), NglPolicy::Off);
+        assert_eq!(NglPolicy::parse("33").unwrap(), NglPolicy::Fixed(33));
+        assert!(NglPolicy::parse("many").is_err());
+        assert!(NglPolicy::parse("-1").is_err());
+    }
+
+    #[test]
+    fn agentfile_yaml_parses_into_shared_config() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Agentfile.yaml"),
+            "model:\n  path: models/m.gguf\n  ngl: \"33\"\nbuild:\n  entrypoint:\n    - python3\n    - app.py\n  seccomp: true\n  health_port: 8000\n  env:\n    FOO: bar\n  include:\n    - assets/\n",
+        )
+        .unwrap();
+        let cfg = load_config(dir.path());
+        assert_eq!(cfg.model.path.as_deref(), Some("models/m.gguf"));
+        assert_eq!(cfg.model.ngl.as_deref(), Some("33"));
+        assert_eq!(cfg.build.seccomp, Some(true));
+        assert_eq!(cfg.build.health_port, Some(8000));
+        assert_eq!(
+            cfg.build.entrypoint.as_deref(),
+            Some(&["python3".to_string(), "app.py".to_string()][..])
+        );
+        assert_eq!(
+            cfg.build
+                .env
+                .as_ref()
+                .and_then(|e| e.get("FOO"))
+                .map(String::as_str),
+            Some("bar")
+        );
+    }
+
+    #[test]
+    fn agentfile_model_section_maps_to_args() {
+        let dir = tempfile::tempdir().unwrap();
+        // Exact shape of examples/real-agent/Agentfile.yaml (model-only ngl)
+        std::fs::write(
+            dir.path().join("Agentfile.yaml"),
+            "model:\n  ngl: \"7\"\nbuild:\n  env:\n    MY_ENV: from-agentfile\n  isolation: none\n",
+        )
+        .unwrap();
+        let cfg = load_config(dir.path());
+        assert_eq!(cfg.model.ngl.as_deref(), Some("7"));
+        let mut args = default_build_args();
+        apply_config_overrides(&mut args, &cfg);
+        assert_eq!(args.ngl.as_deref(), Some("7"));
+        assert!(args.env.contains(&"MY_ENV=from-agentfile".to_string()));
+    }
+
+    #[test]
+    fn config_overrides_lose_to_explicit_cli_flags() {
+        let mut args = default_build_args();
+        args.ngl = Some("off".into());
+        args.health_port = Some(9999);
+        args.env = vec!["FOO=cli".into()];
+        let cfg = XbinConfig {
+            build: BuildConfig {
+                embed_model: Some("models/x.gguf".into()),
+                ngl: Some("12".into()),
+                health_port: Some(1234),
+                env: Some(
+                    [("FOO".to_string(), "file".to_string())]
+                        .into_iter()
+                        .collect(),
+                ),
+                ..BuildConfig::default()
+            },
+            package: PackageConfig::default(),
+            model: ModelConfig::default(),
+        };
+        apply_config_overrides(&mut args, &cfg);
+        // CLI values survive
+        assert_eq!(args.ngl.as_deref(), Some("off"));
+        assert_eq!(args.health_port, Some(9999));
+        // File env is prepended so pipeline's later --env pass overrides it
+        assert_eq!(
+            args.env,
+            vec!["FOO=file".to_string(), "FOO=cli".to_string()]
+        );
+        // File fills gaps
+        assert_eq!(
+            args.embed_model.as_deref(),
+            Some(Path::new("models/x.gguf"))
+        );
     }
 
     #[test]
