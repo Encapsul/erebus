@@ -294,7 +294,7 @@ fn embed_runtime_config(
     Ok(count)
 }
 
-/// Embed Python configuration (standard library modules).
+/// Embed Python configuration (standard library modules and site-packages).
 fn embed_python_config(interp_path: &Path, rootfs: &Path, verbose: bool) -> io::Result<usize> {
     let mut count = 0;
 
@@ -323,6 +323,58 @@ fn embed_python_config(interp_path: &Path, rootfs: &Path, verbose: bool) -> io::
                 "  embed: copied Python stdlib ({} files)",
                 count_dir_files(&target)
             );
+        }
+    }
+
+    // Get Python version for constructing standard paths
+    let py_version = run_cmd(
+        interp_path,
+        &[
+            "-c",
+            "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+        ],
+    );
+    let py_version = py_version.trim();
+    if py_version.is_empty() {
+        return Ok(count);
+    }
+
+    // The pip install with --target puts packages in usr/local/lib/pythonX.Y/site-packages
+    // We need to copy them to the standard locations where the embedded Python will look:
+    // - usr/lib/pythonX.Y/site-packages (standard)
+    // - usr/lib/pythonX.Y/dist-packages (Debian/Ubuntu)
+    // - usr/local/lib/pythonX.Y/dist-packages (Debian/Ubuntu local)
+    let pip_target = rootfs
+        .join("usr/local/lib")
+        .join(format!("python{}", py_version))
+        .join("site-packages");
+    let std_target = rootfs
+        .join("usr/lib")
+        .join(format!("python{}", py_version))
+        .join("site-packages");
+    let dist_target = rootfs
+        .join("usr/lib")
+        .join(format!("python{}", py_version))
+        .join("dist-packages");
+    let local_dist_target = rootfs
+        .join("usr/local/lib")
+        .join(format!("python{}", py_version))
+        .join("dist-packages");
+
+    // Copy from pip's target location to all standard locations
+    if pip_target.exists() && pip_target.is_dir() {
+        for target in [&std_target, &dist_target, &local_dist_target] {
+            std::fs::create_dir_all(target.parent().unwrap_or(target)).ok();
+            copy_dir_recursive(&pip_target, target)?;
+            let sp_count = count_dir_files(target);
+            count += sp_count;
+            if verbose {
+                eprintln!(
+                    "  embed: copied Python site-packages ({} files) to {}",
+                    sp_count,
+                    target.display()
+                );
+            }
         }
     }
 

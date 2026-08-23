@@ -5,7 +5,9 @@ use erebus_core::embed;
 use erebus_core::metadata::{BunFeatures, EmbeddedInterpreter};
 use erebus_core::paths::cache_dir;
 use erebus_core::pkgmgr;
+
 use std::path::PathBuf;
+use std::process::Command;
 
 use super::args::{config_fingerprint, BuildArgs, BuildPlan};
 use super::deps::is_command_available;
@@ -142,14 +144,40 @@ pub(crate) fn build_single_target(
         }
     }
 
+    // Determine embedded interpreter string early for pip install target
+    let embedded_interpreter_str = if let Some(ref interp) = args.embed_interpreter {
+        Some(interp.clone())
+    } else if runtime_name == "python" {
+        Some("python3".to_string())
+    } else {
+        None
+    };
+
     // Detect and install all package managers (primary + secondary)
     let all_pkg_mgrs = pkgmgr::detect_all_pkgmgrs(app_dir, runtime_name);
-    for mgr in &all_pkg_mgrs {
-        if verbose {
+    if verbose {
+        for mgr in &all_pkg_mgrs {
             eprintln!("Package manager: {}", mgr.name());
         }
+    }
 
-        if !no_install {
+    // Find stub binary
+    let stub = find_stub(&target)?;
+    let stub_bytes = std::fs::read(&stub)
+        .with_context(|| format!("failed to read stub binary at {}", stub.display()))?;
+
+    // Create temp directory for layer building
+    let tmp = tempfile::tempdir().context("failed to create temp directory")?;
+    let rootfs = tmp.path().join("rootfs");
+    std::fs::create_dir_all(&rootfs).context("failed to create rootfs directory")?;
+
+    // Install package manager dependencies into rootfs
+    if !no_install {
+        for mgr in &all_pkg_mgrs {
+            if verbose {
+                eprintln!("Package manager: {}", mgr.name());
+            }
+
             let cmd = mgr.install_cmd();
 
             if !is_command_available(cmd[0]) {
@@ -175,6 +203,32 @@ pub(crate) fn build_single_target(
                 full_args.push(":all:".into());
             }
 
+            // For pip, install into rootfs site-packages
+            if matches!(mgr, pkgmgr::PkgMgr::Pip) {
+                // Query actual python3 version
+                let py_version = Command::new("python3")
+                    .args([
+                        "-c",
+                        "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+                    ])
+                    .output()
+                    .ok()
+                    .and_then(|o| String::from_utf8(o.stdout).ok())
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|| "3.10".to_string());
+
+                let site_packages = rootfs
+                    .join("usr/local/lib")
+                    .join(format!("python{}", py_version))
+                    .join("site-packages");
+                std::fs::create_dir_all(&site_packages).ok();
+                full_args.push("--target".into());
+                full_args.push(site_packages.to_string_lossy().to_string());
+                if verbose {
+                    eprintln!("  pip target: {}", site_packages.display());
+                }
+            }
+
             let mut command = std::process::Command::new(cmd[0]);
             command.args(&full_args).current_dir(app_dir);
 
@@ -191,18 +245,48 @@ pub(crate) fn build_single_target(
         }
     }
 
+    // After pip install, copy site-packages from --target location to standard location
+    // so embed_interpreter can find them
+    if let Some(ref interp) = embedded_interpreter_str {
+        if matches!(interp.as_str(), "python3" | "python") {
+            if let Ok(py_version) = Command::new("python3")
+                .args([
+                    "-c",
+                    "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+                ])
+                .output()
+            {
+                if let Ok(stdout) = String::from_utf8(py_version.stdout) {
+                    let py_version = stdout.trim();
+                    let src = rootfs
+                        .join("usr/local/lib")
+                        .join(format!("python{}", py_version))
+                        .join("site-packages");
+                    let dst = rootfs
+                        .join("usr/lib")
+                        .join(format!("python{}", py_version))
+                        .join("site-packages");
+                    if verbose {
+                        eprintln!("  pip target src: {}", src.display());
+                        eprintln!("  pip target dst: {}", dst.display());
+                        eprintln!("  src exists: {}", src.exists());
+                    }
+                    if src.exists() {
+                        if let Err(e) = copy_dir_recursive_with(&src, &dst, true) {
+                            if verbose {
+                                eprintln!("  warning: failed to copy site-packages: {}", e);
+                            }
+                        } else if verbose {
+                            eprintln!("  copied site-packages to standard location");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Clean up downloaded build tools from cache (deferred: nothing downloads
     // tools today, but the cleanup stays for parity with the cache layout).
-
-    // Find stub binary
-    let stub = find_stub(&target)?;
-    let stub_bytes = std::fs::read(&stub)
-        .with_context(|| format!("failed to read stub binary at {}", stub.display()))?;
-
-    // Create temp directory for layer building
-    let tmp = tempfile::tempdir().context("failed to create temp directory")?;
-    let rootfs = tmp.path().join("rootfs");
-    std::fs::create_dir_all(&rootfs).context("failed to create rootfs directory")?;
 
     // Copy app files
     let include_node_modules = true;
@@ -226,13 +310,6 @@ pub(crate) fn build_single_target(
     // host-arch interpreter that will only run on matching hardware/emulators.
     // Until a per-target interpreter source exists, treat non-host-arch Python
     // builds as stub-level validation only (see ROADMAP.md → RISC-V).
-    let embedded_interpreter_str = if let Some(ref interp) = args.embed_interpreter {
-        Some(interp.clone())
-    } else if runtime_name == "python" {
-        Some("python3".to_string())
-    } else {
-        None
-    };
 
     let mut interpreter_embedded = false;
     if let Some(ref interpreter_name) = embedded_interpreter_str {
@@ -595,7 +672,62 @@ pub(crate) fn build_single_target(
             rt_deps_hash: Some(new_rt_hash.clone()),
             update_url: args.update_url.clone(),
             crypto: crypto_meta,
-            layers: None,
+            layers: {
+                let mut layers = Vec::new();
+
+                // Default runtime layer
+                use erebus_core::layer::{Capability, RuntimeLayer, SerializableLayer};
+                layers.push(SerializableLayer::Runtime(RuntimeLayer {
+                    name: runtime_name.to_string(),
+                    interpreter: runtime_name.to_string(),
+                    entrypoint: entrypoint.to_vec(),
+                    version: None,
+                    env: env_map
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                        .collect(),
+                    capabilities: vec![
+                        Capability::ReadFile,
+                        Capability::WriteFile,
+                        Capability::Network,
+                        Capability::Exec,
+                        Capability::Syscall,
+                        Capability::Env,
+                    ],
+                }));
+
+                // Add model layer if embed_model is provided
+                if let Some(ref model_path) = args.embed_model {
+                    use erebus_core::layer::{ModelLayer, SerializableLayer};
+                    let model_bytes =
+                        std::fs::read(model_path).context("failed to read model file")?;
+                    let model_name = model_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    let _model_size = model_bytes.len() as u64;
+
+                    // Copy model to rootfs as well (for extraction)
+                    let model_dest = rootfs.join("app/models").join(&model_name);
+                    std::fs::create_dir_all(model_dest.parent().unwrap()).ok();
+                    std::fs::write(&model_dest, &model_bytes)
+                        .context("failed to write model to rootfs")?;
+
+                    let model_layer = ModelLayer {
+                        name: model_name,
+                        format: "gguf".to_string(),
+                        path: format!(
+                            "models/{}",
+                            model_dest.file_name().unwrap().to_string_lossy()
+                        ),
+                        size: model_bytes.len() as u64,
+                        metadata: None,
+                    };
+                    layers.push(SerializableLayer::Model(model_layer));
+                }
+                Some(layers)
+            },
             entrypoint_layer: None,
         },
         &bun_features,

@@ -4,7 +4,6 @@
 //! detection. Used by the Rust CLI (`erebus-cli`) and the launcher stub
 //! (`erebus-stub`).
 
-pub mod assembler;
 pub mod assembly;
 pub mod cas;
 pub mod chunker;
