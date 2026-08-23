@@ -53,18 +53,10 @@ fn cmd_keygen(args: &[String]) -> i32 {
 
     let seed = Zeroizing::new(signing_key.to_bytes());
     let key_path = key_dir.join(format!("{fp_hex}.key"));
-    fs::write(&key_path, &*seed).unwrap_or_else(|e| {
+    write_private_key(&key_path, &*seed).unwrap_or_else(|e| {
         eprintln!("error writing key file: {e}");
         std::process::exit(1);
     });
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).unwrap_or_else(|e| {
-            eprintln!("warning: could not set key permissions: {e}");
-        });
-    }
 
     fs::write(key_dir.join(format!("{fp_hex}.pub")), pubkey_bytes).unwrap_or_else(|e| {
         eprintln!("error writing pubkey file: {e}");
@@ -162,4 +154,24 @@ fn cmd_verify(args: &[String]) -> i32 {
         Ok(()) => 0,
         Err(_) => 1,
     }
+}
+
+/// Private-key write with owner-only mode from creation (no chmod-after
+/// window where the seed is world-readable). `create_new` also refuses to
+/// follow an existing symlink at the key path.
+#[cfg(unix)]
+fn write_private_key(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?
+        .write_all(bytes)
+}
+
+#[cfg(not(unix))]
+fn write_private_key(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    fs::write(path, bytes)
 }

@@ -56,16 +56,13 @@ pub fn run(args: KeygenArgs) -> Result<()> {
     }
 
     let key_bytes = Zeroizing::new(signing_key.to_bytes());
-    std::fs::write(&key_path, &*key_bytes)
+    write_private_key(&key_path, &*key_bytes)
         .with_context(|| format!("failed to write private key to {}", key_path.display()))?;
     std::fs::write(&pub_path, verifying_key.as_bytes())
         .with_context(|| format!("failed to write public key to {}", pub_path.display()))?;
 
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    debug_assert_private_mode(&key_path)?;
 
     if args.json {
         let info = serde_json::json!({
@@ -81,5 +78,42 @@ pub fn run(args: KeygenArgs) -> Result<()> {
         eprintln!("  public key:  {}", pub_path.display());
     }
 
+    Ok(())
+}
+
+/// Write a private key with owner-only permissions from the moment of
+/// creation — never a default-mode file chmodded after the fact (TOCTOU).
+///
+/// `create_new` also refuses to clobber or follow an existing symlink at the
+/// key path; callers handle the already-exists case before calling.
+#[cfg(unix)]
+fn write_private_key(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?
+        .write_all(bytes)
+}
+
+#[cfg(not(unix))]
+fn write_private_key(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)
+}
+
+/// Fail loudly if the OS did not honor the private key mode.
+#[cfg(unix)]
+fn debug_assert_private_mode(path: &std::path::Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
+    if mode != 0o600 {
+        anyhow::bail!(
+            "private key written with permissive mode {:o} at {}",
+            mode,
+            path.display()
+        );
+    }
     Ok(())
 }
