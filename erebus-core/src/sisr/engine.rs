@@ -43,13 +43,12 @@ pub struct DirectoryChunkFetcher {
 }
 
 impl DirectoryChunkFetcher {
-    pub fn new(root: &Path) -> Self {
-        let store = crate::cas::DiskObjectStore::new(root)
-            .expect("cas dir creation should not fail for a writable temp dir");
-        Self {
+    pub fn new(root: &Path) -> io::Result<Self> {
+        let store = crate::cas::DiskObjectStore::new(root)?;
+        Ok(Self {
             store,
             fetched: Cell::new(0),
-        }
+        })
     }
 }
 
@@ -725,7 +724,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let hash = sha256_of(b"chunk-bytes");
         fs::write(dir.join(hex::encode(hash)), b"chunk-bytes").unwrap();
-        let fetcher = DirectoryChunkFetcher::new(&dir);
+        let fetcher = DirectoryChunkFetcher::new(&dir).unwrap();
         assert_eq!(
             fetcher.fetch(&hash, b"chunk-bytes".len()).unwrap(),
             b"chunk-bytes"

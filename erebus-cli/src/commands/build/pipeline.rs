@@ -664,10 +664,9 @@ pub(crate) fn build_single_target(
             bun_features.embedded_runtime.interpreter_path = Some(path);
         }
         if verbose {
-            eprintln!(
-                "  embedded runtime: {}",
-                bun_features.embedded_runtime.interpreter.as_ref().unwrap()
-            );
+            if let Some(interp) = bun_features.embedded_runtime.interpreter.as_ref() {
+                eprintln!("  embedded runtime: {interp}");
+            }
         }
     }
 
@@ -754,17 +753,19 @@ pub(crate) fn build_single_target(
 
                     // Copy model to rootfs as well (for extraction)
                     let model_dest = rootfs.join("app/models").join(&model_name);
-                    std::fs::create_dir_all(model_dest.parent().unwrap()).ok();
+                    if let Some(parent) = model_dest.parent() {
+                        std::fs::create_dir_all(parent).ok();
+                    }
                     std::fs::write(&model_dest, &model_bytes)
                         .context("failed to write model to rootfs")?;
 
+                    // Reuse `model_name` (already derived from the source
+                    // path) instead of re-deriving from the destination — a
+                    // path with no filename cannot panic here.
                     let model_layer = ModelLayer {
-                        name: model_name,
+                        name: model_name.clone(),
                         format: "gguf".to_string(),
-                        path: format!(
-                            "models/{}",
-                            model_dest.file_name().unwrap().to_string_lossy()
-                        ),
+                        path: format!("models/{model_name}"),
                         size: model_bytes.len() as u64,
                         metadata: None,
                     };

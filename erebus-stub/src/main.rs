@@ -641,7 +641,7 @@ fn maybe_apply_sisr_update() -> io::Result<Option<PathBuf>> {
         .parent()
         .unwrap_or_else(|| Path::new(""))
         .join("chunks");
-    let fetcher = erebus_core::sisr::engine::DirectoryChunkFetcher::new(&chunks_root);
+    let fetcher = erebus_core::sisr::engine::DirectoryChunkFetcher::new(&chunks_root)?;
 
     let current = self_exe()?;
     let store = HealthStore::new(&health_store_dir()?);

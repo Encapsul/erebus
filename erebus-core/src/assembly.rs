@@ -680,7 +680,7 @@ mod tests {
             parsed_ext.merkle_root
         );
 
-        let mut msg = Vec::with_capacity(32 + manifest.encoded_len());
+        let mut msg = Vec::with_capacity(32 + manifest.encoded_len().unwrap());
         msg.extend_from_slice(&parsed_ext.merkle_root);
         msg.extend_from_slice(&manifest.serialize().unwrap());
         assert_eq!(

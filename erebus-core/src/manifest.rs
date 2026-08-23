@@ -46,21 +46,15 @@ pub struct DeltaManifest {
 impl DeltaManifest {
     /// Byte length of the serialized form.
     ///
-    /// # Panics
-    ///
-    /// Panics if the computed length overflows `usize`. This is unreachable
-    /// in practice because `chunks.len()` is bounded by the buffer length
-    /// validated in `parse()`.
-    pub fn encoded_len(&self) -> usize {
-        // SAFETY: `chunks.len()` is bounded by the buffer length validated in
-        // parse(). The maximum representable value is
-        // (usize::MAX - HEADER_SIZE) / ENTRY_SIZE, far larger than any buffer.
-        #[allow(clippy::expect_used)]
+    /// Errors on `usize` overflow — unreachable in practice because
+    /// `chunks.len()` is bounded by the buffer length validated in `parse()`,
+    /// but expressed as a Result so library code never panics.
+    pub fn encoded_len(&self) -> io::Result<usize> {
         self.chunks
             .len()
             .checked_mul(ENTRY_SIZE)
             .and_then(|n| n.checked_add(HEADER_SIZE))
-            .expect("manifest size overflow")
+            .ok_or_else(|| err("manifest size overflow"))
     }
 
     /// Serializes the manifest into its compact binary form.
@@ -69,7 +63,7 @@ impl DeltaManifest {
     pub fn serialize(&self) -> io::Result<Vec<u8>> {
         let chunk_count =
             u32::try_from(self.chunks.len()).map_err(|_| err("chunk count exceeds u32::MAX"))?;
-        let mut out = Vec::with_capacity(self.encoded_len());
+        let mut out = Vec::with_capacity(self.encoded_len()?);
         out.extend_from_slice(MAGIC);
         out.push(VERSION);
         out.extend_from_slice(&[0u8; 3]);
@@ -185,7 +179,7 @@ mod tests {
     #[test]
     fn encoded_len_matches_serialized_len() {
         let m = sample();
-        assert_eq!(m.encoded_len(), m.serialize().unwrap().len());
+        assert_eq!(m.encoded_len().unwrap(), m.serialize().unwrap().len());
     }
 
     #[test]

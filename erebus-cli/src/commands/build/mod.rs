@@ -181,8 +181,8 @@ fn print_dry_run(args: &BuildArgs, plan: &BuildPlan, target: Option<&str>, outpu
     if let Some(port) = args.health_port {
         eprintln!("  Health:    port {port}");
     }
-    if args.otel_endpoint.is_some() {
-        eprintln!("  OTel:      {}", args.otel_endpoint.as_deref().unwrap());
+    if let Some(otel) = args.otel_endpoint.as_deref() {
+        eprintln!("  OTel:      {otel}");
     }
     if !args.cron.is_empty() {
         eprintln!("  Cron:      {} task(s)", args.cron.len());

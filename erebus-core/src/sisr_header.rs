@@ -199,7 +199,7 @@ mod tests {
                 })
                 .collect(),
         };
-        let overhead = SIZE + manifest.encoded_len();
+        let overhead = SIZE + manifest.encoded_len().unwrap();
         assert!(
             overhead < 4096,
             "SISR header overhead {overhead} exceeds 4 KiB"
