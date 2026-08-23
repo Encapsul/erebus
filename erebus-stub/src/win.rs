@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::ffi::{c_void, OsStr, OsString};
 use std::io;
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const CREATE_UNICODE_ENVIRONMENT: u32 = 0x0000_0400;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -87,6 +87,47 @@ impl Drop for Child {
     }
 }
 
+/// Resolve a bare command name against the process `PATH`, mirroring Unix
+/// `execvp` semantics: `CreateProcessW` performs no PATH search and no
+/// extension expansion when `lpApplicationName` is non-NULL, so the stub must
+/// do both itself. Names with a directory component are returned unchanged.
+fn resolve_on_path(prog: &Path) -> PathBuf {
+    if prog.parent().is_some_and(|p| !p.as_os_str().is_empty()) {
+        return prog.to_path_buf();
+    }
+    // Executable extensions tried in PATHEXT order (subset that matters for
+    // interpreters and packaged apps; cmd/bat would be re-parsed by cmd.exe).
+    const EXTS: [&str; 3] = ["exe", "com", "bat"];
+    // Windows distributions install `python.exe` while erebus entrypoints use
+    // the POSIX spelling `python3`: after exhausting the exact name, retry
+    // once with any trailing version digits stripped before giving up.
+    let lossy = prog.to_string_lossy();
+    let mut names = vec![lossy.to_string()];
+    let stripped = lossy.trim_end_matches(|c: char| c.is_ascii_digit());
+    if !stripped.is_empty() && stripped != lossy {
+        names.push(stripped.to_string());
+    }
+    let dirs = std::env::var_os("PATH").map_or(Vec::new(), |p| {
+        std::env::split_paths(&p).collect::<Vec<_>>()
+    });
+    for name in &names {
+        for dir in &dirs {
+            let direct = dir.join(name);
+            if direct.is_file() {
+                return direct;
+            }
+            for ext in EXTS {
+                let candidate = dir.join(format!("{name}.{ext}"));
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
+        }
+    }
+    // Unresolved: hand back the original so CreateProcessW reports the error.
+    prog.to_path_buf()
+}
+
 /// Spawn `prog` with `argv` and environment, optionally detached.
 ///
 /// `argv[0]` is the program name. When `detached`, the child runs without a
@@ -98,6 +139,7 @@ pub fn spawn(
     cwd: Option<&Path>,
     detached: bool,
 ) -> io::Result<Child> {
+    let prog = resolve_on_path(prog);
     let command_line = build_command_line(argv);
     let env_block = build_env_block(env)?;
 
@@ -149,7 +191,10 @@ pub fn spawn(
             cmd_line_wide.as_mut_ptr(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            0, // bInheritHandles = FALSE
+            // Inherit std handles: unlike a Unix console, piped/redirected
+            // stdout only reaches the child through handle inheritance
+            // (execvp semantics — `app.exe > log` must work).
+            1, // bInheritHandles = TRUE
             flags,
             env_block.as_ptr() as *mut c_void,
             cwd_wide.as_ref().map_or(std::ptr::null(), Vec::as_ptr),
@@ -266,4 +311,40 @@ fn to_wide_null(s: &OsStr) -> Vec<u16> {
     let mut v: Vec<u16> = s.encode_wide().collect();
     v.push(0);
     v
+}
+
+// ---------------------------------------------------------------------------
+// Entropy shim
+// ---------------------------------------------------------------------------
+
+/// mingw-w64 satisfies std's RNG seeding by importing `ProcessPrng` from
+/// `bcryptprimitives.dll`, which only ships with Windows 10+. Providing our
+/// own definition keeps the launcher loadable on Windows 7/8 and Wine, which
+/// lack that DLL.
+#[no_mangle]
+extern "system" fn ProcessPrng(pb_data: *mut u8, cb_data: usize) -> i32 {
+    // RtlGenRandom (exported as SystemFunction036) has existed since Windows
+    // XP and is what ProcessPrng itself wraps on legacy builds. Chunked
+    // because its length parameter is 32-bit while `cb_data` is pointer-sized.
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn SystemFunction036(random_buffer: *mut u8, random_buffer_length: u32) -> i32;
+    }
+    const MAX_CHUNK: usize = u32::MAX as usize;
+    let mut remaining = cb_data;
+    let mut cursor = pb_data;
+    while remaining > 0 {
+        let chunk = remaining.min(MAX_CHUNK);
+        // SAFETY: `[cursor, cursor+chunk)` lies within the caller-provided
+        // buffer of `cb_data` bytes; SystemFunction036 only writes to it and
+        // returns nonzero on success.
+        let ok = unsafe { SystemFunction036(cursor, chunk as u32) };
+        if ok == 0 {
+            return 0;
+        }
+        // SAFETY: offset stays within the same allocation (chunk <= remaining).
+        cursor = unsafe { cursor.add(chunk) };
+        remaining -= chunk;
+    }
+    1
 }

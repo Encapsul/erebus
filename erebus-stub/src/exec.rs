@@ -17,6 +17,7 @@ use crate::Metadata;
 #[cfg(unix)]
 use crate::{cstr, to_ptr_vec};
 use erebus_core::detect;
+#[cfg(unix)]
 use erebus_core::layer::Capability;
 /// Enter user + mount namespace if isolation >= 2; no-op otherwise.
 /// No-op on non-Linux platforms (no namespaces available).
@@ -885,16 +886,17 @@ pub fn spawn_app_windows(
 
     let mut cmd = prog;
     if !is_executable_path(&cmd) {
-        cmd = find_in_bin_paths(rootfs, &entrypoint[0]).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "[erebus] error: interpreter '{}' not found (tried: {})",
-                    interpreter_name,
-                    cmd.display()
-                ),
-            )
-        })?;
+        cmd = find_in_bin_paths(rootfs, &entrypoint[0]).unwrap_or_else(|| {
+            // Portable-embed payloads ship no interpreter: fall back to the
+            // bare command name and let the spawn path resolve it from the
+            // target machine's PATH (execvp semantics).
+            if std::env::var_os("ERE_VERBOSE").is_some() {
+                eprintln!(
+                    "[erebus] '{interpreter_name}' not in payload — resolving from system PATH"
+                );
+            }
+            PathBuf::from(&entrypoint[0])
+        });
     }
 
     let mut argv: Vec<std::ffi::OsString> = Vec::new();

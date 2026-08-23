@@ -26,13 +26,16 @@ cd your-app && erebus build . -o myapp.erebus
 ### Universal binary — one file, every platform
 
 ```bash
-erebus build . --universal -o agent.erebus   # linux-x64 + linux-arm64 + macos-arm64 slices
+erebus build . --universal -o agent.erebus   # linux-x64 + linux-arm64 + macos-arm64 + windows-x64 slices
 ./agent.erebus                                # runs natively on any of them
 ```
 
 The polyglot file starts with a `#!/bin/sh` loader that routes `uname -s`/`uname -m`
-to the matching native `.erebus` slice (extract once to `~/.cache`, then exec).
-Cross-arch Python builds embed only portable files and use the target's own interpreter.
+to the matching native `.erebus` slice (extract once to the OS cache dir, then exec).
+Cross-platform Python builds embed only portable files and use the target's own interpreter.
+Windows slices ship a native PE32+ stub (CreateProcessW + MapViewOfFile); running the
+universal file directly requires a POSIX shell (git-bash/WSL) — or extract the slice with
+`erebus inspect --json` and run it from cmd.exe.
 Windows x64 requires the upcoming PE stub port.
 
 ## Overview

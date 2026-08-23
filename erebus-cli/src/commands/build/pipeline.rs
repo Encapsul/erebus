@@ -307,20 +307,22 @@ pub(crate) fn build_single_target(
     //
     // CROSS-TARGET: CPython is copied verbatim from the *build host* plus its
     // ldd deps — a host binary cannot run on a different target arch (its ELF
-    // interpreter is missing there). Cross-arch Python builds therefore embed
-    // only the portable parts (stdlib, site-packages) and rely on the target
-    // machine's own `python3` found via PATH.
-
+    // interpreter is missing there) nor on a different OS (ELF vs PE/Mach-O).
+    // Cross-platform Python builds therefore embed only the portable parts
+    // (stdlib, site-packages) and rely on the target machine's own `python3`
+    // found via PATH.
     let mut interpreter_embedded = false;
     if let Some(ref interpreter_name) = embedded_interpreter_str {
         let cross_python = runtime_name == "python"
             && target
                 .as_deref()
                 .map(parse_target)
-                .is_some_and(|(arch, _)| arch != std::env::consts::ARCH);
+                .is_some_and(|(arch, os)| {
+                    arch != std::env::consts::ARCH || os != std::env::consts::OS
+                });
         let embed_result = if cross_python {
             eprintln!(
-                "[erebus] {}: skipping host interpreter embed (arch mismatch) — uses target python3",
+                "[erebus] {}: skipping host interpreter embed (platform mismatch) — uses target python3",
                 target.as_deref().unwrap_or("?")
             );
             erebus_core::embed::embed_python_portable(

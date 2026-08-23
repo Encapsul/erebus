@@ -1,18 +1,45 @@
-//! Zero-copy payload access via `mmap(2)` — lazy loading for large payloads.
+//! Zero-copy payload access via `mmap(2)` / `MapViewOfFile` — lazy loading
+//! for large payloads.
 //!
 //! Cold start previously heap-allocated the entire compressed payload before
 //! hashing and decompressing it. For multi-GB AI model payloads that meant a
-//! multi-GB RSS spike on every first run. Mapping the payload range of
-//! `/proc/self/exe` instead keeps those pages in kernel page cache: reads are
+//! multi-GB RSS spike on every first run. Mapping the payload range of the
+//! running image instead keeps those pages in kernel page cache: reads are
 //! zero-copy and the kernel can evict clean pages under memory pressure.
 //!
-//! Falls back to a plain heap read when mmap is unavailable, or when
+//! Falls back to a plain heap read when mapping is unavailable, or when
 //! `ERE_NO_MMAP=1` is set in the launcher's environment.
 
 use std::fs::File;
 use std::io::{self, Read, Seek};
 use std::ops::Deref;
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
+
+#[cfg(windows)]
+mod ffi {
+    type Handle = *mut core::ffi::c_void;
+
+    extern "system" {
+        pub fn CreateFileMappingW(
+            h_file: Handle,
+            lp_attributes: Handle,
+            fl_protect: u32,
+            dw_maximum_size_high: u32,
+            dw_maximum_size_low: u32,
+            lp_name: *const u16,
+        ) -> Handle;
+        pub fn MapViewOfFile(
+            h_file_mapping_object: Handle,
+            dw_desired_access: u32,
+            dw_file_offset_high: u32,
+            dw_file_offset_low: u32,
+            dw_number_of_bytes_to_map: usize,
+        ) -> Handle;
+        pub fn UnmapViewOfFile(lp_base_address: Handle) -> i32;
+        pub fn CloseHandle(h_object: Handle) -> i32;
+    }
+}
 
 /// Payload bytes backed by an anonymous heap buffer or an mmap window.
 ///
@@ -38,7 +65,8 @@ impl AsRef<[u8]> for PayloadBuf {
     }
 }
 
-/// An active `PROT_READ` file mapping; unmapped exactly once on drop.
+/// An active read-only file mapping; unmapped exactly once on drop.
+#[cfg(unix)]
 pub struct MappedRange {
     /// Base address returned by a successful `mmap`; never null (`MAP_FAILED`
     /// is checked at creation) and never reallocated while this value lives.
@@ -50,21 +78,50 @@ pub struct MappedRange {
     _file: File,
 }
 
+/// A read-only `MapViewOfFile` window into the payload range.
+#[cfg(windows)]
+pub struct MappedRange {
+    /// View start plus the sub-alignment delta: the requested offset rounded
+    /// down to the 64 KiB allocation granularity lives at `view_base`.
+    ptr: *mut u8,
+    len: usize,
+    /// Base address returned by `MapViewOfFile` — what `UnmapViewOfFile`
+    /// requires (not `ptr`, which may sit past it inside the first page).
+    view_base: *mut core::ffi::c_void,
+    /// Section object from `CreateFileMappingW`; closed after unmapping.
+    map: *mut core::ffi::c_void,
+    /// Keeps the file backing the section open for the mapping's lifetime.
+    _file: File,
+}
+
 impl Deref for MappedRange {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        // SAFETY: `ptr` is the base of a live PROT_READ mapping of exactly
-        // `len` bytes created by `try_mmap` below; no other code mutates or
-        // unmaps it during this struct's lifetime (munmap happens only in Drop).
+        // SAFETY: `ptr` points at `len` readable bytes of a live read-only
+        // mapping created by `try_mmap` below; no other code mutates or
+        // unmaps it during this struct's lifetime (unmapping happens only in
+        // Drop).
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
     }
 }
 
 impl Drop for MappedRange {
+    #[cfg(unix)]
     fn drop(&mut self) {
         // SAFETY: paired with the successful `mmap` in `try_mmap`; same ptr
         // and length, called exactly once because `MappedRange` is not Clone.
         unsafe { libc::munmap(self.ptr.cast(), self.len) };
+    }
+
+    #[cfg(windows)]
+    fn drop(&mut self) {
+        // SAFETY: paired with the successful `MapViewOfFile` in `try_mmap`;
+        // `view_base` is the exact address the API returned, unmapped once,
+        // then the section handle is closed.
+        unsafe {
+            ffi::UnmapViewOfFile(self.view_base);
+            ffi::CloseHandle(self.map);
+        }
     }
 }
 
@@ -91,6 +148,7 @@ fn heap_read(file: &File, offset: u64, len: usize) -> io::Result<PayloadBuf> {
     Ok(PayloadBuf::Heap(buf))
 }
 
+#[cfg(unix)]
 fn try_mmap(file: &File, offset: u64, len: usize) -> io::Result<Option<MappedRange>> {
     if offset > libc::off_t::MAX as u64 {
         return Ok(None);
@@ -116,6 +174,69 @@ fn try_mmap(file: &File, offset: u64, len: usize) -> io::Result<Option<MappedRan
     Ok(Some(MappedRange {
         ptr: map.cast::<u8>(),
         len,
+        _file: owned,
+    }))
+}
+
+#[cfg(windows)]
+fn try_mmap(file: &File, offset: u64, len: usize) -> io::Result<Option<MappedRange>> {
+    use std::os::windows::io::AsRawHandle;
+
+    const PAGE_READONLY: u32 = 0x0000_0002;
+    const FILE_MAP_READ: u32 = 0x0000_0004;
+    /// MapViewOfFile offsets must be a multiple of the system allocation
+    /// granularity (always 64 KiB on supported Windows versions).
+    const GRANULARITY_MASK: u64 = 0xFFFF;
+
+    let total = len
+        .checked_add((offset & GRANULARITY_MASK) as usize)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "payload range overflows"))?;
+    let owned = file.try_clone()?;
+
+    // SAFETY: `handle` is a valid open file handle held alive by `owned`;
+    // PAGE_READONLY creates a read-only section covering the whole file
+    // (zero sizes). Failure returns null, handled below.
+    let map = unsafe {
+        ffi::CreateFileMappingW(
+            file.as_raw_handle(),
+            std::ptr::null_mut(),
+            PAGE_READONLY,
+            0,
+            0,
+            std::ptr::null(),
+        )
+    };
+    if map.is_null() {
+        return Ok(None);
+    }
+
+    let aligned = offset & !GRANULARITY_MASK;
+    // SAFETY: `[aligned, aligned+total)` lies within the file because the
+    // caller validated `offset+len` against the file length; FILE_MAP_READ
+    // maps it without copy-on-write access. Failure returns null, handled
+    // below together with closing the section handle.
+    let view = unsafe {
+        ffi::MapViewOfFile(
+            map,
+            FILE_MAP_READ,
+            (aligned >> 32) as u32,
+            aligned as u32,
+            total,
+        )
+    };
+    if view.is_null() {
+        // SAFETY: `map` came from a successful CreateFileMappingW above.
+        unsafe { ffi::CloseHandle(map) };
+        return Ok(None);
+    }
+
+    Ok(Some(MappedRange {
+        // SAFETY: `delta <= GRANULARITY_MASK < total`, so the adjusted base
+        // stays within the mapped window of `total` bytes.
+        ptr: unsafe { view.cast::<u8>().add((offset - aligned) as usize) },
+        len,
+        view_base: view,
+        map,
         _file: owned,
     }))
 }
@@ -171,5 +292,21 @@ mod tests {
         let h = read_payload(&f, 1, 60_000).unwrap();
         std::env::remove_var("ERE_NO_MMAP");
         assert_eq!(&m[..], &h[..]);
+    }
+
+    /// Offsets not aligned to any OS mapping granularity must yield the same
+    /// bytes as the heap path (exercises the Windows view-base adjustment).
+    #[test]
+    fn unaligned_offsets_match_heap_path() {
+        let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 253) as u8).collect();
+        let dir = temp_file(&payload);
+        let f = File::open(dir.path().join("bin")).unwrap();
+        for offset in [65_535u64, 65_537, 131_072, 131_073] {
+            let m = read_payload(&f, offset, 10_000).unwrap();
+            std::env::set_var("ERE_NO_MMAP", "1");
+            let h = read_payload(&f, offset, 10_000).unwrap();
+            std::env::remove_var("ERE_NO_MMAP");
+            assert_eq!(&m[..], &h[..], "offset {offset}");
+        }
     }
 }

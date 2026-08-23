@@ -54,6 +54,30 @@ fn arch_of(triple: &str) -> Option<u8> {
     }
 }
 
+/// Locate the erebus workspace so stub builds work from any cwd: cargo needs
+/// a `Cargo.toml`, which cannot be assumed from the invocation directory.
+fn find_workspace_root() -> Option<PathBuf> {
+    fn has_workspace(dir: &std::path::Path) -> bool {
+        dir.join("Cargo.toml").exists() && dir.join("erebus-stub").is_dir()
+    }
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        if has_workspace(&dir) {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    // Dev/CI fallback: the source tree this CLI was compiled from.
+    let built_from = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = built_from.parent()?;
+    if has_workspace(root) {
+        return Some(root.to_path_buf());
+    }
+    None
+}
+
 /// Cross-build the launcher stub for one target triple via cargo zigbuild.
 fn ensure_stub(triple: &str, verbose: bool) -> Result<()> {
     if find_stub(&Some(triple.to_string())).is_ok() {
@@ -64,17 +88,19 @@ fn ensure_stub(triple: &str, verbose: bool) -> Result<()> {
         .args(["target", "add", triple])
         .status();
 
-    let out = Command::new("cargo")
-        .args([
-            "zigbuild",
-            "--release",
-            "-p",
-            "erebus-stub",
-            "--target",
-            triple,
-        ])
-        .output()
-        .context("failed to run cargo zigbuild")?;
+    let mut cmd = Command::new("cargo");
+    cmd.args([
+        "zigbuild",
+        "--release",
+        "-p",
+        "erebus-stub",
+        "--target",
+        triple,
+    ]);
+    if let Some(root) = find_workspace_root() {
+        cmd.current_dir(root);
+    }
+    let out = cmd.output().context("failed to run cargo zigbuild")?;
     if !out.status.success() {
         eprintln!("{}", String::from_utf8_lossy(&out.stderr));
         bail!("stub build failed for {triple}");

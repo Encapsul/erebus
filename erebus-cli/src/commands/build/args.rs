@@ -26,7 +26,10 @@ pub(crate) fn parse_isolation(value: &str) -> Result<u32> {
 /// full Rust triples (`aarch64-apple-darwin`, `x86_64-unknown-linux-musl`).
 pub(crate) fn parse_target(target: &str) -> (String, String) {
     let parts: Vec<&str> = target.split('-').collect();
-    let shorthand_os = matches!(parts.first(), Some(&"win" | &"macos" | &"linux"));
+    let shorthand_os = matches!(
+        parts.first(),
+        Some(&"win" | &"windows" | &"macos" | &"linux")
+    );
     let arch = if shorthand_os {
         match parts.get(1).copied() {
             Some("x64" | "amd64") => "x86_64",
@@ -559,6 +562,14 @@ mod tests {
         assert_eq!(parse_target("win-x64"), ("x86_64".into(), "windows".into()));
         assert_eq!(
             parse_target("win-arm64"),
+            ("aarch64".into(), "windows".into())
+        );
+        assert_eq!(
+            parse_target("windows-x86_64"),
+            ("x86_64".into(), "windows".into())
+        );
+        assert_eq!(
+            parse_target("windows-arm64"),
             ("aarch64".into(), "windows".into())
         );
         assert_eq!(parse_target("linux-x64"), ("x86_64".into(), "linux".into()));
