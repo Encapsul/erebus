@@ -5,6 +5,7 @@ mod pipeline;
 mod sign;
 mod sisr;
 mod stub;
+mod universal;
 
 pub(crate) use args::{load_config, BuildArgs, BuildPlan};
 use payload::{count_files, print_tree};
@@ -73,11 +74,37 @@ pub fn run(args: BuildArgs, verbose: bool) -> Result<()> {
         outputs,
     };
 
+    if args.dry_run && args.universal {
+        let matrix = match &args.target {
+            Some(t) => t
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect::<Vec<_>>(),
+            None => erebus_core::polyglot::DEFAULT_UNIVERSAL_TARGETS
+                .iter()
+                .map(|(triple, _, _, _)| (*triple).to_string())
+                .collect(),
+        };
+        eprintln!("Dry run — would build universal binary:");
+        eprintln!("  App:       {}", plan.app_dir.display());
+        eprintln!("  Output:    {}", args.output.display());
+        for t in &matrix {
+            eprintln!("  Slice:     {t}");
+        }
+        return Ok(());
+    }
+
     if args.dry_run {
         for (target, output) in plan.targets.iter().zip(&plan.outputs) {
             print_dry_run(&args, &plan, target.as_deref(), output);
         }
         return Ok(());
+    }
+
+    // Universal mode replaces the per-target artifact loop: one polyglot
+    // file containing a slice per matrix entry.
+    if args.universal {
+        return universal::run(&args, &plan, verbose);
     }
 
     // Build one artifact per target; each gets its own output path.

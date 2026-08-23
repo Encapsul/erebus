@@ -26,19 +26,59 @@ pub fn embed_interpreter(
         eprintln!("  embed: interpreter found at {}", interp_path.display());
     }
 
-    let mut count = 0;
+    let mut count = embed_interp_binary(interpreter, &interp_path, rootfs, verbose)?;
+    count += embed_shared_libs(&interp_path, rootfs, verbose)?;
+    count += embed_elf_loader(&interp_path, rootfs, verbose)?;
 
-    // Copy the interpreter binary to rootfs/usr/bin/, keeping the source
-    // filename so a Windows `python.exe` lands as `python.exe` (CreateProcessW
-    // resolves the bare name via PATH and appends `.exe`).
+    // Copy runtime-specific config (stdlib paths, etc.)
+    count += embed_runtime_config(interpreter, &interp_path, rootfs, app_dir, verbose)?;
+
+    Ok(count)
+}
+
+/// Embed only the architecture-independent pieces of a Python runtime
+/// (stdlib, site-packages, framework config).
+///
+/// Unlike [`embed_interpreter`], no interpreter binary and no ldd'd host
+/// libraries are copied: for cross-arch builds the host binary would not run
+/// on the target (its ELF interpreter is missing there), so the slice relies
+/// on the target machine's own interpreter found via PATH.
+pub fn embed_python_portable(
+    interpreter: &str,
+    rootfs: &Path,
+    app_dir: Option<&Path>,
+    verbose: bool,
+) -> io::Result<usize> {
+    let interp_path = find_interpreter(interpreter).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("interpreter '{interpreter}' not found on PATH"),
+        )
+    })?;
+    if verbose {
+        eprintln!(
+            "  embed: portable mode — config only, no host binary ({})",
+            interp_path.display()
+        );
+    }
+    embed_runtime_config(interpreter, &interp_path, rootfs, app_dir, verbose)
+}
+
+/// Copy the interpreter binary to `rootfs/usr/bin/`, keeping the source
+/// filename so a Windows `python.exe` lands as `python.exe`.
+fn embed_interp_binary(
+    interpreter: &str,
+    interp_path: &Path,
+    rootfs: &Path,
+    verbose: bool,
+) -> io::Result<usize> {
     let bin_dir = rootfs.join("usr/bin");
     fs::create_dir_all(&bin_dir)?;
     let dest_name = interp_path
         .file_name()
         .unwrap_or_else(|| std::ffi::OsStr::new(interpreter));
     let dest_bin = bin_dir.join(dest_name);
-    fs::copy(&interp_path, &dest_bin)?;
-    count += 1;
+    fs::copy(interp_path, &dest_bin)?;
 
     // Set executable permission
     #[cfg(unix)]
@@ -50,16 +90,20 @@ pub fn embed_interpreter(
     if verbose {
         eprintln!("  embed: copied {interpreter} to {}", dest_bin.display());
     }
+    Ok(1)
+}
 
-    // Find and copy shared library dependencies via ldd
-    let deps = ldd_deps(&interp_path)?;
+/// Copy shared library dependencies of `interp_path` via ldd into their
+/// destination directories under `rootfs`.
+fn embed_shared_libs(interp_path: &Path, rootfs: &Path, verbose: bool) -> io::Result<usize> {
+    let deps = ldd_deps(interp_path)?;
     let mut seen = HashSet::new();
     let lib_dirs = resolve_lib_dirs(rootfs);
+    let mut count = 0;
 
     for lib_path in &deps {
-        let name = match lib_path.file_name() {
-            Some(n) => n,
-            None => continue,
+        let Some(name) = lib_path.file_name() else {
+            continue;
         };
         let name_str = name.to_string_lossy();
         if !seen.insert(name_str.to_string()) {
@@ -85,29 +129,28 @@ pub fn embed_interpreter(
             eprintln!("  embed: lib {} -> {}", name_str, dest_dir.display());
         }
     }
-
-    // Copy the ELF interpreter (dynamic loader) so the embedded binary can
-    // be exec'd under `pivot_root` isolation, where the host /lib64 is gone.
-    if let Some(loader) = elf_interpreter_path(&interp_path)? {
-        let dest = rootfs.join(loader.strip_prefix("/").unwrap_or(&loader));
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(&loader, &dest)?;
-        count += 1;
-        if verbose {
-            eprintln!(
-                "  embed: ELF interpreter {} -> {}",
-                loader.display(),
-                dest.display()
-            );
-        }
-    }
-
-    // Copy runtime-specific config (stdlib paths, etc.)
-    count += embed_runtime_config(interpreter, &interp_path, rootfs, app_dir, verbose)?;
-
     Ok(count)
+}
+
+/// Copy the ELF interpreter (dynamic loader) so an embedded binary can be
+/// exec'd under `pivot_root` isolation, where the host /lib64 is gone.
+fn embed_elf_loader(interp_path: &Path, rootfs: &Path, verbose: bool) -> io::Result<usize> {
+    let Some(loader) = elf_interpreter_path(interp_path)? else {
+        return Ok(0);
+    };
+    let dest = rootfs.join(loader.strip_prefix("/").unwrap_or(&loader));
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(&loader, &dest)?;
+    if verbose {
+        eprintln!(
+            "  embed: ELF interpreter {} -> {}",
+            loader.display(),
+            dest.display()
+        );
+    }
+    Ok(1)
 }
 
 /// Find the interpreter binary on the system PATH.

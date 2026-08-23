@@ -23,6 +23,18 @@ cd your-app && erebus build . -o myapp.erebus
 ./myapp.erebus
 ```
 
+### Universal binary — one file, every platform
+
+```bash
+erebus build . --universal -o agent.erebus   # linux-x64 + linux-arm64 + macos-arm64 slices
+./agent.erebus                                # runs natively on any of them
+```
+
+The polyglot file starts with a `#!/bin/sh` loader that routes `uname -s`/`uname -m`
+to the matching native `.erebus` slice (extract once to `~/.cache`, then exec).
+Cross-arch Python builds embed only portable files and use the target's own interpreter.
+Windows x64 requires the upcoming PE stub port.
+
 ## Overview
 
 erebus transforms any AI agent directory into a portable, self-extracting binary that can run on target machines without requiring the host runtime. This includes:

@@ -1,22 +1,30 @@
 //! Universal Binary (Polyglot) Assembly
 //!
-//! Creates a single ``.erebus`` file that runs on Linux `x86_64/ARM64`,
+//! Creates a single `.erebus` file that runs on Linux `x86_64/ARM64`,
 //! macOS ARM64, and Windows x64 by embedding multiple architecture-specific
 //! slices in a polyglot wrapper.
 //!
-//! Layout: `[polyglot-header][slice-table][slice-1][slice-2][slice-3][slice-4]`
+//! Layout: `[sh-loader][polyglot-header][slice-table][slice-1]..[slice-N][footer]`
 //!
-//! Each slice = `[stub][payload][metadata][footer]` (standard erebus v5 format)
-//!
-//! The polyglot header is a valid ELF (Linux), PE (Windows), and Mach-O (macOS)
-//! that executes the polyglot stub. The stub detects OS/arch at runtime,
-//! seeks to the correct slice, and execve(2)s it.
+//! Why a shell-script loader? A single file cannot be simultaneously a valid
+//! ELF, Mach-O and PE (three different magics at offset 0), and one ELF cannot
+//! carry two `e_machine` values — so a native multi-arch stub is impossible
+//! without a Cosmopolitan-style toolchain. `/bin/sh`, however, exists on every
+//! Unix regardless of architecture, so the kernel's shebang handler becomes
+//! our universal launcher: it extracts the slice matching
+//! `uname -s`/`uname -m` into a private cache directory and exec(2)s it.
+//! Each slice is itself a complete native `.erebus` artifact
+//! (`[stub][payload][metadata][footer]`) whose real stub takes over there.
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use crate::format::{ARCH_AARCH64, ARCH_X86_64};
 use sha2::{Digest, Sha256};
+
+/// Size of the leading shell-loader region; the polyglot header starts at this
+/// offset. 32 KiB leaves room for the script prologue plus up to 255 case arms.
+pub const LOADER_REGION_SIZE: u64 = 32 * 1024;
 
 /// Polyglot slice entry — one architecture-specific .erebus artifact
 #[derive(Debug, Clone)]
@@ -68,7 +76,7 @@ pub struct SliceTableEntry {
     pub offset: u64,     // offset from file start
     pub size: u64,       // slice size
     pub flags: u8,       // reserved
-    pad: [u8; 7],        // align to 32 bytes
+    pad: [u8; 7],        // reserved (total entry size: 26 bytes)
 }
 
 /// Polyglot header magic: "ERE\x01" + "POLY" = 8 bytes
@@ -133,8 +141,10 @@ pub const DEFAULT_UNIVERSAL_TARGETS: &[(&str, &str, u8, PolyglotOS)] = &[
 
 /// Build a universal .erebus from per-target assemblies
 ///
-/// Each `target_input` is assembled independently, then all slices are combined
-/// into a single polyglot file with a header that routes to the correct slice.
+/// Each slice is a complete native `.erebus` artifact for one OS/arch pair.
+/// Slices are combined behind a generated `#!/bin/sh` loader (see module docs)
+/// into a single polyglot file; the loader routes to the matching slice at
+/// runtime based on `uname -s`/`uname -m`.
 pub fn assemble_universal(out_path: &Path, slices: &[PolyglotSlice]) -> io::Result<u64> {
     if slices.is_empty() {
         return Err(io::Error::new(
@@ -148,88 +158,122 @@ pub fn assemble_universal(out_path: &Path, slices: &[PolyglotSlice]) -> io::Resu
             "too many slices (max 255)",
         ));
     }
-
-    // Calculate header + slice table size
-    let header_size = std::mem::size_of::<PolyglotHeader>() as u64;
-    let slice_table_size = slices.len() as u64 * std::mem::size_of::<SliceTableEntry>() as u64;
-    let total_header_size = header_size + slice_table_size;
-
-    // Align slices to 4KB boundaries for cleaner extraction
-    const ALIGN: u64 = 4096;
-    let mut slice_offset = (total_header_size + ALIGN - 1) & !(ALIGN - 1);
-
-    // Build slice table entries
-    let mut slice_entries = Vec::with_capacity(slices.len());
-    let mut slice_data = Vec::new();
-
+    // Duplicate platform pairs would generate overlapping sh case arms; the
+    // shell would silently pick the first match, hiding a broken slice.
+    let mut seen = std::collections::HashSet::new();
     for slice in slices {
-        let aligned_offset = (slice_offset + ALIGN - 1) & !(ALIGN - 1);
-        let entry = SliceTableEntry {
-            target_os: slice.os as u8,
-            target_arch: slice.arch,
-            offset: aligned_offset,
-            size: slice.bytes.len() as u64,
-            flags: 0,
-            pad: [0; 7],
-        };
-        slice_entries.push(entry);
-
-        // Pad to alignment
-        let current_len = slice_data.len() as u64;
-        let target_start = aligned_offset - total_header_size;
-        if current_len < target_start {
-            let pad = target_start - current_len;
-            slice_data.extend(std::iter::repeat_n(0, pad as usize));
+        if !seen.insert((slice.os as u8, slice.arch)) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "duplicate slice for os={} arch={}",
+                    slice.os.as_str(),
+                    slice.arch
+                ),
+            ));
         }
-
-        slice_data.extend_from_slice(&slice.bytes);
-        slice_offset = aligned_offset + slice.bytes.len() as u64;
     }
 
-    // Compute total size (header + slice table + slices + footer)
+    let header_size = std::mem::size_of::<PolyglotHeader>() as u64;
+
+    // Absolute layout: loader region, header, table, then 4K-aligned slices.
+    const ALIGN: u64 = 4096;
+    let align_up = |v: u64| (v + ALIGN - 1) & !(ALIGN - 1);
+    let table_offset = LOADER_REGION_SIZE + header_size;
+    let mut cursor = align_up(table_offset);
+    let mut offsets = Vec::with_capacity(slices.len());
+    for slice in slices {
+        let aligned = align_up(cursor);
+        offsets.push(aligned);
+        cursor = aligned + slice.bytes.len() as u64;
+    }
     let polyglot_footer_size = std::mem::size_of::<PolyglotFooter>() as u64;
-    let total_size = slice_offset + polyglot_footer_size;
+    let footer_offset = cursor;
+    let total_size = footer_offset + polyglot_footer_size;
 
-    // Compute SHA-256 of everything except the footer
-    // Use the REAL footer_offset (not placeholder) so hash matches what's written
-    let real_footer_offset = total_size - polyglot_footer_size;
-    let mut hasher = Sha256::new();
-    hasher.update(POLYGLOT_MAGIC);
-    hasher.update([POLYGLOT_VERSION]);
-    hasher.update([slices.len() as u8]);
-    hasher.update([0]); // entry_slice
-    hasher.update((total_header_size as u32).to_le_bytes());
-    hasher.update((header_size as u64).to_le_bytes()); // slice_table_offset = header_size
-    hasher.update(real_footer_offset.to_le_bytes());
-    hasher.update(total_size.to_le_bytes());
-    hasher.update([0u8; 16]); // reserved
-
-    for entry in &slice_entries {
-        hasher.update([entry.target_os]);
-        hasher.update([entry.target_arch]);
-        hasher.update(entry.offset.to_le_bytes());
-        hasher.update(entry.size.to_le_bytes());
-        hasher.update([entry.flags]);
-        hasher.update(entry.pad);
+    // Generate the sh loader with baked-in slice offsets, then lay out entries.
+    let script = generate_loader_script(slices, &offsets)?;
+    if (script.len() as u64) > LOADER_REGION_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "loader script too large: {} bytes (region is {})",
+                script.len(),
+                LOADER_REGION_SIZE
+            ),
+        ));
     }
-
-    hasher.update(&slice_data);
-    let file_sha256: [u8; 32] = hasher.finalize().into();
-
-    // Build polyglot header
     let header = PolyglotHeader {
         magic: *POLYGLOT_MAGIC,
         version: POLYGLOT_VERSION,
         slice_count: slices.len() as u8,
-        entry_slice: 0, // will be determined at runtime
-        header_size: total_header_size as u32,
-        slice_table_offset: header_size, // slice table starts right after header
-        footer_offset: total_size - polyglot_footer_size,
+        entry_slice: 0, // informational; routing is decided by uname at runtime
+        header_size: header_size as u32,
+        slice_table_offset: table_offset,
+        footer_offset,
         total_size,
         reserved: [0; 16],
     };
+    let entries: Vec<SliceTableEntry> = slices
+        .iter()
+        .zip(&offsets)
+        .map(|(slice, &offset)| SliceTableEntry {
+            target_os: slice.os as u8,
+            target_arch: slice.arch,
+            offset,
+            size: slice.bytes.len() as u64,
+            flags: 0,
+            pad: [0; 7],
+        })
+        .collect();
 
-    // Build polyglot footer
+    // Write everything except the footer.
+    let parent = out_path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+
+    let mut file = std::fs::File::create(out_path)?;
+    file.write_all(&script)?;
+    let pad = LOADER_REGION_SIZE - script.len() as u64;
+    if pad > 0 {
+        // NUL padding is never parsed: every code path execs or exits first.
+        file.write_all(&vec![0u8; pad as usize])?;
+    }
+    debug_assert_eq!(file.stream_position()?, LOADER_REGION_SIZE);
+    write_polyglot_header(&mut file, &header)?;
+    for entry in &entries {
+        write_slice_entry(&mut file, entry)?;
+    }
+    let mut pos = file.stream_position()?;
+    for (slice, &offset) in slices.iter().zip(&offsets) {
+        // Pad based on the REAL stream position, not a tracked counter: the
+        // byte layout above (header size + per-entry sizes) must match exactly.
+        if offset > pos {
+            file.write_all(&vec![0u8; (offset - pos) as usize])?;
+            pos = offset;
+        }
+        file.write_all(&slice.bytes)?;
+        pos += slice.bytes.len() as u64;
+    }
+    file.flush()?;
+    drop(file);
+
+    // Hash exactly what was written in [0..footer_offset] so the footer always
+    // matches verify_polyglot's streaming recomputation.
+    let file_sha256: [u8; 32] = {
+        let mut f = std::fs::File::open(out_path)?;
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; 8192];
+        let mut remaining = footer_offset;
+        while remaining > 0 {
+            let to_read =
+                usize::try_from(std::cmp::min(buf.len() as u64, remaining)).unwrap_or(buf.len());
+            f.read_exact(&mut buf[..to_read])?;
+            hasher.update(&buf[..to_read]);
+            remaining -= to_read as u64;
+        }
+        hasher.finalize().into()
+    };
+
     let footer = PolyglotFooter {
         magic: *POLYGLOT_MAGIC,
         version: POLYGLOT_VERSION,
@@ -238,27 +282,10 @@ pub fn assemble_universal(out_path: &Path, slices: &[PolyglotSlice]) -> io::Resu
         reserved: [0; 16],
     };
 
-    // Write everything
-    let parent = out_path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)?;
-
-    let mut file = std::fs::File::create(out_path)?;
-
-    // Write header
-    write_polyglot_header(&mut file, &header)?;
-
-    // Write slice table
-    for entry in &slice_entries {
-        write_slice_entry(&mut file, entry)?;
-    }
-
-    // Write slices (already aligned in slice_data)
-    file.write_all(&slice_data)?;
-
-    // Write footer
+    let mut file = std::fs::OpenOptions::new().append(true).open(out_path)?;
     write_polyglot_footer(&mut file, &footer)?;
-
     file.flush()?;
+    drop(file);
 
     // Make executable on Unix
     #[cfg(unix)]
@@ -268,6 +295,71 @@ pub fn assemble_universal(out_path: &Path, slices: &[PolyglotSlice]) -> io::Resu
     }
 
     Ok(total_size)
+}
+
+/// uname glob arm selecting a slice of the given platform from the sh loader.
+fn loader_arm(os: PolyglotOS, arch: u8) -> Option<&'static str> {
+    match (os, arch) {
+        (PolyglotOS::Linux, ARCH_X86_64) => Some("Linux:x86_64|Linux:amd64"),
+        (PolyglotOS::Linux, ARCH_AARCH64) => Some("Linux:aarch64|Linux:arm64"),
+        (PolyglotOS::MacOS, ARCH_AARCH64) => Some("Darwin:arm64"),
+        (PolyglotOS::MacOS, ARCH_X86_64) => Some("Darwin:x86_64"),
+        // git-bash / MSYS2 / Cygwin can spawn PE binaries directly.
+        (PolyglotOS::Windows, ARCH_X86_64) => Some("MINGW*:x86_64|MSYS*:x86_64|CYGWIN_NT*:x86_64"),
+        _ => None,
+    }
+}
+
+/// Generate the embedded `#!/bin/sh` loader for the given slices.
+///
+/// The loader extracts its platform's slice with `tail|head` into a private
+/// per-user cache directory keyed by the whole-file hash, then execs it.
+fn generate_loader_script(slices: &[PolyglotSlice], offsets: &[u64]) -> io::Result<Vec<u8>> {
+    let mut s = String::with_capacity(4096);
+    s.push_str("#!/bin/sh\n");
+    s.push_str("# erebus polyglot v1 - universal binary loader\n");
+    s.push_str("# Generated by 'erebus build --universal'. Do not edit.\n");
+    s.push_str("# Each case arm below extracts one native .erebus slice and execs it.\n");
+    s.push_str("set -eu\n");
+    s.push_str("ERE_SELF=\"$0\"\n");
+    s.push_str("erebus_run() {\n");
+    s.push_str("    off=\"$1\"; sz=\"$2\"\n");
+    s.push_str("    d=\"${TMPDIR:-/tmp}/erebus-polyglot-$(id -u)\"\n");
+    s.push_str("    h=\"$(sha256sum -- \"$ERE_SELF\" 2>/dev/null | cut -d' ' -f1)\"\n");
+    s.push_str(
+        "    [ -n \"$h\" ] || h=\"$(shasum -a 256 -- \"$ERE_SELF\" 2>/dev/null | cut -d' ' -f1)\"\n",
+    );
+    s.push_str(
+        "    [ -n \"$h\" ] || h=\"$(md5sum -- \"$ERE_SELF\" 2>/dev/null | cut -d' ' -f1)\"\n",
+    );
+    s.push_str("    [ -n \"$h\" ] || h=nohash\n");
+    s.push_str("    o=\"$d/$h-$sz.erebus\"\n");
+    s.push_str("    if [ ! -x \"$o\" ]; then\n");
+    s.push_str("        mkdir -p \"$d\"\n");
+    s.push_str("        chmod 700 \"$d\"\n");
+    s.push_str("        tail -c \"+$((off + 1))\" \"$ERE_SELF\" | head -c \"$sz\" > \"$o\"\n");
+    s.push_str("        chmod 755 \"$o\"\n");
+    s.push_str("    fi\n");
+    s.push_str("    exec \"$o\" \"$@\"\n");
+    s.push_str("}\n");
+    s.push_str("case \"$(uname -s):$(uname -m)\" in\n");
+    for (slice, &offset) in slices.iter().zip(offsets) {
+        let Some(arm) = loader_arm(slice.os, slice.arch) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("no loader arm for target {}", slice.target),
+            ));
+        };
+        s.push_str(&format!(
+            "    {arm}) erebus_run {offset} {} ;;\n",
+            slice.bytes.len()
+        ));
+    }
+    s.push_str("esac\n");
+    s.push_str("echo \"erebus: no slice for $(uname -s):$(uname -m)\" >&2\n");
+    s.push_str("exit 1\n");
+
+    Ok(s.into_bytes())
 }
 
 fn write_polyglot_header<W: Write>(w: &mut W, header: &PolyglotHeader) -> io::Result<()> {
@@ -304,6 +396,7 @@ fn write_polyglot_footer<W: Write>(w: &mut W, footer: &PolyglotFooter) -> io::Re
 
 /// Read polyglot header from an existing file
 pub fn read_polyglot_header<R: Read + Seek>(r: &mut R) -> io::Result<PolyglotHeader> {
+    r.seek(SeekFrom::Start(LOADER_REGION_SIZE))?;
     let mut magic = [0u8; 8];
     r.read_exact(&mut magic)?;
     if &magic != POLYGLOT_MAGIC {
@@ -379,7 +472,6 @@ pub fn read_slice_table<R: Read + Seek>(
 
 /// Verify polyglot file integrity
 pub fn verify_polyglot<R: Read + Seek>(r: &mut R) -> io::Result<bool> {
-    r.seek(SeekFrom::Start(0))?;
     let header = read_polyglot_header(r)?;
     let _entries = read_slice_table(r, &header)?;
 
@@ -448,24 +540,15 @@ mod tests {
         let size = assemble_universal(&out, &slices).unwrap();
         assert!(size > 0);
 
-        // Verify
         let mut f = std::fs::File::open(&out).unwrap();
 
+        // The file must be directly executable: shebang first.
+        let mut head = [0u8; 10];
         f.seek(SeekFrom::Start(0)).unwrap();
-        let mut dbg_magic = [0u8; 8];
-        f.read_exact(&mut dbg_magic).unwrap();
+        f.read_exact(&mut head).unwrap();
+        assert_eq!(&head, b"#!/bin/sh\n");
 
-        let footer_size = std::mem::size_of::<PolyglotFooter>() as i64;
-        f.seek(SeekFrom::End(-footer_size)).unwrap();
-        let mut dbg_footer_magic = [0u8; 8];
-        f.read_exact(&mut dbg_footer_magic).unwrap();
-        let mut dbg_version = [0u8; 1];
-        f.read_exact(&mut dbg_version).unwrap();
-        let mut dbg_slice_count = [0u8; 1];
-        f.read_exact(&mut dbg_slice_count).unwrap();
-        let mut dbg_sha256 = [0u8; 32];
-        f.read_exact(&mut dbg_sha256).unwrap();
-
+        // Verify
         let ok = verify_polyglot(&mut f).unwrap();
         assert!(ok);
 
@@ -483,10 +566,103 @@ mod tests {
         assert_eq!(entries[0].target_arch, ARCH_X86_64);
         assert_eq!(entries[1].target_arch, ARCH_AARCH64);
     }
+
+    #[test]
+    fn loader_script_routes_every_slice() {
+        let slices = vec![
+            PolyglotSlice {
+                target: "linux-x86_64".into(),
+                arch: ARCH_X86_64,
+                os: PolyglotOS::Linux,
+                bytes: vec![1; 100],
+            },
+            PolyglotSlice {
+                target: "macos-aarch64".into(),
+                arch: ARCH_AARCH64,
+                os: PolyglotOS::MacOS,
+                bytes: vec![2; 200],
+            },
+            PolyglotSlice {
+                target: "windows-x86_64".into(),
+                arch: ARCH_X86_64,
+                os: PolyglotOS::Windows,
+                bytes: vec![3; 300],
+            },
+        ];
+        let offsets = vec![36_864, 40_960, 45_056];
+        let script = generate_loader_script(&slices, &offsets).unwrap();
+        let text = std::str::from_utf8(&script).unwrap();
+
+        assert!(script.starts_with(b"#!/bin/sh\n"));
+        assert!(text.contains("Linux:x86_64|Linux:amd64) erebus_run 36864 100 ;;"));
+        assert!(text.contains("Darwin:arm64) erebus_run 40960 200 ;;"));
+        assert!(
+            text.contains("MINGW*:x86_64|MSYS*:x86_64|CYGWIN_NT*:x86_64) erebus_run 45056 300 ;;")
+        );
+        // Unsupported platforms must fall through to the error path.
+        assert!(text.ends_with("exit 1\n"));
+    }
+
+    #[test]
+    fn slices_are_recoverable_at_table_offsets() {
+        // Mirrors the loader's `tail -c +N | head -c sz` extraction: the bytes
+        // at [offset, offset+size) must be exactly the original slice.
+        let dir = tempdir().unwrap();
+        let out = dir.path().join("test.polyglot");
+        let x86 = vec![0xAA; 5000];
+        let arm = vec![0xBB; 7000];
+        let slices = vec![
+            PolyglotSlice {
+                target: "linux-x86_64".into(),
+                arch: ARCH_X86_64,
+                os: PolyglotOS::Linux,
+                bytes: x86.clone(),
+            },
+            PolyglotSlice {
+                target: "linux-aarch64".into(),
+                arch: ARCH_AARCH64,
+                os: PolyglotOS::Linux,
+                bytes: arm.clone(),
+            },
+        ];
+
+        assemble_universal(&out, &slices).unwrap();
+        let mut f = std::fs::File::open(&out).unwrap();
+        let header = read_polyglot_header(&mut f).unwrap();
+        let entries = read_slice_table(&mut f, &header).unwrap();
+
+        for (entry, expected) in entries.iter().zip([&x86, &arm]) {
+            f.seek(SeekFrom::Start(entry.offset)).unwrap();
+            let mut got = vec![0u8; expected.len()];
+            f.read_exact(&mut got).unwrap();
+            assert_eq!(&got, expected);
+        }
+    }
+
+    #[test]
+    fn duplicate_platform_slices_are_rejected() {
+        // Two Linux/x86_64 slices would generate overlapping case arms — the
+        // sh case statement silently picks the first, so assembly must refuse.
+        let dir = tempdir().unwrap();
+        let out = dir.path().join("dup.polyglot");
+        let slices = vec![
+            PolyglotSlice {
+                target: "linux-x86_64-a".into(),
+                arch: ARCH_X86_64,
+                os: PolyglotOS::Linux,
+                bytes: vec![1; 10],
+            },
+            PolyglotSlice {
+                target: "linux-x86_64-b".into(),
+                arch: ARCH_X86_64,
+                os: PolyglotOS::Linux,
+                bytes: vec![2; 10],
+            },
+        ];
+        assert!(assemble_universal(&out, &slices).is_err());
+    }
 }
 
-#[cfg(test)]
-#[cfg(test)]
 #[cfg(test)]
 mod real_slice_tests {
     use super::*;

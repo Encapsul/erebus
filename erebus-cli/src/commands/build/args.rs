@@ -326,6 +326,12 @@ pub struct BuildArgs {
     #[arg(long)]
     pub target: Option<String>,
 
+    /// Build a universal binary: one slice per target (defaults to
+    /// linux-x86_64, linux-aarch64, macos-aarch64, windows-x86_64), combined
+    /// into a single polyglot file routed by uname at runtime
+    #[arg(long)]
+    pub universal: bool,
+
     /// Skip dependency installation
     #[arg(long)]
     pub no_install: bool,
@@ -683,6 +689,7 @@ mod tests {
             app: PathBuf::from("."),
             output: PathBuf::from("app.erebus"),
             target: None,
+            universal: false,
             isolation: "sandbox".into(),
             seccomp: false,
             gui: false,

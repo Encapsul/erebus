@@ -84,7 +84,17 @@ foo.erebus (universal file)
 3. Runtime : detect `uname -s`/`uname -m` → extract right slice → `execve`
 4. Test via Docker+QEMU (déjà installé : `qemu-aarch64` + `docker --platform linux/arm64/v8`)
 
-**Status :** 70% — `polyglot.rs` implémenté + testé avec vrais slices (2×18.2MB → 36.4MB universal). Reste: polyglot stub (uname → seek → execve), build matrix zigbuild 4 targets, CI QEMU.
+**Status :** ✅ 100% (3 cibles natives / 4) — `erebus build --universal` assemble un polyglot
+exécutable : loader `#!/bin/sh` (routage `uname -s`/`uname -m`) + header/table de slices +
+slices `.erebus` natifs alignés 4K + footer SHA-256. Validé E2E : le MÊME fichier affiche
+`arch=x86_64` sur hôte x64 et `arch=aarch64` sous Docker ARM64 (python:3.12-slim).
+- Slices livrés : linux-x86_64, linux-aarch64, macos-aarch64 (stub Mach-O cross-compilé zigbuild ✓)
+- Windows x64 : slice non produit — le stub embarque mmap/`proc_self_exe` Unix ; port PE
+  (`MapViewOfFile`, `GetModuleFileNameW`, `CreateProcessW`) à faire avant d'ajouter la cible.
+- Cross-arch Python : l'embed de l'interpréteur hôte est désactivé si l'arch cible ≠ host
+  (`embed_python_portable`), sinon un binaire x86_64 polluerait les slices ARM64 —
+  l'app utilise le `python3` de la machine cible (validé 3.10 → 3.12).
+- Reste optionnel : CI QEMU automatique, `erebus inspect` sur fichier polyglot.
 
 ## Ce qui est NOUVEAU — livré cette semaine
 

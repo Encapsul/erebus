@@ -9,7 +9,7 @@ use erebus_core::pkgmgr;
 use std::path::PathBuf;
 use std::process::Command;
 
-use super::args::{config_fingerprint, BuildArgs, BuildPlan};
+use super::args::{config_fingerprint, parse_target, BuildArgs, BuildPlan};
 use super::deps::is_command_available;
 use super::payload::{copy_dir_recursive_with, create_squashfs_payload, include_points_to_env};
 use super::sign::sign_macos_binary;
@@ -305,25 +305,42 @@ pub(crate) fn build_single_target(
 
     // ── Embed interpreter ──────────────────────────────────
     //
-    // CROSS-TARGET CAVEAT: CPython is copied verbatim from the *build host*
-    // plus its ldd deps. A `--target <other-arch>` build therefore embeds a
-    // host-arch interpreter that will only run on matching hardware/emulators.
-    // Until a per-target interpreter source exists, treat non-host-arch Python
-    // builds as stub-level validation only (see ROADMAP.md → RISC-V).
+    // CROSS-TARGET: CPython is copied verbatim from the *build host* plus its
+    // ldd deps — a host binary cannot run on a different target arch (its ELF
+    // interpreter is missing there). Cross-arch Python builds therefore embed
+    // only the portable parts (stdlib, site-packages) and rely on the target
+    // machine's own `python3` found via PATH.
 
     let mut interpreter_embedded = false;
     if let Some(ref interpreter_name) = embedded_interpreter_str {
-        if verbose {
-            eprintln!("Embedding interpreter: {}...", interpreter_name);
-        }
-
-        let interpreter_path = interpreter_name.clone();
-        match embed::embed_interpreter(&interpreter_path, &rootfs, Some(app_dir), verbose) {
+        let cross_python = runtime_name == "python"
+            && target
+                .as_deref()
+                .map(parse_target)
+                .is_some_and(|(arch, _)| arch != std::env::consts::ARCH);
+        let embed_result = if cross_python {
+            eprintln!(
+                "[erebus] {}: skipping host interpreter embed (arch mismatch) — uses target python3",
+                target.as_deref().unwrap_or("?")
+            );
+            erebus_core::embed::embed_python_portable(
+                interpreter_name,
+                &rootfs,
+                Some(app_dir),
+                verbose,
+            )
+        } else {
+            if verbose {
+                eprintln!("Embedding interpreter: {interpreter_name}...");
+            }
+            embed::embed_interpreter(interpreter_name, &rootfs, Some(app_dir), verbose)
+        };
+        match embed_result {
             Ok(count) => {
-                if verbose {
-                    eprintln!("Embedded interpreter ({} files copied)", count);
+                if verbose && !cross_python {
+                    eprintln!("Embedded interpreter ({count} files copied)");
                 }
-                interpreter_embedded = true;
+                interpreter_embedded = !cross_python;
             }
             Err(e) => {
                 eprintln!("[erebus] warning: failed to embed interpreter: {}", e);

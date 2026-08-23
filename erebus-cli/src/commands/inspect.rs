@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use erebus_core::format::{Footer, ARCH_AARCH64, ARCH_RISCV64, ARCH_X86_64, FLAG_ENCRYPTED};
 use erebus_core::paths::format_size;
+use std::io::Seek;
 use std::path::PathBuf;
 
 #[derive(Args)]
@@ -30,6 +31,14 @@ pub fn run(args: InspectArgs) -> Result<()> {
 
     let mut f = std::fs::File::open(&args.file)
         .with_context(|| format!("failed to open {}", args.file.display()))?;
+
+    // Universal polyglot files are not plain .erebus artifacts; show the
+    // slice table instead of failing on footer magic.
+    if let Ok(header) = erebus_core::polyglot::read_polyglot_header(&mut f) {
+        return inspect_polyglot(&args, &mut f, &header);
+    }
+    f.rewind()?;
+
     let footer = Footer::read_from(&mut f).context("failed to read erebus footer")?;
 
     let arch_name = match footer.arch {
@@ -151,5 +160,75 @@ pub fn run(args: InspectArgs) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Inspect a universal polyglot file: loader info + slice table.
+fn inspect_polyglot(
+    args: &InspectArgs,
+    f: &mut std::fs::File,
+    header: &erebus_core::polyglot::PolyglotHeader,
+) -> Result<()> {
+    use erebus_core::polyglot::{read_slice_table, PolyglotOS, LOADER_REGION_SIZE};
+
+    let os_name = |v: u8| match v {
+        v if v == PolyglotOS::Linux as u8 => "linux",
+        v if v == PolyglotOS::MacOS as u8 => "macos",
+        v if v == PolyglotOS::Windows as u8 => "windows",
+        _ => "unknown",
+    };
+    let arch_name = |v: u8| match v {
+        ARCH_X86_64 => "x86_64",
+        ARCH_AARCH64 => "aarch64",
+        ARCH_RISCV64 => "riscv64",
+        _ => "unknown",
+    };
+
+    let entries = read_slice_table(f, header)?;
+    let rows: Vec<(String, String, u64, u64)> = entries
+        .iter()
+        .map(|e| {
+            let (off, size) = (e.offset, e.size);
+            (
+                os_name(e.target_os).to_string(),
+                arch_name(e.target_arch).to_string(),
+                off,
+                size,
+            )
+        })
+        .collect();
+    let total = header.total_size;
+    if args.json {
+        let info = serde_json::json!({
+            "file": args.file.display().to_string(),
+            "kind": "universal-polyglot",
+            "format_version": header.version,
+            "total_size": total,
+            "slices": rows.iter().map(|(os, arch, off, size)| serde_json::json!({
+                "os": os,
+                "arch": arch,
+                "offset": off,
+                "size": size,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&info)?);
+        return Ok(());
+    }
+
+    eprintln!("File:        {}", args.file.display());
+    eprintln!("Kind:        universal polyglot (v{})", header.version);
+    eprintln!("Loader:      /bin/sh ({} byte region)", LOADER_REGION_SIZE);
+    eprintln!(
+        "Total size:  {} ({:.1} MB)",
+        format_size(total),
+        total as f64 / 1_048_576.0
+    );
+    eprintln!("Slices:      {}", rows.len());
+    for (os, arch, off, size) in &rows {
+        eprintln!(
+            "  {os:<8} {arch:<8} offset={off:<12} size={}",
+            format_size(*size)
+        );
+    }
     Ok(())
 }
