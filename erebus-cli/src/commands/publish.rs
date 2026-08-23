@@ -78,13 +78,22 @@ pub fn run(args: PublishArgs) -> Result<()> {
 
     let content = std::fs::read(&file).context("failed to read .erebus file")?;
 
-    // Build the multipart upload request using reqwest (blocking)
+    // Build the multipart upload request using reqwest (blocking).
+    // The part MUST carry a filename: registries derive the stored package
+    // name from Content-Disposition's filename field.
+    let upload_name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .context("bundle path has no file name")?;
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_mins(5))
+        .timeout(std::time::Duration::from_secs(600))
         .build()
         .context("failed to create HTTP client")?;
 
-    let part = reqwest::blocking::multipart::Part::bytes(content);
+    let part = reqwest::blocking::multipart::Part::bytes(content)
+        .file_name(upload_name)
+        .mime_str("application/octet-stream")
+        .context("invalid mime type")?;
     let form = reqwest::blocking::multipart::Form::new().part("file", part);
 
     let mut request = client.post(&registry).multipart(form);

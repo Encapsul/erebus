@@ -7,7 +7,7 @@ mod sisr;
 mod stub;
 mod universal;
 
-pub(crate) use args::{load_config, BuildArgs, BuildPlan};
+pub(crate) use args::{load_config, BuildArgs, BuildPlan, NglPolicy};
 use payload::{count_files, print_tree};
 use pipeline::{build_single_target, warn_sandbox_noops};
 

@@ -188,18 +188,29 @@ stub-level, pas un agent natif. Node n'a pas ce problème (téléchargement targ
 
 ## 🎯 NOUVELLES PRIORITÉS (analyse concurrentielle août 2026)
 
-### 5. OpenAI-compatible API Server mode (`erebus serve`) — 2 jours
+### 5. OpenAI-compatible API Server mode (`erebus serve`) — ✅ TERMINÉ
 **Gap vs llamafile/ollama** : pas de `--serve` pour exposer `/v1/chat/completions`
-- Stub lance `llama-server` embarqué + health check `/health`
-- Auto-detect GPU (`--ngl 9999`) + fallback CPU
-- Compatible code existant (OpenAI SDK, LangChain, etc.)
-
-### 6. Model Registry public + `erebus pull` — 3 jours
+- `erebus serve <bundle> --port N` : footer→SHA-256→extraction streamée zstd+tar
+  vers cache content-addressé (`~/.cache/erebus/serve/<hash>/rootfs`, skip si hit)
+- Multi-formats via `core/src/inference.rs` : GGUF→llama-server (chemin doré),
+  safetensors/GPTQ/AWQ/ONNX→vLLM, `.engine/.plan`→trtllm-serve, MLX→mlx_lm.server ;
+  hint d'install actionnable si moteur absent ; découverte modèle = layers metadata
+  puis walk *.gguf/*.onnx/*.safetensors, filtre `--model <substr>`
+- GPU auto (`--ngl auto|off|N`) réutilisant les heuristiques partagées core↔stub ;
+  health-wait `/health` (180s) avec détection de mort précoce du child ; banner curl
+- E2E RÉEL validé : bundle TinyLlama 643MB + llama-server b10595 officiel →
+  `/v1/chat/completions` répond en vrai ("Hey, it's you!" / "2+2=4"), warm ≈ 5s CPU
+  4 threads ; cold start ≈ extraction + load model
+### 6. Model Registry public + `erebus pull` — ✅ TERMINÉ (VPS-ready)
 **Gap vs ollama/llamafile** : découvrabilité modèles (`ollama pull llama3`)
-- Registry HTTP (`registry.erebus.dev` ou self-hosted)
-- Index JSON : nom → {sha256, size, quant, arch, runtime_deps}
-- `erebus pull llama.cpp:musl-x64` → layer runtime prêt à l'emploi
-- `erebus pull baguettotron:q4_k_s` → modèle + ModelLayer metadata
+- Client `erebus pull <name>` : GET /index.json → download streamé → SHA-256
+  vérifié contre l'index (+ size) → chmod 755 → cache short-circuit si déjà présent ;
+  noms verrouillés `[A-Za-z0-9._:-]` (anti-traversal) ; `--check` pour tester la présence
+- Serveur prêt-VPS : `scripts/registry_server.py` (stdlib pur) — index auto-généré
+  depuis le dossier packages (sha256 caché par mtime), POST multipart compatible
+  `erebus publish`, ranges HTTP, token optionnel `ERE_REGISTRY_TOKEN`
+- Fix publish : le part multipart reqwest doit porter un filename (sinon 400)
+- E2E réel validé : publish → index.json auto → pull → hashes identiques
 
 ### 7. Agentfile.yaml (déclaratif) — ✅ TERMINÉ
 **Gap vs ollama Modelfile / offline-ai PPE** : config unique source de vérité

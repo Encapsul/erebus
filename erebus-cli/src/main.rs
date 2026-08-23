@@ -92,6 +92,16 @@ enum Commands {
     /// Migrate a legacy .erebus (v1) to the SISR-enabled v2 format
     UpgradeBinary(commands::upgrade_binary::UpgradeBinaryArgs),
 
+    /// Download a bundle from a registry (integrity-checked)
+    Pull(commands::pull::PullArgs),
+
+    /// Serve a bundle model as an OpenAI-compatible API
+    ///
+    /// Examples:
+    ///   erebus serve agent.erebus --port 8080
+    ///   erebus serve agent.erebus --ngl auto --ctx 4096
+    Serve(commands::serve::ServeArgs),
+
     /// Publish a .erebus file to a registry
     Publish(commands::publish::PublishArgs),
 
@@ -199,6 +209,8 @@ fn main() -> ExitCode {
             commands::upgrade_binary::run(args)
         }
         Commands::Publish(args) => commands::publish::run(args),
+        Commands::Pull(args) => commands::pull::run(args),
+        Commands::Serve(args) => commands::serve::run(args),
         Commands::Swap(args) => commands::swap::run(args),
         Commands::Layer(args) => commands::layer::run(args),
         Commands::Env(args) => commands::env::run(args),
