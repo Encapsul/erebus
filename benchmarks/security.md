@@ -119,3 +119,28 @@ Bugs this battery caught in the product before they shipped:
 - listen backlog 5 caused connection resets under fleet-style bursts
   (raised to 128)
 - rate-limit stamps keyed by IP were self-overwriting (per-attempt keys)
+
+## Megafuzz campaign (`scripts/fuzz_registry.py`)
+
+One-shot adversarial campaign against registry v2, ~1.87M operations:
+
+```
+parser-fuzz  1,500,000 mutated multipart bodies through stream_multipart
+             in-process (bit-flips, spliced delimiters, LF/CR confusion,
+             traversal filenames, truncated closers, cap/declared lies)
+store-fuzz     200,000 randomized Store op sequences with invariants
+             (users monotonic, stats never negative, index always parses,
+             negative/huge charges must not corrupt state)
+storm         153,232 live requests over 420s from 8 workers: valid
+             range-pulls, hostile paths, oversized queries, chunked-TE
+             lies, negative Content-Length, slowloris-lite, pipelined
+             floods, mutated uploads, raw socket garbage + health watch
+
+VERDICT: ZERO anomalies (no >=500, no parser exception, no state
+corruption, no litter, no health stall, no traceback)
+```
+
+Campaign hardening that shipped:
+- client-abort noise (BrokenPipeError / ConnectionResetError) is now
+  swallowed by the handler instead of spamming tracebacks under
+  adversarial load — real ops value when serving hostile traffic.
