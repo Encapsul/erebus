@@ -1,4 +1,5 @@
 pub mod build;
+pub mod chat;
 pub mod clean;
 pub mod dashboard;
 pub mod doctor;
@@ -18,3 +19,4 @@ pub mod trust;
 pub mod upgrade;
 pub mod upgrade_binary;
 pub mod verify;
+pub mod webchat;

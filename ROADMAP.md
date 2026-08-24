@@ -238,10 +238,19 @@ stub-level, pas un agent natif. Node n'a pas ce problème (téléchargement targ
   /health ; shim ProcessPrng compatible Win7/Wine inclus
 - Reste optionnel : sonde rocm-smi (VRAM AMD), test sur GPU réel
 
-### 9. Built-in Chat UI (terminal + web) — 2 jours
-**Gap vs llamafile v0.8.14** : UX zéro-config
-- Terminal: TUI colorée (ratatui/crossterm) si TTY
-- Web: sert UI statique embarquée sur `/` (port configurable)
+### 9. Built-in Chat UI (terminal + web) — ✅ TERMINÉ
+**Gap vs llamafile v0.8.14** : UX zéro-config — livré les deux modes :
+- `erebus chat <bundle>` : TUI ratatui/crossterm (messages stylés you▸/agent◂,
+  worker thread + mpsc, health-wait partagé avec serve, engine kill propre à la sortie)
+- `erebus chat --web` : page HTML unique embarquée (`webchat.html`) servie par un
+  wrapper std-only (TcpListener, thread/conn) sur `:port`, qui proxifie `/v1/*` vers
+  le moteur sur `:port+1` — marche pour TOUS les moteurs (llama.cpp, vLLM, MLX,
+  TRT-LLM) puisque le contrat est l'API OpenAI
+- Refactor : `serve::start_engine()` partagé serve/chat (verify→extract→discover→spawn)
+- Validation E2E réelle : web (HTML servi + proxy POST → réponse moteur) et TUI sous
+  pty instrumenté (frappe rendue + cycle complétion complet)
+- Dépendance bonus : ratatui 0.30.2 embarque lru 0.18.2 → **les 2 advisories unsound
+  lru 0.12 disparaissent de cargo audit (RC=0, zéro warning)**
 
 ---
 

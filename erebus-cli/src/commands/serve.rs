@@ -53,15 +53,31 @@ pub struct ServeArgs {
     pub llama_server: Option<PathBuf>,
 }
 
-pub fn run(args: ServeArgs) -> Result<()> {
-    let file = args
-        .file
-        .canonicalize()
-        .context("failed to open bundle file")?;
+/// Everything `chat` and `serve` need to talk to a launched engine.
+pub(crate) struct EngineHandle {
+    pub child: std::process::Child,
+    pub base_url: String,
+    pub model_label: String,
+}
+
+/// Verify + extract + resolve + launch the bundle's engine (shared by
+/// `serve` and `chat`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_engine(
+    file: &Path,
+    host: &str,
+    port: u16,
+    ngl_flag: Option<&str>,
+    ctx_size: u32,
+    threads: Option<u32>,
+    model_filter: Option<&str>,
+    llama_server: Option<&Path>,
+    quiet_banner: bool,
+) -> Result<EngineHandle> {
     let verbose = std::env::var_os("ERE_VERBOSE").is_some();
 
     // ── Read footer + metadata, verify integrity ─────────────────────
-    let mut f = std::fs::File::open(&file).context("failed to read bundle")?;
+    let mut f = std::fs::File::open(file).context("failed to read bundle")?;
     let footer =
         erebus_core::format::Footer::read_from(&mut f).context("invalid .erebus footer")?;
     let meta_bytes =
@@ -76,33 +92,26 @@ pub fn run(args: ServeArgs) -> Result<()> {
     extract_payload(&mut f, &footer, &meta, &rootfs, verbose)?;
 
     // ── Locate model + resolve engine ─────────────────────────────────
-    let model = erebus_core::inference::find_model(&rootfs, args.model.as_deref())
+    let model = erebus_core::inference::find_model(&rootfs, model_filter)
         .context("no supported model artifact in bundle")?;
     let model_mb = std::fs::metadata(&model.path)
         .map(|m| m.len() / (1024 * 1024))
         .unwrap_or(0)
         .max(1);
-    let ngl = resolve_ngl(args.ngl.as_deref(), model_mb);
+    let ngl = resolve_ngl(ngl_flag, model_mb);
 
-    // ── Launch the engine in the foreground ───────────────────────────
-    eprintln!(
-        "[erebus] serve: format={} model={} ({model_mb} MB) ngl={ngl} ctx={}",
-        model.format.label(),
-        model.path.display(),
-        args.ctx_size
-    );
-    let mut plan = erebus_core::inference::plan_launch(
-        &rootfs,
-        &model,
-        &args.host,
-        args.port,
-        args.ctx_size,
-        ngl,
-        args.threads,
-    )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if !quiet_banner {
+        eprintln!(
+            "[erebus] serve: format={} model={} ({model_mb} MB) ngl={ngl} ctx={ctx_size}",
+            model.format.label(),
+            model.path.display()
+        );
+    }
+    let mut plan =
+        erebus_core::inference::plan_launch(&rootfs, &model, host, port, ctx_size, ngl, threads)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
     // Power-user escape hatch: force the server binary over the resolved one.
-    if let Some(bin) = args.llama_server.as_deref() {
+    if let Some(bin) = llama_server {
         if !bin.is_file() {
             bail!("--llama-server not found at {}", bin.display());
         }
@@ -112,18 +121,43 @@ pub fn run(args: ServeArgs) -> Result<()> {
         eprintln!("[erebus] exec: {} {}", plan.program, plan.args.join(" "));
     }
 
-    let mut child = Command::new(&plan.program)
+    let child = Command::new(&plan.program)
         .args(&plan.args)
         .spawn()
         .with_context(|| format!("failed to launch {}", plan.program))?;
+    let base_url = format!("http://{host}:{port}");
+    Ok(EngineHandle {
+        child,
+        base_url,
+        model_label: model.path.file_name().map_or_else(
+            || model.path.to_string_lossy().into_owned(),
+            |n| n.to_string_lossy().into_owned(),
+        ),
+    })
+}
 
-    let base_url = format!("http://{}:{}", args.host, args.port);
-    wait_healthy(&base_url, &mut child)?;
-    print_banner(&base_url, &model.path);
+pub fn run(args: ServeArgs) -> Result<()> {
+    let file = args
+        .file
+        .canonicalize()
+        .context("failed to open bundle file")?;
+    let mut eng = start_engine(
+        &file,
+        &args.host,
+        args.port,
+        args.ngl.as_deref(),
+        args.ctx_size,
+        args.threads,
+        args.model.as_deref(),
+        args.llama_server.as_deref(),
+        false,
+    )?;
+    wait_healthy(&eng.base_url, &mut eng.child)?;
+    print_banner(&eng.base_url, Path::new(&eng.model_label));
 
-    let status = child.wait().context("failed to wait for llama-server")?;
+    let status = eng.child.wait().context("failed to wait for engine")?;
     if !status.success() {
-        bail!("llama-server exited with {status}");
+        bail!("engine exited with {status}");
     }
     Ok(())
 }
@@ -227,6 +261,11 @@ fn resolve_ngl(raw: Option<&str>, model_mb: u64) -> u32 {
 // ---------------------------------------------------------------------------
 // Serving
 // ---------------------------------------------------------------------------
+
+/// Public alias so `chat` reuses the exact same readiness contract.
+pub(crate) fn wait_healthy_pub(base_url: &str, child: &mut std::process::Child) -> Result<()> {
+    wait_healthy(base_url, child)
+}
 
 /// Poll `/health` until llama-server reports ready. Aborts early if the
 /// child dies while we wait (typo in args, missing model, port conflict).

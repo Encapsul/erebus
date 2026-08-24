@@ -83,6 +83,13 @@ enum Commands {
     /// Interactive TUI dashboard showing SISR benchmark & cache status
     Dashboard(commands::dashboard::DashboardArgs),
 
+    /// Interactive chat with a bundled model (TUI, or browser with --web)
+    ///
+    /// Examples:
+    ///   erebus chat agent.erebus
+    ///   erebus chat agent.erebus --web --port 8080
+    Chat(commands::chat::ChatArgs),
+
     /// Test a .erebus file in an ephemeral sandbox
     Selftest(commands::selftest::SelftestArgs),
 
@@ -210,6 +217,7 @@ fn main() -> ExitCode {
         }
         Commands::Publish(args) => commands::publish::run(args),
         Commands::Pull(args) => commands::pull::run(args),
+        Commands::Chat(args) => commands::chat::run(args),
         Commands::Serve(args) => commands::serve::run(args),
         Commands::Swap(args) => commands::swap::run(args),
         Commands::Layer(args) => commands::layer::run(args),

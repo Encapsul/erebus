@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>erebus chat — __MODEL__</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: #0b0e14; color: #d7dce6; height: 100vh;
+    display: flex; flex-direction: column; padding: 12px; gap: 10px;
+  }
+  header { display: flex; justify-content: space-between; align-items: baseline; }
+  header h1 { font-size: 15px; color: #7ee0c3; }
+  header span { font-size: 11px; color: #5b6577; }
+  #log {
+    flex: 1; overflow-y: auto; border: 1px solid #1d2433; border-radius: 8px;
+    padding: 12px; display: flex; flex-direction: column; gap: 8px; background: #0e1220;
+  }
+  .msg { max-width: 78%; padding: 8px 11px; border-radius: 10px; white-space: pre-wrap; line-height: 1.45; }
+  .you { align-self: flex-end; background: #1f2a44; }
+  .agent { align-self: flex-start; background: #14231f; border: 1px solid #1e3a33; }
+  .sys { align-self: center; color: #5b6577; font-size: 11px; }
+  form { display: flex; gap: 8px; }
+  input {
+    flex: 1; background: #10162a; color: inherit; border: 1px solid #1d2433;
+    border-radius: 8px; padding: 11px 13px; font: inherit; outline: none;
+  }
+  input:focus { border-color: #2f4470; }
+  button {
+    background: #173229; color: #7ee0c3; border: 1px solid #245244;
+    border-radius: 8px; padding: 0 18px; font: inherit; cursor: pointer;
+  }
+  button:disabled { opacity: .45; cursor: wait; }
+</style>
+</head>
+<body>
+<header>
+  <h1>erebus chat</h1>
+  <span>__MODEL__ · engine on :__PORT__ · OpenAI-compatible /v1</span>
+</header>
+<div id="log"><div class="msg sys">Local model loaded from the bundle. No internet involved.</div></div>
+<form id="f"><input id="i" autocomplete="off" autofocus placeholder="Ask anything…"><button id="b">Send</button></form>
+<script>
+const log = document.getElementById('log'), input = document.getElementById('i'),
+      btn = document.getElementById('b'), history = [];
+function add(cls, text) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls; d.textContent = text;
+  log.appendChild(d); log.scrollTop = log.scrollHeight; return d;
+}
+document.getElementById('f').onsubmit = async (e) => {
+  e.preventDefault();
+  const q = input.value.trim();
+  if (!q || btn.disabled) return;
+  input.value = ''; add('you', q);
+  history.push({role:'user', content:q});
+  btn.disabled = true;
+  const thinking = add('sys', '…thinking');
+  try {
+    const r = await fetch('/v1/chat/completions', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({model:'local', messages:history, max_tokens:512})
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const text = j.choices?.[0]?.message?.content ?? '(empty)';
+    history.push({role:'assistant', content:text});
+    thinking.remove(); add('agent', text);
+  } catch (err) {
+    thinking.remove(); add('sys', '⚠ ' + err.message);
+  } finally { btn.disabled = false; input.focus(); }
+};
+</script>
+</body>
+</html>
