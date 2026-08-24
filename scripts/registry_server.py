@@ -343,6 +343,14 @@ refresh(); setInterval(refresh, 30000);
 
 
 class Handler(BaseHTTPRequestHandler):
+    # Hostile clients routinely vanish mid-response; the resulting
+    # BrokenPipe/Reset tracebacks are noise, not errors — swallow them.
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+
     store: Store = None  # type: ignore[assignment]
     protocol_version = "HTTP/1.1"
 
@@ -420,11 +428,21 @@ class Handler(BaseHTTPRequestHandler):
         if rng and rng.startswith("bytes="):
             try:
                 first, last = rng[6:].split("-", 1)
-                start = int(first) if first else 0
-                end = int(last) if last else size - 1
+                if first == "" and last != "":
+                    # RFC 7233 suffix range: final <last> bytes of the body.
+                    start = max(0, size - min(int(last), size))
+                elif first != "":
+                    start = int(first)
+                    # Open-ended "N-" runs to EOF.
+                    end = size - 1 if last == "" else int(last)
+                else:
+                    raise ValueError("bytes=- is not a valid range")
             except ValueError:
                 return self.send_json({"error": "bad range"}, 400)
-        if start < 0 or end >= size or start > end:
+        # RFC 7233: a last-byte-pos past EOF means "clamp to final byte",
+        # not an error — resumable clients legitimately overshoot.
+        end = min(end, size - 1)
+        if start < 0 or start > end:
             return self.send_json({"error": "range not satisfiable"}, 416)
         if meta.get("private") and not is_sidecar:
             user = self._authorized_user()
@@ -466,7 +484,8 @@ class Handler(BaseHTTPRequestHandler):
                 payload = json.loads(body.decode("utf-8", "replace"))
                 if not isinstance(payload, dict):
                     raise ValueError
-            except ValueError:
+            except (ValueError, RecursionError):
+                # Deeply nested arrays raise RecursionError, not ValueError.
                 return self.send_json({"error": "invalid json"}, 400)
             return self._auth(payload, login=(path == "/auth/login"))
         if path == "/waitlist":
@@ -478,7 +497,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(parsed, dict):
                     raise ValueError
                 email = str(parsed.get("email", ""))
-            except ValueError:
+            except (ValueError, RecursionError):
                 return self.send_json({"error": "invalid json"}, 400)
             ok, msg = self.store.waitlist_add(email, self.client_ip())
             if ok:
@@ -535,6 +554,11 @@ class Handler(BaseHTTPRequestHandler):
         if not fname:
             os.unlink(tmp)
             return self.send_json({"error": "missing file part / filename"}, 400)
+        if nbytes > self.store.upload_cap:
+            # The streaming window stops at the cap; storing the head would
+            # poison the index with a truncated blob that looks valid.
+            os.unlink(tmp)
+            return self.send_json({"error": "upload exceeds --upload-cap"}, 413)
         fname = os.path.basename(fname)
         if not (SAFE_FILE.match(fname) or SAFE_PACK.match(fname) or SAFE_SIDECAR.match(fname)):
             os.unlink(tmp)
@@ -555,10 +579,11 @@ def stream_multipart(handler, boundary: bytes, dest: str, cap: int, declared: in
     """Stream the first file part of a multipart body straight to `dest`.
 
     Returns (filename, bytes_written). Never holds more than one window of
-    the payload in memory, and never reads past `declared` bytes — the client
-    may keep the socket open after the body.
+    the payload in memory, and never reads past `declared` bytes — the
+    client may keep the socket open after the body.
     """
     delim = b"\r\n--" + boundary
+    first_tok = b"--" + boundary
     fname = None
     written = 0
     consumed = 0
@@ -568,55 +593,50 @@ def stream_multipart(handler, boundary: bytes, dest: str, cap: int, declared: in
     try:
         while consumed < declared and written <= cap:
             chunk = handler.rfile.read(min(CHUNK, declared - consumed))
+            consumed += len(chunk)
+            window += chunk
+            # Drain every state transition the current window allows:
+            # a single read can carry the boundary AND headers AND data,
+            # and the final read may arrive with no trailing chunk.
+            progressed = True
+            while progressed:
+                progressed = False
+                if state == "preamble":
+                    idx = window.find(first_tok)
+                    if idx != -1:
+                        window = window[idx + len(first_tok):]
+                        state = "headers"
+                        progressed = True
+                elif state == "headers":
+                    hdr_end = window.find(b"\r\n\r\n")
+                    if hdr_end != -1:
+                        m = re.search(rb'filename="([^"]+)"', window[:hdr_end])
+                        fname = (
+                            m.group(1).decode("utf-8", "replace") if m else None
+                        )
+                        window = window[hdr_end + 4:]
+                        state = "data"
+                        progressed = True
+                    elif len(window) > 64 * 1024:
+                        return fname, written
+                elif state == "data":
+                    keep = max(0, len(window) - (len(delim) + 4))
+                    if keep > 0:
+                        out.write(window[:keep])
+                        written += keep
+                        window = window[keep:]
+                    pos = window.find(delim)
+                    if pos != -1:
+                        out.write(window[:pos])
+                        written += pos
+                        after = window[pos + len(delim):]
+                        if after.startswith(b"--"):
+                            return fname, written
+                        state = "headers"
+                        window = after
+                        progressed = True
             if not chunk:
                 break
-            consumed += len(chunk)
-            if state == "preamble":
-                # The FIRST boundary sits at the very start of the body and
-                # has no leading CRLF; later ones do (handled in data state).
-                window += chunk
-                first = b"--" + boundary
-                idx = window.find(first)
-                if idx == -1:
-                    continue
-                section_head = window[idx + len(first):]
-                state = "headers"
-                window = section_head
-                continue
-            if state == "headers":
-                window += chunk
-                hdr_end = window.find(b"\r\n\r\n")
-                if hdr_end == -1:
-                    if len(window) > 64 * 1024:
-                        break
-                    continue
-                head = window[:hdr_end]
-                m = re.search(rb'filename="([^"]+)"', head)
-                fname = m.group(1).decode("utf-8", "replace") if m else None
-                rest = window[hdr_end + 4:]
-                state = "data"
-                window = b""
-                chunk = rest
-            if state == "data":
-                window += chunk
-                # Flush everything except a trailing window that could hold
-                # a split delimiter.
-                keep = max(0, len(window) - (len(delim) + 4))
-                if keep > 0:
-                    out.write(window[:keep])
-                    written += keep
-                    window = window[keep:]
-                pos = window.find(delim)
-                while pos != -1:
-                    out.write(window[:pos])
-                    written += pos
-                    after = window[pos + len(delim):]
-                    if after.startswith(b"--"):
-                        out.flush()
-                        return fname, written
-                    state = "headers"
-                    window = after
-                    break
     finally:
         out.close()
     return fname, written

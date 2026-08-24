@@ -144,3 +144,33 @@ Campaign hardening that shipped:
 - client-abort noise (BrokenPipeError / ConnectionResetError) is now
   swallowed by the handler instead of spamming tracebacks under
   adversarial load — real ops value when serving hostile traffic.
+
+## Deep-hunt: protocol-level bug findings (all fixed)
+
+A second, semantics-directed campaign (differential range checking,
+parser state-machine stress, body-shape abuse) surfaced five defects
+that volume fuzzing alone had waved through — every one confirmed with
+a live repro before the fix:
+
+1. **Suffix ranges served wrong bytes.** `Range: bytes=-N` returned the
+   FIRST N bytes instead of the last N (RFC 7233 §2.1). Silent data
+   corruption for resumable/delta clients.
+2. **Open-ended ranges rejected.** `Range: bytes=N-` hit
+   `int("") -> ValueError` and answered 400 instead of serving to EOF.
+3. **Over-long end ranges rejected.** `bytes=0-<size+X>` returned 416;
+   RFC 7233 says clamp the last-byte-pos to size-1.
+4. **Small uploads silently truncated.** The streaming multipart parser
+   advanced one state per socket read; a body delivered in a single
+   read (<64 KB) never re-entered its buffered state machine, so every
+   small publish died with "missing file part" while multi-megabyte
+   bundles sailed through CI-sized tests unnoticed.
+5. **Deep-JSON RecursionError escaped containment.** Nested-array bombs
+   under the 4 KB cap raised `RecursionError`, which is not a
+   `ValueError` — thread died with a traceback instead of a clean 400.
+
+Also shipped: over-cap uploads now answer 413 instead of storing the
+truncated head as a valid package.
+
+`fuzz_registry.py --storm` now differential-checks every range form
+(`N-M`, `N-`, `-N`, hostile bounds) against a known seeded blob, so a
+regression here fails the campaign instead of a customer's resume.

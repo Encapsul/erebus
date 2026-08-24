@@ -171,16 +171,76 @@ def http(url: str, data=None, headers=None, method=None, timeout=8):
         return r.status, r.read()
 
 
+KNOWN = {"name": "diffcheck.erebus", "body": b""}
+
+
+def upload_known(url: str) -> None:
+    """Seed a deterministic blob so workers can differential-check ranges."""
+    body_bytes = (b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdef" * 100)
+    KNOWN["body"] = body_bytes
+    bnd = b"DiffCheckBoundary42"
+    part = (f"--{bnd.decode()}\r\n".encode()
+            + b'Content-Disposition: form-data; name="f"; filename="'
+            + KNOWN["name"].encode() + b'"\r\n\r\n'
+            + body_bytes + f"\r\n--{bnd.decode()}--\r\n".encode())
+    code, resp = http(url + "/", data=part,
+                      headers={"Content-Type":
+                               f"multipart/form-data; boundary={bnd.decode()}"})
+    if code != 200:
+        raise SystemExit(f"differential seed upload failed: {code} {resp[:80]}")
+
+
+def check_range(url: str, spec: str) -> None:
+    data = KNOWN["body"]
+    size = len(data)
+    try:
+        code, got = http(f"{url}/packages/{KNOWN['name']}",
+                         headers={"Range": f"bytes={spec}"})
+    except urllib.error.HTTPError as exc:
+        code, got = exc.code, b""
+    first, _, last = spec.partition("-")
+    try:
+        if first == "" and last != "":
+            want_start = max(0, size - int(last))                  # suffix
+            want_end = size - 1
+        elif first != "" and last == "":
+            want_start, want_end = int(first), size - 1            # open
+        else:
+            want_start = int(first)
+            want_end = min(int(last), size - 1)                    # clamped
+    except ValueError:
+        if code not in (400, 416):
+            anomaly(f"range {spec!r}: malformed got {code}")
+        return
+    valid = 0 <= want_start <= want_end < size
+    if not valid:
+        if code != 416:
+            anomaly(f"range {spec}: expected 416, got {code}")
+        return
+    expect = data[want_start:want_end + 1]
+    if code == 206 and got != expect:
+        anomaly(f"range {spec}: WRONG BYTES ({len(got)} vs {len(expect)})")
+    elif code not in (200, 206):
+        anomaly(f"range {spec}: status {code}")
+
+
 def worker_valid(url: str, stop: threading.Event, counts: list) -> None:
-    n = 0
+    rng = random.Random(threading.get_ident())
+    size = len(KNOWN["body"])
     while not stop.is_set():
-        n += 1
-        start = random.randrange(0, 1000)
         try:
             http(f"{url}/index.json")
-            # Empty-registry 404s are a normal status here.
-            http(f"{url}/packages/demo-agent.erebus",
-                 headers={"Range": f"bytes={start}-{start+99}"})
+            kind = rng.randrange(4)
+            if kind == 0:                                   # normal N-M
+                a = rng.randrange(size); spec = f"{a}-{a + rng.randint(0, 500)}"
+            elif kind == 1:                                 # open N-
+                spec = f"{rng.randrange(size)}-"
+            elif kind == 2:                                 # suffix -N
+                spec = f"-{rng.randint(1, size)}"
+            else:                                           # hostile bounds
+                spec = rng.choice([f"{size}-", f"{size}-{size+10}",
+                                   "-", f"0-{size*2}"])
+            check_range(url, spec)
         except urllib.error.HTTPError as exc:
             if exc.code >= 500:
                 anomaly(f"valid worker: {exc.code}")
@@ -284,6 +344,14 @@ def storm(seconds: int, workers_n: int, port: int) -> None:
         anomaly("server never came up")
         return
     stop = threading.Event()
+    try:
+        upload_known(url)
+    except BaseException:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        raise
     counts = [0]
     threads = []
     for _ in range(max(1, workers_n - 4)):
