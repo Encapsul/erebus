@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-mod commands;
+pub mod commands;
 mod error;
 mod remote_cache;
 
