@@ -52,6 +52,65 @@ pub fn auto_ngl(vram_mb: u64, model_mb: u64) -> u32 {
     ratio.min(999) as u32
 }
 
+/// Total physical RAM in MB, best effort. `None` when the platform offers no
+/// cheap probe (Windows for now).
+pub fn total_ram_mb() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+        parse_meminfo_kb(&info)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = Command::new("sysctl")
+            .arg("-n")
+            .arg("hw.memsize")
+            .output()
+            .ok()?;
+        let bytes: u64 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+        Some(bytes / (1024 * 1024))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_meminfo_kb(info: &str) -> Option<u64> {
+    for line in info.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            let kb: u64 = rest.trim_end_matches("kB").trim().parse().ok()?;
+            return Some(kb / 1024);
+        }
+    }
+    None
+}
+
+/// Pre-flight fit verdict for serving `model_mb` with the given context.
+///
+/// `None` = no data to judge (don't nag). `Some(false)` + the numbers mean
+/// the host almost certainly cannot hold the model — say so BEFORE the
+/// engine dies with an obscure allocator error.
+pub fn check_fit(
+    model_mb: u64,
+    ctx_size: u32,
+    ngl: u32,
+    vram_mb: Option<u64>,
+    ram_mb: Option<u64>,
+) -> Option<(bool, u64, Option<u64>)> {
+    // Weights + KV cache + activation headroom. KV scales with ctx; the
+    // constant absorbs activations — deliberately coarse, the goal is
+    // catching gross mismatches, not capacity planning.
+    let kv_mb = u64::from(ctx_size).saturating_mul(3) / 4;
+    let needed = model_mb.saturating_add(kv_mb).saturating_mul(13) / 10;
+    let gpu_backed = ngl > 0;
+    let primary = if gpu_backed { vram_mb } else { ram_mb };
+    let primary = primary?; // no probe → stay silent
+    let fits = primary >= needed;
+    Some((fits, needed, Some(primary)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,6 +130,30 @@ mod tests {
     #[test]
     fn empty_model_does_not_divide_by_zero() {
         assert_eq!(auto_ngl(24_000, 0), 999);
+    }
+
+    #[test]
+    fn meminfo_parser_extracts_memtotal() {
+        let info = "MemTotal:       8038200 kB\nMemFree:        123456 kB\n";
+        assert_eq!(parse_meminfo_kb(info), Some(7849));
+        assert_eq!(parse_meminfo_kb("no match"), None);
+    }
+
+    #[test]
+    fn check_fit_warns_only_on_gross_mismatch() {
+        // 4 GB model, no GPU (ngl=0), 8 GB RAM → fits
+        assert_eq!(
+            check_fit(4_000, 2048, 0, None, Some(8_000)),
+            Some((true, 7_196, Some(8_000)))
+        );
+        // same model, 2 GB RAM → does not fit
+        let verdict = check_fit(4_000, 2048, 0, None, Some(2_000)).unwrap();
+        assert!(!verdict.0);
+        // no probe at all → silent
+        assert_eq!(check_fit(4_000, 2048, 0, None, None), None);
+        // GPU offload judges against VRAM
+        let verdict = check_fit(4_000, 2048, 33, Some(24_000), Some(8_000)).unwrap();
+        assert!(verdict.0);
     }
 
     #[cfg(not(target_os = "macos"))]

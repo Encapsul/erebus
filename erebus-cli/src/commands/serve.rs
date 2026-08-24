@@ -100,6 +100,25 @@ pub(crate) fn start_engine(
         .max(1);
     let ngl = resolve_ngl(ngl_flag, model_mb);
 
+    // ── Pre-flight: will this host hold the model? ────────────────────
+    if let Some((fits, needed, have)) =
+        erebus_core::gpu::check_fit(model_mb, ctx_size, ngl, vram_probe(), ram_probe())
+    {
+        let what = if ngl > 0 { "VRAM" } else { "RAM" };
+        if !fits {
+            eprintln!(
+                "[erebus] WARNING: model needs ~{needed} MB of {what} but this host reports {} MB — \
+                 expect heavy swapping or a crash. Try a smaller quant or --ctx-size.",
+                have.unwrap_or(0)
+            );
+        } else if std::env::var_os("ERE_VERBOSE").is_some() {
+            eprintln!(
+                "[erebus] pre-flight ok: ~{needed} MB of {what} available ({})",
+                have.unwrap_or(0)
+            );
+        }
+    }
+
     if !quiet_banner {
         eprintln!(
             "[erebus] serve: format={} model={} ({model_mb} MB) ngl={ngl} ctx={ctx_size}",
@@ -160,6 +179,16 @@ pub fn run(args: ServeArgs) -> Result<()> {
         bail!("engine exited with {status}");
     }
     Ok(())
+}
+
+/// Probe helpers kept as fns so the pre-flight stays testable and so a
+/// probe failure degrades to "no data" instead of blocking the launch.
+fn vram_probe() -> Option<u64> {
+    erebus_core::gpu::detect().and_then(|(_, mb)| mb)
+}
+
+fn ram_probe() -> Option<u64> {
+    erebus_core::gpu::total_ram_mb()
 }
 
 /// Content-addressed extraction target: `<cache>/serve/<sha256>/rootfs`.

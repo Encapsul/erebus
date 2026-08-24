@@ -7,13 +7,15 @@
 
 ## 💼 Business — Phase 1 : registry monétisable (~2 semaines)
 
-- [ ] **Auth + quotas dans `registry_server.py`** : comptes (hash local ou
-  magic-link), token par user, quota transfert 20 GB/mois Free, compteur
-  d'usage par package
-- [ ] **Compteur SISR public** : « Go économisés par les deltas cette semaine »
-  sur la home de la registry (l'argument de vente chiffré en live)
-- [ ] **Landing page + waitlist** (`erebus.dev` ou équivalent) avec le pitch
-  BUSINESS.md + lien démo GitHub
+- [x] **Auth + quotas dans `registry_server.py`** : scrypt + tokens hashés
+  (comparaison constant-time), bootstrap open→auth dès le 1er compte,
+  quota transfert mensuel par user (402 au dépassement), mode privé par
+  package, anti-traversal/anti-litter, uploads streamés bornés
+- [x] **Compteur SISR public** : `/stats` + compteurs live sur la landing
+  (bytes served / full-equivalent / saved — les Range fetch deltas
+  créditent l'économie)
+- [x] **Landing page + waitlist** embarquées dans la registry (throttle
+  3 req/min/IP) — le domaine public reste à pointer dessus
 - [ ] Déployer la registry publique du VPS derrière nginx TLS (+ `ERE_REGISTRY_TOKEN`
   déjà supporté côté serveur)
 
@@ -31,8 +33,11 @@
 
 ## 🧪 Produit
 
-- [ ] **Runtime packs** : publier `llama-server:linux-x64|arm64|macos|win` comme
-  layers (`erebus layer push` existe) et faire proposer par `erebus serve` le
+- [ ] **Pre-flight RAM/VRAM** : ✅ fait — `gpu::check_fit` compare modèle+KV
+  aux probes et prévient AVANT le crash obscur du moteur
+- [ ] **Runtime packs** : publier `llama-server:linux-x64|arm64|macos|win`
+  en build STATIQUE CPU (zéro dépendance côté cible) comme layers
+  (`erebus layer push` existe) et faire proposer par `erebus serve` le
   `pull` automatique du moteur manquant → serve 100 % turnkey zéro-install
 - [ ] Polyglot `.bat` natif cmd.exe pour l'universel Windows (git-bash/WSL OK
   aujourd'hui ; arms MINGW déjà générés dans le loader sh)

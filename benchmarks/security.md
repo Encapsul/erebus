@@ -89,3 +89,33 @@ self-heal probe needs a bundle that actually contains a model.
 - `lru 0.12.5` unsound advisories via ratatui — APIs (`LruCache::pop`,
   `IterMut`) never referenced by erebus code; blocked upstream on a ratatui
   release
+
+## Registry / accounts / quotas chaos (`scripts/chaos_business.sh`)
+
+Third harness covering registry v2 (accounts, private packages, quotas,
+SISR stats, waitlist). 23 checks:
+
+```
+✓ accounts: register/login/duplicates/weak secrets/bad usernames/timing
+✓ privacy: anon → 401 · bearer bare & user:token OK · corrupted token → 401
+✓ quotas: monthly metering, third pull over line → 402 Payment Required
+✓ stats: served/full-equivalent/saved move correctly; range (delta)
+  fetch credits savings; landing exposes live counters
+✓ races: concurrent same-name uploads leave exactly one atomic winner;
+  registration race yields exactly one account; replace-during-read
+  never serves truncated blobs
+✓ fuzzer: 150 seeded structure-aware requests — server alive, health
+  intact, no temp litter, no tracebacks leaked
+CHAOS BUSINESS VERDICT: SURVIVED
+```
+
+Bugs this battery caught in the product before they shipped:
+- users.json load/save shape asymmetry let duplicate registrations
+  overwrite existing accounts
+- streamed multipart uploads hung forever waiting for EOF on keep-alive
+  connections (now bounded by Content-Length) and could leak unread body
+  bytes into pipelined request parsing (connection now closed after
+  upload responses)
+- listen backlog 5 caused connection resets under fleet-style bursts
+  (raised to 128)
+- rate-limit stamps keyed by IP were self-overwriting (per-attempt keys)
