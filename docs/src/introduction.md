@@ -1,104 +1,83 @@
 # erebus
 
-> **Ship your web app as a binary. Run it anywhere.** No runtime, no Docker,
-> no install step on the target machine — one file that runs.
+> **Your AI agent. One file. Runs anywhere — then serves an
+> OpenAI-compatible API.**
 
-**erebus** packages any web, server, or headless app into a single
-self-extracting ELF binary. The CLI is `erebus`; its output files use the
-`.ere` extension (a dot can't appear in a shell command name).
-
-erebus is to a server app what a Go static binary is to a compiled program:
-everything lives inside the file, and it runs with `./my_app.ere`.
-
-## What erebus does
+**erebus** packages an AI agent — model weights, inference engine config,
+runtime and dependencies — into a single self-contained `.erebus` binary.
+Ship it like software; the target machine installs nothing.
 
 ```bash
-# Build once — bundles the runtime, the app, and its libraries
-$ erebus build ./my-app -o my-app.ere
+# Build once — runtime, app, libraries, weights
+$ erebus build ./my-agent --embed-model models/model.gguf -o agent.erebus
 
-# Run anywhere — the end user installs nothing
-$ ./my-app.ere
-# Server listening on http://127.0.0.1:8080
+# Distribute through any registry (self-hosted, stdlib-only server included)
+$ erebus publish agent.erebus
+
+# Run / serve / chat on any machine
+$ erebus serve agent.erebus --port 8080     # POST /v1/chat/completions
+$ erebus chat  agent.erebus                 # terminal TUI (--web for browser)
 ```
 
-| Step | What happens | Who does it |
+## What happens under the hood
+
+| Step | What happens | Who runs it |
 |---|---|---|
-| `erebus build` | detects the runtime, resolves dependencies, compresses a rootfs | the developer |
-| `./my_app.ere` | verifies integrity, extracts to cache, launches | the end user |
+| `build` | detects runtime, resolves deps, chunks model layers, compresses rootfs | developer |
+| `publish` / `pull` | registry upload; streamed download verified against index SHA-256 | developer ↔ users |
+| `serve` / `chat` / exec | stub verifies its own SHA-256 → mmap-lazy payload read → cache extraction → GPU probe (`ERE_NGL`) → engine launched | end user |
 
 ## Key features
 
-- **Language-agnostic** — Python, Node.js, Java, Ruby, .NET/C#, Deno, Go,
-  PHP, Perl, and native binaries, all through the same CLI and file format.
-- **Zero install for the end user** — no `node`, `python`, or Docker on the
-  target machine.
-- **Incremental builds** — the runtime layer is cached; app-only edits rebuild
-  in about a second.
-- **Integrity first** — every `.ere` carries a `SHA-256` of its payload,
-  verified before anything is extracted. Optional Ed25519 signatures and
-  AES-256-GCM encryption.
-- **Sandboxing without root** — user namespaces, mount namespaces,
-  `pivot_root`, and a seccomp denylist for the strongest isolation level.
+- **Universal binaries** — `--universal` packs four native slices
+  (linux-x64, linux-arm64, macos-arm64, windows-x64 PE32+) into one file;
+  a POSIX-shell polyglot loader routes by `uname`.
+- **Multi-format inference** — GGUF via llama.cpp (static, golden path);
+  safetensors/GPTQ/AWQ/ONNX via vLLM; TensorRT-LLM engines; Apple MLX.
+  The engine is resolved at launch with an actionable install hint.
+- **GPU auto-tuning** — nvidia-smi/ROCm/Metal probes export `ERE_GPU`,
+  `ERE_VRAM_MB` and a suggested `ERE_NGL`; explicit pins always win.
+- **Integrity first** — SHA-256 over payload‖metadata at every launch,
+  optional Ed25519 signing against trusted keys, fail-cold behavior.
+- **SISR delta updates** — content-defined chunking ships only changed
+  chunks; signed manifests verify before reconstruction.
+- **Declarative builds** — `Agentfile.yaml` (or legacy `.erebus.toml`);
+  CLI flags take precedence.
+- **Chaos-tested** — adversarial harnesses for the encrypted launcher and
+  for registry/pull/ship ship in-repo; latest verdicts SURVIVED
+  ([benchmarks](https://github.com/Tednoob17/erebus/tree/main/benchmarks)).
 
-## When to use erebus
+## Supported runtimes
 
-| Use case | Example |
-|---|---|
-| Distribute a server app without a runtime install | a FastAPI API, a Next.js server |
-| Ship internal CLI/build tools to heterogeneous machines | a deploy tool that must "just run" |
-| Bundle a dependency-heavy app into one artifact | Python with `requirements.txt`, Node with `node_modules` |
-| Version-pin the runtime with the app | app written against a specific Python/Node release |
-
-erebus targets **web, server, and headless** apps. It is not a fit for:
-
-- **Desktop GUI apps** — AppImage, Snap, and Flatpak already target those
-  (X11/Wayland integration, icons, desktop entry).
-- **Per-process isolation you don't control** — use containers when you want
-  the *host* to remain completely untouched; erebus's sandbox is opt-in per app.
-
-## How it differs
-
-| Tool | Scope | Runtime |
+| Runtime | Detection | Use case |
 |---|---|---|
-| `vercel/pkg` / `nexe` | Node.js only | embeds Node |
-| PyInstaller | Python only | embeds CPython |
-| AppImage / Snap / Flatpak | desktop GUI apps | needs desktop integration |
-| **erebus** | **any language, server apps** | **self-contained, no install** |
+| Python | `requirements.txt`, `pyproject.toml`, … | FastAPI/Flask agents, tools |
+| Binary | executable present | llama.cpp engines, Go/Rust servers |
+
+Cross-platform launcher stubs are built with cargo-zigbuild; any host can
+target any platform.
+
+## Status
+
+All nine roadmap competitive-gap items are implemented and validated:
+universal binary (4 targets incl. Windows PE), OpenAI-compatible serving,
+registry pull/publish, Agentfile.yaml, GPU auto-detect, chat UI, SISR deltas,
+signing/trust, sandboxing. See the top-level [ROADMAP](../ROADMAP.md) and
+[benchmarks](https://github.com/Tednoob17/erebus/tree/main/benchmarks).
+
+> Note: some deeper chapters of this book still describe pre-0.5 details
+> (older `.ere` naming, removed language runtimes). The authoritative,
+> up-to-date references are the [README](https://github.com/Tednoob17/erebus#readme)
+> and [HANDOFF](https://github.com/Tednoob17/erebus/blob/main/HANDOFF.md);
+> chapter-by-chapter refresh is tracked as an open follow-up.
 
 ## Get started
 
 ```bash
-# Prerequisites: Rust with the musl target, zstd, a C compiler
-make preflight
-
-# Build the launcher, then package your first app
-make stub
-erebus build ./examples/hello-web -o hello-web.ere
-./hello-web.ere
+git clone https://github.com/Tednoob17/erebus.git && cd erebus
+cargo build --release        # CLI at target/release/erebus
+./target/release/erebus doctor
 ```
 
-Follow the [Quickstart](./guides/quickstart.md) for the full walkthrough, or
-jump straight to a language guide: [Python](./guides/python.md),
-[Node.js](./guides/node.md), [Go](./guides/go.md).
-
-## Project status
-
-Phase 2 is complete; Phase 3 is in progress. The full pipeline runs
-end-to-end: `build` → `.ere` → execution with self-extraction, caching,
-Ed25519 signatures, SquashFS support, and multi-arch builds
-(`x86_64` / `aarch64`). See the [Roadmap](./roadmap.md) for what's next.
-
-## Optional extension: SISR (self-updates)
-
-By default a `.ere` is a simple, static container — no update machinery, nothing to configure. As an **opt-in, advanced extension**, erebus supports the **SISR** engine: a binary that can update *itself* from signed deltas, with no toolchain on the target machine.
-
-```
-[ v1.0 ] ── ./app.ere update ──▶ fetch manifest ──▶ verify Ed25519
-                ──▶ download changed chunks ──▶ verify hashes
-                ──▶ rebuild & atomic swap ──▶ [ v1.1 ]
-```
-
-- Static containers: `erebus build ./app -o app.ere`
-- Self-updating binaries: `erebus build ./app -o app.ere --self-update`
-
-Both run identically by default; SISR is only engaged on an explicit update. See the [SISR overview](./concepts/sisr-overview.md), the [delta manifest spec](./spec/delta-manifest-format.md), and the [incremental updates guide](./guides/incremental-updates.md).
+Continue with [The Problem](./concepts/problem.md) for the why, or jump to
+the [SISR overview](./concepts/sisr-overview.md) for delta updates.

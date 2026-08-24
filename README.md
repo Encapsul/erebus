@@ -5,288 +5,227 @@
 [![Version](https://img.shields.io/badge/version-0.5.0-green.svg)](https://github.com/Tednoob17/erebus/releases)
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)]()
-[![Runtimes](https://img.shields.io/badge/runtimes-2-purple.svg)](#supported-runtimes)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Tednoob17/erebus/pulls)
 
-**Package any AI agent into a single self-extracting binary.**
+**Your AI agent. One file. Runs anywhere — then serves an OpenAI-compatible API.**
 
-erebus compiles AI agents (llama.cpp + GGUF model + Python API server) into a single self-contained executable. Supported runtimes: Python (FastAPI/Flask/Django), Binary (llama.cpp inference).
+erebus packages an AI agent — model weights, inference engine config, runtime,
+dependencies — into a single self-contained binary. Ship it like software:
 
-The binary format (`[stub][payload][metadata][footer]`) is a universal executable artifact — capable of transporting an AI agent, its model weights, and inference engine as a single portable unit.
+```bash
+erebus pull demo-agent                 # fetch from any registry
+erebus chat demo-agent.erebus          # terminal chat, zero install on the target
+# or expose it:
+erebus serve demo-agent.erebus --port 8080   # POST /v1/chat/completions
+```
+
+One `.erebus` file carries **4 native platform slices** (linux-x64, linux-arm64,
+macos-arm64, windows-x64) behind a POSIX-shell polyglot loader — the same 59 MB
+artifact runs natively on all four ([validated](benchmarks/universal.md) on real
+Linux, qemu-arm64 and Windows under Wine).
 
 ## Quick start
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Tednoob17/erebus/main/scripts/install.sh | bash
 erebus doctor
+
 cd your-app && erebus build . -o myapp.erebus
-./myapp.erebus
+./myapp.erebus                       # run it like any executable
 ```
 
-### Universal binary — one file, every platform
+Serve a bundled LLM as an OpenAI-compatible endpoint and chat with it:
 
 ```bash
-erebus build . --universal -o agent.erebus   # linux-x64 + linux-arm64 + macos-arm64 + windows-x64 slices
-./agent.erebus                                # runs natively on any of them
+erebus build . --embed-model models/model.gguf -o agent.erebus
+erebus serve agent.erebus --port 8080        # llama-server / vLLM / … launched for you
+erebus chat agent.erebus                     # or talk to it in the terminal
+erebus chat agent.erebus --web --port 8080   # or from the browser (embedded UI)
 ```
 
-The polyglot file starts with a `#!/bin/sh` loader that routes `uname -s`/`uname -m`
-to the matching native `.erebus` slice (extract once to the OS cache dir, then exec).
-Cross-platform Python builds embed only portable files and use the target's own interpreter.
-Windows slices ship a native PE32+ stub (CreateProcessW + MapViewOfFile); running the
-universal file directly requires a POSIX shell (git-bash/WSL) — or extract the slice with
-`erebus inspect --json` and run it from cmd.exe.
-Windows x64 requires the upcoming PE stub port.
+## Why erebus
 
-## Overview
+| | erebus | ollama | llamafile |
+|---|---|---|---|
+| Distribution unit | one `.erebus` per app **× 4 OS/arch inside** | app store + separate models | single binary |
+| Registry | self-hostable, 2 env vars | proprietary cloud default | none |
+| Engine support | GGUF + safetensors/ONNX/TRT-LLM/MLX | GGUF | GGUF |
+| Delta model updates (SISR) | ✅ content-defined chunking | ❌ re-download | ❌ |
+| Declarative builds | `Agentfile.yaml` | Modelfile | ❌ |
+| Signing & trusted keys | Ed25519, fail-closed | ❌ | ❌ |
+| Chaos/security test suites in-repo | ✅ [benchmarks/security.md](benchmarks/security.md) | ❌ | ❌ |
 
-erebus transforms any AI agent directory into a portable, self-extracting binary that can run on target machines without requiring the host runtime. This includes:
+## The five-minute tour
 
-- **Python applications** — FastAPI, Flask, Django (API server, orchestration, tools)
-- **Binary executables** — llama.cpp inference engine (model runner)
-- **Namespace isolation** — user/mount namespaces + optional seccomp (not full Docker sandboxing)
-- **Delta updates (SISR)** — 95% smaller model updates via content-defined chunking
+### 1 · Build — declaratively
 
-The tool handles runtime detection, dependency installation, compression, and signing through a unified, language-agnostic pipeline optimized for AI agents.
+```yaml
+# Agentfile.yaml — CLI flags override this file
+model:
+  path: models/model.gguf     # embedded as a ModelLayer (SISR-aware chunking)
+  ngl: auto                   # auto | off | <layers>
+build:
+  entrypoint: [python3, app.py]
+  seccomp: true
+  health_port: 8000
+  env:
+    LLAMA_CLI: /app/bin/llama-cli
+```
 
-## Supported runtimes
+```bash
+erebus build . -o agent.erebus            # Agentfile picked up automatically
+erebus build . --universal -o agent.erebus  # → 4 platform slices in one file
+```
 
-| Runtime | Detection | Framework support |
-|---------|-----------|-------------------|
-| Python | `requirements.txt`, `pyproject.toml`, `Pipfile`, `setup.py` | FastAPI, Flask, Django |
-| Binary | ELF executable (llama.cpp, etc.) | Any static or dynamic binary |
+Legacy `.erebus.toml` still works. Precedence: **CLI > Agentfile > detection**.
 
-Each runtime has specific detection logic and framework support that triggers when building.
+### 2 · Run anywhere
+
+The stub verifies its own SHA-256, extracts into a content-addressed cache,
+exports GPU facts (`ERE_GPU`, `ERE_VRAM_MB`, `ERE_NGL`) and execs the entrypoint.
+GPU offload is auto-tuned at launch: `nvidia-smi` probe → ROCm `/dev/kfd` → Metal;
+pins always win (`--ngl off|N`).
+
+### 3 · Serve OpenAI-compatible
+
+```bash
+erebus serve agent.erebus --port 8080 [--ngl auto] [--ctx-size 4096] [--web]
+```
+
+erebus resolves the engine from the model format and launches it for you:
+
+| Bundled artifacts | Format | Engine launched |
+|---|---|---|
+| `*.gguf` | GGUF | `llama-server` (static, golden path) |
+| `*.safetensors` (incl. GPTQ/AWQ quant) | HF | vLLM (`python3 -m vllm…api_server`) |
+| `*.onnx` | ONNX | vLLM ONNX backend |
+| `*.engine` / `*.plan` | TensorRT-LLM | `trtllm-serve` |
+| MLX weights + config | MLX | `mlx_lm.server` |
+
+Missing engine on the target? You get the exact install hint — or embed it via
+the Agentfile environment. Measured on CPU: TinyLlama Q4_K_M cold-start < 45 s,
+warm completions ≈ 5 s — full numbers in [benchmarks/serve.md](benchmarks/serve.md).
+
+### 4 · Distribute via your own registry
+
+```bash
+python3 scripts/registry_server.py --dir ~/erebus-registry --host 0.0.0.0 --port 8787
+export ERE_REGISTRY=http://your-vps:8787
+erebus publish agent.erebus       # upload (multipart, optional bearer token)
+erebus pull agent-agent           # streamed download, SHA-256 verified against index
+```
+
+No database, no dependencies — one stdlib Python file, index generated live from
+the packages directory. Hardened against traversal, bad filenames, tampered
+indexes ([chaos-tested](benchmarks/security.md)).
+
+### 5 · Update without re-shipping gigabytes
+
+SISR (Self-Incremental Self-Repair) splits payloads with content-defined
+chunking; updates transfer only changed chunks. Signed delta manifests verify
+fail-cold at boot.
+
+## Command reference
+
+| Command | Description |
+|---------|-------------|
+| `erebus build <dir>` | Package an app dir (`--universal`, `--embed-model`, `--ngl`, `--sign`, `--encrypt`, `--enable-sisr`, `--target`) |
+| `erebus run <file>` | Execute a bundle (namespace isolation, health gate) |
+| `erebus serve <file>` | Launch the engine as an OpenAI-compatible HTTP API |
+| `erebus chat <file>` | Terminal TUI chat; `--web` serves the embedded browser UI |
+| `erebus pull <name>` | Download from a registry (integrity-checked, cached) |
+| `erebus publish <file>` | Upload to a registry |
+| `erebus swap <file> <path> --from <new>` | Replace a file inside an existing bundle (hot-swap) |
+| `erebus inspect <file>` | Metadata, slice tables, JSON output |
+| `erebus layer push/list` | Manage shared runtime packs & models (local CAS) |
+| `erebus keygen/sign/verify/trust` | Ed25519 signing workflow |
+| `erebus dashboard` | Interactive TUI: SISR benchmarks, cache status |
+| `erebus doctor / scan / env / clean / selftest / upgrade / completion / man` | Ops & tooling |
 
 ## Binary format
-
-The `.erebus` binary is structured as:
 
 ```
 [stub][payload][metadata][footer]
 ```
 
-- **Stub**: statically-linked launcher — Mach-O on macOS, PE on Windows, musl ELF on Linux — that reads its own binary, verifies integrity, extracts the payload, and `execvp`s the entrypoint
-- **Payload**: zstd-compressed tar archive (or squashfs) of the application + runtime
-- **Metadata**: JSON with runtime info, entrypoint, layers, capabilities, version
-- **Footer**: 4-byte magic `0xBEEF_CAFE`, format version, integrity SHA-256 hash
+- **Stub** — static launcher per OS (musl ELF / Mach-O / PE32+): reads itself,
+  verifies SHA-256, mmap-lazy-loads the payload, extracts, sandboxes, execs.
+- **Payload** — zstd tar (or squashfs) of app + runtime + weights.
+- **Metadata** — JSON: runtime, entrypoint, layers (runtime/model/tool/config),
+  capabilities, env, crypto block.
+- **Footer** — magic `0xBEEF_CAFE`, version flags, integrity digest.
+  v2 plain · v3 signed · v4 encrypted · v5 squashfs.
 
-Format versions: v2 (plain), v3 (signed), v4 (encrypted), v5 (squashfs).
+Universal polyglot files prepend a 32 KiB `#!/bin/sh` loader plus a slice table;
+each slice is a complete native bundle for its OS/arch.
 
-## Target & host support
+## Supported runtimes & targets
 
-`erebus build --target <list>` packages one artifact **per target**. A comma-separated
-list emits one `<name>-<target>.erebus` per target into the output directory. The
-stubs and (where available) embedded runtimes are cross-selected by target.
+| Runtime | Detection | Use case |
+|---|---|---|
+| Python | `requirements.txt`, `pyproject.toml`, … | FastAPI/Flask agents, orchestration, tools |
+| Binary | ELF/executable present | llama.cpp engines, Go/Rust servers |
 
-| `--target` short form | Resolved triple | Stub | Runtime arch | Notes |
-|-----------------------|-----------------|------|--------------|-------|
-| *(none)* / `host`     | host triple     | host stub | host     | Native build |
-| `linux-x64`           | `x86_64-unknown-linux-musl` | ELF (static) | node x64 linux | |
-| `linux-arm64`         | `aarch64-unknown-linux-musl` | ELF (static) | node arm64 linux | |
-| `darwin-x64`          | `x86_64-apple-darwin` | Mach-O | node x64 darwin | macOS host runs this |
-| `darwin-arm64`        | `aarch64-apple-darwin` | Mach-O | node arm64 darwin | native Apple Silicon |
-| `win-x64`             | `x86_64-pc-windows-gnu` | PE (.exe) | node x64 win | cross-OS from any host |
-| `win-arm64`           | `aarch64-pc-windows-gnu` | PE (.exe) | node arm64 win | cross-OS from any host |
-
-- The builder host can be any supported OS (Linux/macOS/Windows). Cross-OS packaging
-  (e.g. building a Windows `.exe` on Linux) bundles the matching stub + runtime;
-  the produced artifact runs only on its target OS.
-- Full triples (`aarch64-apple-darwin`, `x86_64-unknown-linux-musl`) are also accepted.
-
-## CLI commands
-
-| Command | Description |
-|---------|-------------|
-| `erebus build <dir>` | Package an app directory into a `.erebus` file |
-| `erebus inspect <file>` | Read metadata from a `.erebus` file |
-| `erebus scan [dir]` | Find `.erebus` files recursively and display metadata |
-| `erebus sign <file>` | Sign a `.erebus` with an Ed25519 private key |
-| `erebus verify <file>` | Verify the signature of a `.erebus` against trusted keys |
-| `erebus keygen` | Generate an Ed25519 keypair for signing |
-| `erebus trust <keyfile>` | Add a public key to the trusted keys directory |
-| `erebus doctor` | Check system prerequisites and report missing dependencies |
-| `erebus upgrade` | Self-update the erebus binary |
-| `erebus env` | Show erebus environment and build configuration |
-| `erebus clean` | Remove erebus cache and build artifacts |
-| `erebus completion <shell>` | Generate shell completions for bash, zsh, fish, elvish, or powershell |
-| `erebus man [dir]` | Generate man pages to the specified directory |
-
-### Key features
-- **Global `--verbose`** flag for detailed output on any command
-- **`--strict`** mode on `erebus doctor` for strict validation
-- **`--dry-run`** flag on build, inspect, scan for preview operations
-- **`.erebus.toml`** configuration file support
-- **Rust-based CLI** with zero Python dependency at runtime
-- **Self-updating** via `erebus upgrade`
-
-### Advanced build options
-
-```bash
-# Basic build
-erebus build ./myapp -o myapp.erebus
-
-# Embed interpreter for self-contained binaries
-erebus build ./myapp --embed-interpreter python3 -o myapp.erebus
-
-# Multi-arch packaging: one artifact per target
-erebus build ./myapp --target linux-x64,linux-arm64 -o out/app.erebus
-#  -> out/app-linux-x64.erebus, out/app-linux-arm64.erebus
-
-# Cross-OS packaging: Windows artifact built on Linux/macOS
-erebus build ./myapp --target win-x64 -o out/app.erebus
-#  -> out/app-win-x64.exe (stubs+runtime selected for the target OS)
-
-# Sign and encrypt
-# `--encrypt` is obfuscation only (AES key lives in the file metadata —
-# possession of the binary decrypts it). Use `--sign` for authenticity.
-# `--encrypt` and `--enable-sisr` are mutually exclusive.
-erebus keygen --key-dir ~/.erebus/keys
-erebus build ./myapp --sign --key ~/.erebus/keys/*.key -o myapp.erebus
-erebus build ./myapp --encrypt --key ~/.erebus/keys/*.key -o myapp-secure.erebus
-
-# Self-updating binary with SISR (delta updates)
-# `--enable-sisr` and `--encrypt` cannot be combined (Sisir chunking is
-# incompatible with full-payload AES-GCM). Use one or the other.
-erebus build ./myapp --enable-sisr --update-url https://updates.example.com -o myapp.erebus
-#  -> myapp.erebus + myapp.erebus.manifest
-
-# Persistent storage
-erebus build ./myapp --persist -o myapp.erebus
-#  -> ERE_PERSIST_DIR injected into app environment
-
-# Environment injection
-erebus build ./myapp --env-file .env --env KEY=VALUE -o myapp.erebus
-```
-
-### Embedded Runtime Options
-
-The `--embed-interpreter` flag bundles an interpreter into the binary:
-
-| Option | Description |
-|--------|-------------|
-| `python3` | Embed Python 3 interpreter |
-| `node` | Embed Node.js runtime |
-| `deno` | Embed Deno runtime |
-| `ruby` | Embed Ruby interpreter |
-| `php` | Embed PHP interpreter |
-| `perl` | Embed Perl interpreter |
-| `java` | Embed Java runtime |
-| `go` | Embed Go runtime |
-
-### Build Cache
-
-Intelligent caching skips extraction when the app hash matches:
-
-```bash
-# Use cache for faster rebuilds
-erebus build ./myapp --use-cache
-
-# Clear cache before building
-erebus build ./myapp --clear-cache
-```
-
-## Support matrix
-
-| Host → Target | linux-x64 | linux-arm64 | macos-x64 | macos-arm64 | win-x64 | win-arm64 |
-|--------------|-----------|-------------|-----------|-------------|---------|-----------|
-| linux-x64    | native | cross    | cross  | cross    | cross | cross |
-| linux-arm64  | cross  | native   | cross  | cross    | cross | cross |
-| macos-x64    | cross  | cross    | native | cross    | cross | cross |
-| macos-arm64  | cross  | cross    | cross  | native   | cross | cross |
-| win-x64      | —      | —        | —      | —        | native | cross |
-| win-arm64    | —      | —        | —      | —        | cross | native |
-
-- Cross-OS builds embed the target stub + runtime; the artifact runs only on its target OS
-- Cross-arch builds require `cargo zigbuild` (zig as cc/linker) for the stub; the CLI itself builds with standard `cargo`
+Cross-compiling the launcher stub uses [`cargo zigbuild`](https://github.com/cross-rs/cross-toolchains)
+(zig as linker). Any host builds any target; universal builds need nothing else.
 
 ## Configuration
 
-Place a `.erebus.toml` in your app directory. CLI flags override config file values.
+`Agentfile.yaml` (preferred) or legacy `.erebus.toml`:
 
 ```toml
 [package]
 version = "1.0.0"
-author = "Your Name"
-description = "My awesome app"
-license = "MIT"
+author = "You"
 
 [build]
 isolation = "sandbox"
 seccomp = true
-encrypt = false
-squashfs = false
-target = "x86_64"
-no_install = false
 env_file = ".env"
+embed_model = "models/model.gguf"
+ngl = "auto"
+health_port = 8000
 ```
 
-### Shell completion
+## Security model
 
-```bash
-# Bash
-erebus completion bash >> ~/.bashrc
+- **Ed25519 signatures**, fail-cold verification against `~/.erebus/trusted-keys/`
+  (CVE-2023-48022 mitigated; ed25519-dalek ≥ 2.1 with `zeroize`)
+- **SHA-256 integrity** over payload ‖ metadata at every launch
+- **`--encrypt` is obfuscation only** — the AES-256-GCM key lives in the file's
+  metadata by design; use signing for authenticity. Mutually exclusive with SISR.
+- **Isolation**: Linux namespaces + seccomp/Landlock; macOS App Sandbox;
+  Windows process isolation. Secrets never baked silently (`.env` rejected unless
+  explicit); keys written `0600` atomically; secrets zeroized on drop
+  ([audit](benchmarks/security.md)).
+- `cargo audit`: clean (RC 0).
 
-# Zsh
-erebus completion zsh >> ~/.zshrc
+## Benchmarks
 
-# Fish
-erebus completion fish > ~/.config/fish/completions/erebus.fish
-```
-
-### Man pages
-
-```bash
-erebus man /usr/local/share/man/man1/
-```
+Reproducible numbers with exact commands live in [`benchmarks/`](benchmarks/):
+cold start, warm latency, cross-build times, one-file-four-platforms proof,
+crypto chaos properties, and two adversarial harnesses whose latest verdicts are
+**SURVIVED** (30 corruptions + 10 SIGKILLs on encrypted bundles; 22 checks across
+registry/pull/serve).
 
 ## Build from source
 
-Requires Rust toolchain and `cargo`.
-
 ```bash
-git clone https://github.com/Tednoob17/erebus.git
-cd erebus
-cargo build --release
-# Binary at target/release/erebus
+git clone https://github.com/Tednoob17/erebus.git && cd erebus
+cargo build --release          # CLI at target/release/erebus
+cargo test --workspace         # 444 tests
 ```
-
-### Cargo workspace
 
 | Crate | Purpose |
 |-------|---------|
-| `erebus-core` | Shared library: format, compression, detection, signing, assembly, CAS, SISR |
-| `erebus-stub` | Self-extracting launcher (Linux ELF / macOS Mach-O / Windows PE) |
-| `erebus-cli` | CLI tool (cross-platform) |
+| `erebus-core` | Format, compression, detection, encryption, inference-engine resolution, SISR, CAS |
+| `erebus-stub` | Self-extracting launcher (ELF / Mach-O / PE32+) |
+| `erebus-cli` | Everything you type: build, serve, chat, pull, … |
 
-## Security
-
-- **Ed25519 signing**: binaries can be signed and verified against trusted keys (`~/.erebus/trusted-keys/`, or `$ERE_TRUSTED_DIR`)
-- **Encryption (obfuscation only)**: `--encrypt` uses AES-256-GCM on the payload, but the key is stored in the file's own metadata — possession of the binary is sufficient to decrypt it. It deters casual inspection, **not** an attacker who holds the file. Byte authenticity is governed by `FLAG_SIGNED` + the trusted-keys directory; `--encrypt` and `--enable-sisr` are mutually exclusive.
-- **SHA-256 integrity**: footer hash verifies payload tampering at runtime
-- **Namespace isolation**: Linux builds use user/mount namespaces + optional seccomp (fail-closed); macOS uses App Sandbox (`macos_sandbox`); Windows uses process isolation (`win`/supervisor). `--isolation sandbox` must not silently degrade.
-- **Delta updates (Sisir)**: the stub verifies an embedded Ed25519 `SisirFooterExt.signature` (of the delta manifest) at cold start — fail-closed, with `ERE_SISR_ALLOW_UNSIGNED=1` as an explicit escape hatch for air-gapped/untrusted-update scenarios.
-- **CVE-2023-48022**: ed25519-dalek pinned to >= 2.1.0 to ensure Ed25519 bit is set
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feat/my-feature`)
-3. Commit with signed commits (`git commit -S -m "feat: ..."`)
-4. Push and open a pull request
-
-Run checks before submitting:
-
-```bash
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test --workspace
-```
-
-### Coding conventions
-
-See [CODE_STYLE.md](CODE_STYLE.md) for Rust style guidelines, best practices, and formatting rules.
+Before contributing: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+`cargo test --workspace`. Style: [CODE_STYLE.md](CODE_STYLE.md); ANSSI-Rust rules in
+[RULES.md](RULES.md).
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE).
