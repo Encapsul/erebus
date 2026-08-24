@@ -30,6 +30,16 @@ impl ModelFormat {
         }
     }
 
+    /// Native engine binary this format needs on the host ("" = python-based).
+    pub fn native_engine(self) -> &'static str {
+        match self {
+            ModelFormat::Gguf => "llama-server",
+            ModelFormat::TensorRt => "trtllm-serve",
+            ModelFormat::Mlx => "mlx_lm.server",
+            ModelFormat::SafeTensors | ModelFormat::Onnx => "",
+        }
+    }
+
     /// One-line engine requirement shown when the runtime is missing.
     pub fn engine_hint(self) -> &'static str {
         match self {
@@ -139,6 +149,33 @@ fn collect(dir: &Path, out: &mut Vec<(PathBuf, ModelFormat, u64)>, depth: u8) {
     }
 }
 
+/// Short platform key used in runtime-pack filenames ("linux-x64", …).
+///
+/// Packs are named `<engine>-<key>.pack` so one registry can serve every
+/// supported target from the same directory.
+pub fn host_pack_key() -> String {
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        other => other,
+    };
+    match std::env::consts::OS {
+        os @ ("linux" | "macos" | "windows") => format!("{os}-{arch}"),
+        other => format!("{other}-{}", std::env::consts::ARCH),
+    }
+}
+
+/// Platform-scoped pack identifier, e.g. `llama-server-linux-x64`.
+pub fn engine_pack_stem(engine: &str) -> String {
+    format!("{engine}-{}", host_pack_key())
+}
+
+/// Registry filename of the runtime pack for `engine` on this host,
+/// e.g. `llama-server-linux-x64.pack.tar.gz`.
+pub fn engine_pack_name(engine: &str) -> String {
+    format!("{}.pack.tar.gz", engine_pack_stem(engine))
+}
+
 fn which(name: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     std::env::split_paths(&path_var)
@@ -153,12 +190,7 @@ fn resolve_engine(
     format: ModelFormat,
     python: Option<&str>,
 ) -> Result<LaunchPlan, String> {
-    let native = match format {
-        ModelFormat::Gguf => "llama-server",
-        ModelFormat::TensorRt => "trtllm-serve",
-        ModelFormat::Mlx => "mlx_lm.server",
-        ModelFormat::SafeTensors | ModelFormat::Onnx => "",
-    };
+    let native = format.native_engine();
     if !native.is_empty() {
         for rel in ["usr/local/bin", "usr/bin", "bin"] {
             let candidate = rootfs.join(rel).join(native);
@@ -209,10 +241,26 @@ pub fn plan_launch(
     threads: Option<u32>,
 ) -> Result<LaunchPlan, String> {
     let mut plan = resolve_engine(rootfs, model.format, None)?;
+    plan.args = engine_args(model, host, port, ctx_size, ngl, threads);
+    Ok(plan)
+}
+
+/// Engine CLI args serving `model` on `host:port` — shared by the normal
+/// launch path and the runtime-pack fallback (which resolves the binary
+/// outside this module).
+pub fn engine_args(
+    model: &FoundModel,
+    host: &str,
+    port: u16,
+    ctx_size: u32,
+    ngl: u32,
+    threads: Option<u32>,
+) -> Vec<String> {
+    let mut args = Vec::new();
     let model_str = model.path.to_string_lossy().into_owned();
     match model.format {
         ModelFormat::Gguf => {
-            plan.args.extend([
+            args.extend([
                 "-m".into(),
                 model_str,
                 "--host".into(),
@@ -223,17 +271,17 @@ pub fn plan_launch(
                 ctx_size.to_string(),
             ]);
             if ngl > 0 {
-                plan.args.push("-ngl".into());
-                plan.args.push(ngl.to_string());
+                args.push("-ngl".into());
+                args.push(ngl.to_string());
             }
             if let Some(t) = threads {
-                plan.args.push("-t".into());
-                plan.args.push(t.to_string());
+                args.push("-t".into());
+                args.push(t.to_string());
             }
         }
         ModelFormat::SafeTensors | ModelFormat::Onnx => {
             let dir = model.path.parent().unwrap_or(Path::new("."));
-            plan.args.extend([
+            args.extend([
                 "--model".into(),
                 dir.to_string_lossy().into(),
                 "--host".into(),
@@ -244,7 +292,7 @@ pub fn plan_launch(
         }
         ModelFormat::TensorRt => {
             let dir = model.path.parent().unwrap_or(Path::new("."));
-            plan.args.extend([
+            args.extend([
                 dir.to_string_lossy().into(),
                 "--host".into(),
                 host.into(),
@@ -253,7 +301,7 @@ pub fn plan_launch(
             ]);
         }
         ModelFormat::Mlx => {
-            plan.args.extend([
+            args.extend([
                 "--model".into(),
                 model_str,
                 "--host".into(),
@@ -263,12 +311,34 @@ pub fn plan_launch(
             ]);
         }
     }
-    Ok(plan)
+    args
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pack_names_are_platform_scoped() {
+        let key = host_pack_key();
+        assert!(
+            key.starts_with("linux-") || key.starts_with("macos-") || key.starts_with("windows-")
+        );
+        assert_eq!(
+            engine_pack_stem("llama-server"),
+            format!("llama-server-{key}")
+        );
+        assert_eq!(
+            engine_pack_name("llama-server"),
+            format!("llama-server-{key}.pack.tar.gz")
+        );
+    }
+
+    #[test]
+    fn gguf_needs_a_native_engine() {
+        assert_eq!(ModelFormat::Gguf.native_engine(), "llama-server");
+        assert_eq!(ModelFormat::SafeTensors.native_engine(), "");
+    }
 
     #[test]
     fn classify_by_extension() {

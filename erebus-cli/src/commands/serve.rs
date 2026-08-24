@@ -126,9 +126,28 @@ pub(crate) fn start_engine(
             model.path.display()
         );
     }
-    let mut plan =
-        erebus_core::inference::plan_launch(&rootfs, &model, host, port, ctx_size, ngl, threads)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut plan = match erebus_core::inference::plan_launch(
+        &rootfs, &model, host, port, ctx_size, ngl, threads,
+    ) {
+        Ok(plan) => plan,
+        // Engine missing? Try the runtime-pack chain (local layer store,
+        // then ERE_REGISTRY) before surfacing the install hint.
+        Err(msg) => match ensure_engine_pack(model.format.native_engine()) {
+            Ok(path) => {
+                eprintln!("[erebus] using runtime pack: {}", path.display());
+                erebus_core::inference::LaunchPlan {
+                    program: path.to_string_lossy().into_owned(),
+                    args: erebus_core::inference::engine_args(
+                        &model, host, port, ctx_size, ngl, threads,
+                    ),
+                }
+            }
+            Err(pack_err) => {
+                eprintln!("[erebus] runtime pack unavailable: {pack_err:#}");
+                anyhow::bail!("{msg}");
+            }
+        },
+    };
     // Power-user escape hatch: force the server binary over the resolved one.
     if let Some(bin) = llama_server {
         if !bin.is_file() {
@@ -153,6 +172,158 @@ pub(crate) fn start_engine(
             |n| n.to_string_lossy().into_owned(),
         ),
     })
+}
+
+/// Where downloaded engine packs live, shared across runs.
+fn engines_cache() -> Result<PathBuf> {
+    Ok(erebus_core::paths::cache_dir().join("engines"))
+}
+
+/// Resolve `engine` through the runtime-pack chain:
+/// 1. already-extracted pack from a previous run,
+/// 2. local layer registry entry `runtime/<engine>` (offline installs),
+/// 3. `<engine>-<platform>.pack.tar.gz` + `.sha256` sidecar from `ERE_REGISTRY`.
+///
+/// A pack is a gzipped tarball whose top-level directory holds the engine
+/// binaries (upstream llama.cpp release layout, RPATH `$ORIGIN`-portable).
+fn ensure_engine_pack(engine: &str) -> Result<PathBuf> {
+    if engine.is_empty() {
+        bail!("no native engine for this model format");
+    }
+    let dir = engines_cache()?.join(erebus_core::inference::engine_pack_stem(engine));
+    if let Some(bin) = find_engine_binary(&dir, engine) {
+        return Ok(bin);
+    }
+    if let Some(path) = engine_from_local_layers(engine, &dir)? {
+        return Ok(path);
+    }
+    engine_from_registry(engine, &dir)
+}
+
+/// Depth-first search (max 3 levels below `dir`) for the engine binary
+/// inside an extracted pack — release layouts nest one versioned dir deep.
+fn find_engine_binary(dir: &Path, engine: &str) -> Option<PathBuf> {
+    let wanted = format!("{engine}{}", std::env::consts::EXE_SUFFIX);
+    let mut stack = vec![(dir.to_path_buf(), 0u8)];
+    while let Some((d, depth)) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() && p.file_name().is_some_and(|n| n == wanted.as_str()) {
+                return Some(p);
+            }
+            if p.is_dir() && depth < 3 {
+                stack.push((p, depth + 1));
+            }
+        }
+    }
+    None
+}
+
+/// Extract the `runtime/<engine>` layer (same tar.gz layout) into `dest`.
+fn engine_from_local_layers(engine: &str, dest: &Path) -> Result<Option<PathBuf>> {
+    let Some(root) = erebus_core::registry::LayerRegistry::default_dir() else {
+        return Ok(None);
+    };
+    let Ok(reg) = erebus_core::registry::LayerRegistry::open(&root) else {
+        return Ok(None);
+    };
+    let tmp = std::env::temp_dir().join(format!("erebus-engine-{}.tgz", std::process::id()));
+    if reg
+        .materialize(&format!("runtime/{engine}"), &tmp)
+        .context("reading local layer registry")?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let bin = unpack_engine_pack(&tmp, dest, engine)
+        .map_err(|e| anyhow::anyhow!("local layer pack unusable: {e:#}"));
+    let _ = std::fs::remove_file(&tmp);
+    eprintln!("[erebus] engine '{engine}' materialized from local layer store");
+    bin.map(Some)
+}
+
+/// Download + SHA-256-verify the platform pack from `ERE_REGISTRY`, extract.
+fn engine_from_registry(engine: &str, dest: &Path) -> Result<PathBuf> {
+    use erebus_core::inference::engine_pack_name;
+    let registry = std::env::var("ERE_REGISTRY")
+        .ok()
+        .map(|u| u.trim_end_matches('/').to_string())
+        .context("ERE_REGISTRY not set — nowhere to fetch the engine pack from")?;
+    let name = engine_pack_name(engine);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(600))
+        .build()
+        .context("failed to build HTTP client")?;
+    let expected = client
+        .get(format!("{registry}/packages/{name}.sha256"))
+        .send()
+        .and_then(|r| r.error_for_status())
+        .context("fetching engine pack checksum")?
+        .text()
+        .context("reading engine pack checksum")?;
+    let expected = expected
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
+    if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("registry returned a malformed checksum for {name}");
+    }
+    let body = client
+        .get(format!("{registry}/packages/{name}"))
+        .send()
+        .and_then(|r| r.error_for_status())
+        .with_context(|| format!("engine pack '{name}' not found on {registry}"))?
+        .bytes()
+        .context("downloading engine pack")?;
+    if format!("{:x}", sha2::Sha256::digest(&body)) != expected {
+        bail!("engine pack corrupted in transit (sha256 mismatch)");
+    }
+    let archive = std::env::temp_dir().join(format!("erebus-engine-{}.tgz", std::process::id()));
+    std::fs::write(&archive, &body).context("writing engine pack download")?;
+    let bin = unpack_engine_pack(&archive, dest, engine);
+    let _ = std::fs::remove_file(&archive);
+    eprintln!(
+        "[erebus] pulled runtime pack {name} ({}) from {registry}",
+        humansize(body.len())
+    );
+    bin
+}
+
+/// Gunzip + untar `archive` into `dest`, locate + chmod the engine binary.
+fn unpack_engine_pack(archive: &Path, dest: &Path, engine: &str) -> Result<PathBuf> {
+    let f = std::fs::File::open(archive).context("opening downloaded pack")?;
+    let decoder = flate2::read::GzDecoder::new(f);
+    let mut ar = tar::Archive::new(decoder);
+    ar.set_preserve_permissions(true);
+    std::fs::create_dir_all(dest).context("creating engine cache dir")?;
+    ar.unpack(dest).context("extracting engine pack")?;
+    find_engine_binary(dest, engine).context("no engine binary inside pack")
+}
+
+#[cfg(unix)]
+fn make_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perm = std::fs::metadata(path)?.permissions();
+    perm.set_mode(0o755);
+    std::fs::set_permissions(path, perm).context("chmod engine pack")?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn humansize(n: usize) -> String {
+    if n >= 1024 * 1024 {
+        format!("{} MB", n / (1024 * 1024))
+    } else {
+        format!("{} KB", n / 1024)
+    }
 }
 
 pub fn run(args: ServeArgs) -> Result<()> {

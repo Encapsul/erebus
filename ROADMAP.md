@@ -33,12 +33,10 @@
 
 ## 🧪 Produit
 
-- [ ] **Pre-flight RAM/VRAM** : ✅ fait — `gpu::check_fit` compare modèle+KV
-  aux probes et prévient AVANT le crash obscur du moteur
-- [ ] **Runtime packs** : publier `llama-server:linux-x64|arm64|macos|win`
-  en build STATIQUE CPU (zéro dépendance côté cible) comme layers
-  (`erebus layer push` existe) et faire proposer par `erebus serve` le
-  `pull` automatique du moteur manquant → serve 100 % turnkey zéro-install
+- [ ] **Matrice de packs publics** : publier les builds officiels
+  `llama-server-<platform>.pack.tar.gz` (linux-x64/arm64, macos-arm64,
+  windows-x64) sur une URL publique avec sidecars `.sha256` — le mécanisme
+  client est livré (`serve` auto-pull + vérif + cache, validé E2E)
 - [ ] Polyglot `.bat` natif cmd.exe pour l'universel Windows (git-bash/WSL OK
   aujourd'hui ; arms MINGW déjà générés dans le loader sh)
 - [ ] mdBook (`docs/src/`) : refresh chapitre par chapitre — guides python/binary,

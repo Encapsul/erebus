@@ -36,6 +36,10 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SAFE_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*\.erebus$")
+# Runtime packs: raw engine binaries (llama-server etc.) published next to
+# packages. Their .sha256 sidecar is always public — it leaks nothing.
+SAFE_PACK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*\.pack(\.tar\.gz)?$")
+SAFE_SIDECAR = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*\.pack(\.tar\.gz)?\.sha256$")
 SAFE_USER = re.compile(r"^[a-z0-9_-]{1,32}$")
 SAFE_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,16}$")
 CHUNK = 64 * 1024
@@ -405,7 +409,9 @@ class Handler(BaseHTTPRequestHandler):
     def _serve_package(self, fname: str):
         fname = os.path.basename(fname)
         full = os.path.join(self.store.pkg_dir, fname)
-        if not SAFE_FILE.match(fname) or not os.path.isfile(full):
+        is_sidecar = bool(SAFE_SIDECAR.match(fname))
+        is_pack = bool(SAFE_PACK.match(fname))
+        if not (SAFE_FILE.match(fname) or is_pack or is_sidecar) or not os.path.isfile(full):
             return self.send_json({"error": "package not found"}, 404)
         meta = self.store.get_meta(fname)
         size = os.path.getsize(full)
@@ -420,7 +426,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "bad range"}, 400)
         if start < 0 or end >= size or start > end:
             return self.send_json({"error": "range not satisfiable"}, 416)
-        if meta.get("private"):
+        if meta.get("private") and not is_sidecar:
             user = self._authorized_user()
             if user != meta.get("owner"):
                 return self.send_json({"error": "private package"}, 401)
@@ -429,8 +435,9 @@ class Handler(BaseHTTPRequestHandler):
                     {"error": "monthly transfer quota exceeded (upgrade tier)"}, 402
                 )
             self.store.charge_bytes(user, end - start + 1, size)
-        else:
+        elif not is_pack and not is_sidecar:
             # Anonymous public pull: count toward the public SISR story.
+            # Runtime packs stay out of the savings narrative on purpose.
             self.store.bump_stats(end - start + 1, size)
         code = 206 if (rng and (start != 0 or end != size - 1)) else 200
         self.send_response(code)
@@ -529,9 +536,11 @@ class Handler(BaseHTTPRequestHandler):
             os.unlink(tmp)
             return self.send_json({"error": "missing file part / filename"}, 400)
         fname = os.path.basename(fname)
-        if not SAFE_FILE.match(fname):
+        if not (SAFE_FILE.match(fname) or SAFE_PACK.match(fname) or SAFE_SIDECAR.match(fname)):
             os.unlink(tmp)
-            return self.send_json({"error": "invalid package filename (want *.erebus)"}, 400)
+            return self.send_json(
+                {"error": "invalid upload filename (want *.erebus or *.pack[.sha256])"}, 400
+            )
         final = os.path.join(self.store.pkg_dir, fname)
         os.replace(tmp, final)
         # Body framing was handled manually (streamed); never let this

@@ -102,8 +102,11 @@ erebus resolves the engine from the model format and launches it for you:
 | `*.engine` / `*.plan` | TensorRT-LLM | `trtllm-serve` |
 | MLX weights + config | MLX | `mlx_lm.server` |
 
-Missing engine on the target? You get the exact install hint — or embed it via
-the Agentfile environment. Measured on CPU: TinyLlama Q4_K_M cold-start < 45 s,
+Missing engine on the target? If `ERE_REGISTRY` points at your registry,
+`serve` transparently downloads `<engine>-<platform>.pack.tar.gz`, verifies its
+SHA-256 sidecar and caches it — no llama.cpp install needed. Offline hosts can
+pre-seed it with `erebus layer push llama-server.tar.gz --name runtime/llama-server`.
+Otherwise you get the exact install hint — or embed it via the Agentfile environment. Measured on CPU: TinyLlama Q4_K_M cold-start < 45 s,
 warm completions ≈ 5 s — full numbers in [benchmarks/serve.md](benchmarks/serve.md).
 
 ### 4 · Distribute via your own registry
@@ -118,6 +121,16 @@ erebus pull agent-agent           # streamed download, SHA-256 verified against 
 No database, no dependencies — one stdlib Python file, index generated live from
 the packages directory. Hardened against traversal, bad filenames, tampered
 indexes ([chaos-tested](benchmarks/security.md)).
+
+The server also ships accounts and metering: the registry is open until the
+first `POST /auth/register`, then uploads require a bearer token (`--token`),
+packages can be published `private` (owner-only pulls), and every user gets a
+monthly transfer quota — exceeding it returns HTTP 402 instead of silently
+throttling. A public landing page exposes live SISR counters (bytes served vs
+full-equivalent — what delta delivery actually saved), and `/waitlist` collects
+emails with per-IP throttling. All of it chaos-tested: concurrent same-name
+uploads leave one atomic winner, replace-during-read never serves truncated
+blobs, quota races stay crash-consistent ([battery](benchmarks/security.md)).
 
 ### 5 · Update without re-shipping gigabytes
 
