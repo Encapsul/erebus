@@ -14,6 +14,10 @@ pub struct ScanArgs {
     #[arg(long)]
     pub json: bool,
 
+    /// Plain text output (no table formatting, pipe-friendly)
+    #[arg(long)]
+    pub plain: bool,
+
     /// Write JSON output to file (requires --json)
     #[arg(short, long)]
     pub output: Option<PathBuf>,
@@ -85,50 +89,126 @@ pub fn run(args: ScanArgs) -> Result<()> {
         let entries: Vec<_> = files.iter().filter_map(|f| inspect_file(f)).collect();
         let json_str = serde_json::to_string_pretty(&entries)?;
         write_json_output(&json_str, args.output.as_deref())?;
-    } else {
-        println!(
-            "{:<40} {:<10} {:<10} {:<10} {:<10} {:<8} {:<6}",
-            "FILE", "NAME", "RUNTIME", "ARCH", "CREATED", "SIZE", "SIGNED"
-        );
-        println!("{}", "-".repeat(100));
+    } else if args.plain {
         for file in &files {
             if let Some(info) = inspect_file(file) {
-                let name: String = file
-                    .file_name()
-                    .map_or_else(|| "?".into(), |n| n.to_string_lossy().into());
-                let app_name = info.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                let name = info.get("file").and_then(|v| v.as_str()).unwrap_or("?");
                 let runtime = info.get("runtime").and_then(|v| v.as_str()).unwrap_or("?");
-                let arch = info.get("arch").and_then(|v| v.as_str()).unwrap_or("?");
-                let created = info.get("created").and_then(|v| v.as_str()).unwrap_or("?");
-                let size = info
-                    .get("payload_compressed_size")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
                 let signed = info
                     .get("signed")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+                let size = info
+                    .get("payload_compressed_size")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
                 println!(
-                    "{:<40} {:<10} {:<10} {:<10} {:<10} {:<8} {:<6}",
-                    if name.len() > 40 {
-                        &name[name.len() - 37..]
-                    } else {
-                        &name
-                    },
-                    if app_name.len() > 10 {
-                        &app_name[..9]
-                    } else {
-                        app_name
-                    },
+                    "{}\t{}\t{}\t{}",
+                    name,
                     runtime,
-                    arch,
-                    created,
                     format_size(size),
-                    if signed { "yes" } else { "no" }
+                    if signed { "signed" } else { "unsigned" }
                 );
             }
         }
-        eprintln!("\n{} file(s) found", files.len());
+    } else {
+        let file_count = files.len();
+        let mut pager = crate::pager::Pager::start(20, file_count * 2 + 5);
+        if pager.is_active() {
+            use std::io::Write;
+            let mut w = pager.writer();
+            writeln!(
+                w,
+                "{:<40} {:<10} {:<10} {:<10} {:<10} {:<8} {:<6}",
+                "FILE", "NAME", "RUNTIME", "ARCH", "CREATED", "SIZE", "SIGNED"
+            )
+            .ok();
+            writeln!(w, "{}", "-".repeat(100)).ok();
+            for file in &files {
+                if let Some(info) = inspect_file(file) {
+                    let name: String = file
+                        .file_name()
+                        .map_or_else(|| "?".into(), |n| n.to_string_lossy().into());
+                    let app_name = info.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                    let runtime = info.get("runtime").and_then(|v| v.as_str()).unwrap_or("?");
+                    let arch = info.get("arch").and_then(|v| v.as_str()).unwrap_or("?");
+                    let created = info.get("created").and_then(|v| v.as_str()).unwrap_or("?");
+                    let size = info
+                        .get("payload_compressed_size")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let signed = info
+                        .get("signed")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    writeln!(
+                        w,
+                        "{:<40} {:<10} {:<10} {:<10} {:<10} {:<8} {:<6}",
+                        if name.len() > 40 {
+                            &name[name.len() - 37..]
+                        } else {
+                            &name
+                        },
+                        if app_name.len() > 10 {
+                            &app_name[..9]
+                        } else {
+                            app_name
+                        },
+                        runtime,
+                        arch,
+                        created,
+                        format_size(size),
+                        if signed { "yes" } else { "no" }
+                    )
+                    .ok();
+                }
+            }
+            writeln!(w, "\n{file_count} file(s) found").ok();
+        } else {
+            println!(
+                "{:<40} {:<10} {:<10} {:<10} {:<10} {:<8} {:<6}",
+                "FILE", "NAME", "RUNTIME", "ARCH", "CREATED", "SIZE", "SIGNED"
+            );
+            println!("{}", "-".repeat(100));
+            for file in &files {
+                if let Some(info) = inspect_file(file) {
+                    let name: String = file
+                        .file_name()
+                        .map_or_else(|| "?".into(), |n| n.to_string_lossy().into());
+                    let app_name = info.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                    let runtime = info.get("runtime").and_then(|v| v.as_str()).unwrap_or("?");
+                    let arch = info.get("arch").and_then(|v| v.as_str()).unwrap_or("?");
+                    let created = info.get("created").and_then(|v| v.as_str()).unwrap_or("?");
+                    let size = info
+                        .get("payload_compressed_size")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let signed = info
+                        .get("signed")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    println!(
+                        "{:<40} {:<10} {:<10} {:<10} {:<10} {:<8} {:<6}",
+                        if name.len() > 40 {
+                            &name[name.len() - 37..]
+                        } else {
+                            &name
+                        },
+                        if app_name.len() > 10 {
+                            &app_name[..9]
+                        } else {
+                            app_name
+                        },
+                        runtime,
+                        arch,
+                        created,
+                        format_size(size),
+                        if signed { "yes" } else { "no" }
+                    );
+                }
+            }
+            eprintln!("\n{file_count} file(s) found");
+        }
     }
 
     Ok(())

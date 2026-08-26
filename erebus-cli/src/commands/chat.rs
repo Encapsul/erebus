@@ -350,6 +350,7 @@ pub(crate) fn respond(
 }
 
 /// Validate that a port pair makes sense before launching engines.
+#[allow(dead_code)] // reserved for chat --web mode
 pub(crate) fn validate_ports(port: u16, web: bool) -> Result<()> {
     if web && port == u16::MAX {
         bail!("--port too high for --web mode (engine needs port+1)");

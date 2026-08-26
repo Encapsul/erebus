@@ -309,6 +309,7 @@ fn unpack_engine_pack(archive: &Path, dest: &Path, engine: &str) -> Result<PathB
 }
 
 #[cfg(unix)]
+#[allow(dead_code)] // used when engine packs need chmod
 fn make_executable(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mut perm = std::fs::metadata(path)?.permissions();

@@ -4,6 +4,7 @@
 
 pub mod commands;
 mod error;
+mod pager;
 mod remote_cache;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -19,7 +20,7 @@ use std::process::ExitCode;
     name = "erebus",
     version,
     about = "Package any app into a single self-extracting binary",
-    long_about = "erebus packages any application into a single self-extracting ELF binary.\n\nSupported runtimes: Python, Node.js, Go, and static binaries.\nBuild, sign, attest, and serve AI agent bundles from one file.\n\nExamples:\n  erebus build ./myapp -o myapp.erebus\n  erebus run myapp.erebus\n  erebus inspect myapp.erebus\n  erebus keygen\n  erebus sign myapp.erebus --key ~/.erebus/keys/*.key\n  erebus verify myapp.erebus\n  erebus attest myapp.erebus --key ~/.erebus/keys/*.key\n  erebus audit myapp.erebus\n  erebus doctor\n  erebus scan .\n  erebus serve agent.erebus --port 8080\n  erebus chat agent.erebus\n  erebus completion bash >> ~/.bashrc\n  erebus completion zsh >> ~/.zshrc\n  erebus completion fish > ~/.config/fish/completions/erebus.fish\n\nReport bugs: https://github.com/Tednoob17/erebus/issues"
+    long_about = "erebus packages any application into a single self-extracting ELF binary.\n\nSupported runtimes: Python, Node.js, Go, and static binaries.\nBuild, sign, attest, and serve AI agent bundles from one file.\n\nExamples:\n  erebus build ./myapp -o myapp.erebus\n  erebus run myapp.erebus\n  erebus inspect myapp.erebus\n  erebus keygen\n  erebus sign myapp.erebus --key ~/.erebus/keys/*.key\n  erebus verify myapp.erebus\n  erebus attest myapp.erebus --key ~/.erebus/keys/*.key\n  erebus audit myapp.erebus\n  erebus doctor\n  erebus scan .\n  erebus serve agent.erebus --port 8080\n  erebus chat agent.erebus\n  erebus completion bash >> ~/.bashrc\n  erebus completion zsh >> ~/.zshrc\n  erebus completion fish > ~/.config/fish/completions/erebus.fish\n\nDocumentation: https://github.com/Tednoob17/erebus\nReport bugs: https://github.com/Tednoob17/erebus/issues\n\nUninstall: rm $(which erebus) && rm -rf ~/.cache/erebus ~/.local/share/erebus"
 )]
 struct Cli {
     /// Enable verbose output
@@ -372,6 +373,9 @@ HISTORY
 
 BUGS
         Report bugs at: https://github.com/Tednoob17/erebus/issues
+
+UNINSTALL
+        rm $(which erebus) && rm -rf ~/.cache/erebus ~/.local/share/erebus
 "
     );
     buffer.extend_from_slice(extra.as_bytes());

@@ -5,7 +5,7 @@ use erebus_core::attest::Attestation;
 use erebus_core::audit::{aggregate_attestations, file_hash, generate_sbom, AuditReport};
 use erebus_core::format::{Footer, FLAG_SIGNED};
 use erebus_core::paths::{default_key_dir, trusted_keys_dir};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use std::path::PathBuf;
 use zeroize::Zeroizing;
 

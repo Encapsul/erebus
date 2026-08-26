@@ -98,7 +98,8 @@ pub fn run(args: DoctorArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&items)?);
     } else {
         let mut all_ok = true;
-        let use_color = std::env::var("NO_COLOR").is_err();
+        let use_color = std::env::var("NO_COLOR").is_err()
+            && std::env::var("TERM").map_or(true, |t| t != "dumb");
         for check in &checks {
             let marker = if check.ok { "✓" } else { "✗" };
             let optional_tag = if check.optional { " (optional)" } else { "" };

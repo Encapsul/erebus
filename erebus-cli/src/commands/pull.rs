@@ -262,8 +262,8 @@ fn fmt_size(bytes: u64) -> String {
     }
 }
 
-/// Resolve token from --token-file, --token flag, or ERE_TOKEN env var.
-/// --token-file takes precedence (clig.dev: secrets via files, not flags).
+/// Resolve token from `--token-file`, `--token` flag, or `ERE_TOKEN` env var.
+/// `--token-file` takes precedence (clig.dev: secrets via files, not flags).
 fn resolve_token(
     token: Option<&str>,
     token_file: Option<&std::path::Path>,
