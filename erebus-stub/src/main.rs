@@ -319,6 +319,8 @@ fn default_health_endpoint() -> String {
 pub struct CryptoMeta {
     nonce_hex: String,
     #[allow(dead_code)]
+    /// Layout hint for external tools; unused by stub decryption (GCM tag
+    /// is always the last 16 bytes of the ciphertext).
     tag_offset: usize,
     encryption_key_hex: String,
     encryption_salt_hex: String,
@@ -402,16 +404,19 @@ fn run() -> io::Result<()> {
         // a byte-flip in the payload would keep the footer's SHA-256
         // cache key unchanged, so we additionally bind the cache to the
         // source file's size + mtime to detect tampering.
+        // Metadata unavailable => treat cache as unverifiable and fall
+        // through to re-extraction (fail-safe, no panic in the launcher).
         let source_meta = fs::metadata(&bin_path)
-            .unwrap_or_else(|_| fs::metadata(self_exe().unwrap_or_default()).unwrap());
+            .ok()
+            .or_else(|| fs::metadata(self_exe().unwrap_or_default()).ok());
 
-        let src_valid = extraction::source_manifest_matches(
-            &cache_root,
-            source_meta.len(),
-            source_meta
-                .modified()
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
-        );
+        let src_valid = source_meta.is_some_and(|m| {
+            extraction::source_manifest_matches(
+                &cache_root,
+                m.len(),
+                m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+            )
+        });
 
         if src_valid {
             if verbose {
@@ -518,16 +523,18 @@ fn run() -> io::Result<()> {
 
     // Record source identity after every successful verification/extraction
     // so the warm path can detect payload tampering (byte-flips that don't
-    // change the footer's SHA-256 cache key).
+    // change the footer's SHA-256 cache key). Best-effort: if neither path
+    // can be stat'ed, skip recording — the warm path re-extracts safely.
     let src_meta = fs::metadata(&bin_path)
-        .unwrap_or_else(|_| fs::metadata(self_exe().unwrap_or_default()).unwrap());
-    let _ = extraction::write_source_manifest(
-        &cache_root,
-        src_meta.len(),
-        src_meta
-            .modified()
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
-    );
+        .ok()
+        .or_else(|| fs::metadata(self_exe().unwrap_or_default()).ok());
+    if let Some(m) = src_meta {
+        let _ = extraction::write_source_manifest(
+            &cache_root,
+            m.len(),
+            m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+        );
+    }
 
     // 4. Post-update health gate. A `Pending` record means an update was
     // applied but not yet validated: run the new version supervised and roll

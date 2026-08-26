@@ -1227,7 +1227,7 @@ pub fn wait_for_port(port: u16, timeout_secs: u64) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
 /// Maximum number of child PIDs the signal handler can forward to.
 /// Fixed-size array avoids heap allocation and Mutex in signal context.
@@ -1238,32 +1238,32 @@ const MAX_CHILDREN: usize = 64;
 static CHILD_PID_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(unix)]
-static mut CHILD_PIDS: [i32; MAX_CHILDREN] = [0; MAX_CHILDREN];
+static CHILD_PIDS: [AtomicI32; MAX_CHILDREN] = {
+    // Interior-mutable const is required here: array repeat syntax needs a
+    // const initializer since AtomicI32 is not Copy. Safe as a static init.
+    #[allow(clippy::declare_interior_mutable_const)]
+    const ZERO: AtomicI32 = AtomicI32::new(0);
+    [ZERO; MAX_CHILDREN]
+};
 
 /// Install SIGTERM/SIGINT forwarding to child processes.
 ///
 /// # Safety precondition
 ///
 /// This function registers a signal handler that reads `CHILD_PIDS` via
-/// `static mut` (safe only under the single-threaded invariant below).
-/// Callers MUST ensure the process is single-threaded at this point —
-/// no spawned threads, no concurrent mutable access to `CHILD_PIDS`.
+/// atomics (safe even if threading is introduced). The handler is installed
+/// in a single-threaded context post-fork — no concurrent access exists.
 #[cfg(unix)]
 pub fn install_signal_handler(children: &[(String, i32)]) {
     let count = children.len().min(MAX_CHILDREN);
-    // SAFETY: install_signal_handler is called from a single-threaded context
-    // (post-fork, no spawned threads). The loop writes [0..count] and the
-    // count is bounded by MAX_CHILDREN. No concurrent access exists.
-    unsafe {
-        for (i, (_, pid)) in children.iter().take(count).enumerate() {
-            CHILD_PIDS[i] = *pid;
-        }
-        CHILD_PID_COUNT.store(count, Ordering::Relaxed);
+    for (i, (_, pid)) in children.iter().take(count).enumerate() {
+        CHILD_PIDS[i].store(*pid, Ordering::Relaxed);
     }
+    CHILD_PID_COUNT.store(count, Ordering::Relaxed);
 
     // SAFETY: signal(2) registers a C function pointer as a signal handler.
     // signal_forward only calls kill(2) (async-signal-safe) and reads
-    // CHILD_PIDS/CHILD_PID_COUNT which are initialized above.
+    // CHILD_PIDS/CHILD_PID_COUNT via Relaxed atomics.
     unsafe {
         libc::signal(libc::SIGTERM, signal_forward as *const () as usize);
         libc::signal(libc::SIGINT, signal_forward as *const () as usize);
@@ -1274,13 +1274,12 @@ pub fn install_signal_handler(children: &[(String, i32)]) {
 extern "C" fn signal_forward(sig: i32) {
     // SAFETY: signal_forward runs in signal handler context. All operations
     // are async-signal-safe: Relaxed atomic load, libc::kill(2), and reading
-    // CHILD_PIDS/CHILD_PID_COUNT which are initialized before handler
-    // registration. Single-threaded invariant enforced by install_signal_handler.
+    // CHILD_PIDS/CHILD_PID_COUNT via atomics. No data race possible.
     let count = CHILD_PID_COUNT.load(Ordering::Relaxed);
-    unsafe {
-        let ptr = core::ptr::addr_of!(CHILD_PIDS);
-        for i in 0..count {
-            libc::kill((*ptr)[i], sig);
+    for slot in CHILD_PIDS.iter().take(count) {
+        let pid = slot.load(Ordering::Relaxed);
+        unsafe {
+            libc::kill(pid, sig);
         }
     }
 }

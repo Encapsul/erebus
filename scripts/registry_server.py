@@ -71,7 +71,8 @@ def atomic_write(path: str, data: bytes):
 class Store:
     """All mutable state, guarded by an in-process RLock + per-file flock."""
 
-    def __init__(self, root: str, quota_bytes: int, upload_cap: int):
+    def __init__(self, root: str, quota_bytes: int, upload_cap: int,
+                 require_auth: bool = False):
         self.root = root
         self.pkg_dir = os.path.join(root, "packages")
         self.meta_dir = os.path.join(root, "meta")
@@ -84,10 +85,9 @@ class Store:
         self.waitlist_path = os.path.join(root, "waitlist.txt")
         self.quota_bytes = quota_bytes
         self.upload_cap = upload_cap
+        self.require_auth = require_auth
         self.lock = threading.RLock()
         self._hash_cache: dict[str, tuple[float, str]] = {}
-        # Bootstrap rule: until the first account exists, uploads stay open so
-        # existing workflows (and the original chaos battery) keep working.
         self.users = self._load(self.users_path, {})
 
     # ---- json helpers -----------------------------------------------------
@@ -105,6 +105,8 @@ class Store:
     # ---- users ------------------------------------------------------------
     def bootstrap_open_uploads(self) -> bool:
         with self.lock:
+            if self.require_auth:
+                return False
             return len(self.users) == 0
 
     @staticmethod
@@ -302,21 +304,19 @@ class Store:
     def waitlist_add(self, email: str, ip: str) -> tuple[bool, str]:
         if not SAFE_EMAIL.match(email or "") or len(email) > 254:
             return False, "invalid email"
+        rl_path = self.waitlist_path + ".rl"
         with self.lock:
-            recent = [
-                e for e in self._load(self.waitlist_path + ".rl", {}) if True
-            ]
-            stamps: dict[str, float] = self._load(self.waitlist_path + ".rl", {})
+            # Hold self.lock for the entire read-check-write to prevent TOCTOU
+            # races where concurrent requests from the same IP both pass the
+            # threshold check. The file lock is redundant here but provides
+            # defense-in-depth for multi-process deployments.
+            stamps: dict[str, float] = self._load(rl_path, {})
             now = time.time()
             stamps = {k: v for k, v in stamps.items() if now - v < 3600}
             if sum(1 for t in stamps.values() if now - t < 60) >= 3:
                 return False, "rate limited"
-            # Key each ATTEMPT uniquely: keying by IP alone would let one
-            # client overwrite its own stamp and never reach the threshold.
             stamps[f"{ip}:{uuid.uuid4().hex[:8]}"] = now
-            atomic_write(
-                self.waitlist_path + ".rl", json.dumps(stamps).encode()
-            )
+            atomic_write(rl_path, json.dumps(stamps).encode())
             with open(self.waitlist_path, "a") as f:
                 fcntl.flock(f.fileno(), fcntl.LOCK_EX)
                 f.write(email + "\n")
@@ -771,10 +771,21 @@ def main() -> None:
                     help="monthly transfer quota for free-tier authenticated pulls")
     ap.add_argument("--upload-cap-gb", type=float, default=70.0,
                     help="hard cap on any single upload")
+    ap.add_argument("--require-auth", action="store_true",
+                    help="disable bootstrap mode — all uploads require auth even "
+                         "before the first user registers")
+    ap.add_argument("--tls-cert",
+                    help="path to TLS certificate file (PEM)")
+    ap.add_argument("--tls-key",
+                    help="path to TLS private key file (PEM)")
     args = ap.parse_args()
 
+    if bool(args.tls_cert) != bool(args.tls_key):
+        ap.error("--tls-cert and --tls-key must be used together")
+
     Handler.store = Store(
-        args.dir, int(args.quota_gb * 1e9), int(args.upload_cap_gb * 1e9)
+        args.dir, int(args.quota_gb * 1e9), int(args.upload_cap_gb * 1e9),
+        require_auth=args.require_auth,
     )
     class Server(ThreadingHTTPServer):
         # Default listen backlog is 5; fleet-style bursts of concurrent
@@ -783,11 +794,28 @@ def main() -> None:
         daemon_threads = True
 
     server = Server((args.host, args.port), Handler)
-    daemon_threads = True
+
+    if args.tls_cert and args.tls_key:
+        import ssl
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(args.tls_cert, args.tls_key)
+        server.socket = ctx.wrap_socket(server.socket, server_side=True)
+        scheme = "https"
+    elif args.host != "127.0.0.1":
+        print(
+            "WARNING: Serving on non-localhost without TLS. Tokens traverse "
+            "plaintext. Use --tls-cert/--tls-key or a reverse proxy.",
+            flush=True,
+        )
+        scheme = "http"
+    else:
+        scheme = "http"
+
+    bootstrap = Handler.store.bootstrap_open_uploads()
     print(
-        f"erebus registry v2 on http://{args.host}:{args.port} dir={args.dir} "
+        f"erebus registry v2 on {scheme}://{args.host}:{args.port} dir={args.dir} "
         f"quota={args.quota_gb}GB/month cap={args.upload_cap_gb}GB/upload "
-        f"(uploads {'OPEN — bootstrap mode' if Handler.store.bootstrap_open_uploads() else 'require auth'})",
+        f"auth={'required (bootstrap disabled)' if args.require_auth else 'OPEN — bootstrap mode' if bootstrap else 'require auth'}",
         flush=True,
     )
     try:
