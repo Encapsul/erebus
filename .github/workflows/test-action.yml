@@ -14,10 +14,10 @@ jobs:
     env:
       CARGO_TARGET_DIR: /tmp/erebus-stub-target
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable (2026-08-26)
 
       - name: Install system dependencies
         run: |
@@ -68,7 +68,7 @@ jobs:
           echo "PASS: binary exists"
 
       # Upload artifact
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: test-binary
           path: /tmp/test-app.ere
