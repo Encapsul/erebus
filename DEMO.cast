@@ -1,0 +1,65 @@
+Script started on 2026-08-26 19:09:48+00:00 [<not executed on terminal>]
+=== 1. BUILD ===
+Detected runtime: python
+Creating payload...
+Assembling demo2.erebus...
+Built demo2.erebus (18.3MB)
+
+=== 2. KEYGEN ===
+Generated Ed25519 keypair
+  fingerprint: 979154c6530a161eeb7fdd1a4b82589aef692e6dae064be7a7e30a29e2fd8409
+  private key: /home/ubuntu/.local/share/erebus/keys/979154c6530a161eeb7fdd1a4b82589aef692e6dae064be7a7e30a29e2fd8409.key
+  public key:  /home/ubuntu/.local/share/erebus/keys/979154c6530a161eeb7fdd1a4b82589aef692e6dae064be7a7e30a29e2fd8409.pub
+
+=== 3. SIGN ===
+Signed demo2.erebus
+  key:    /home/ubuntu/.local/share/erebus/keys/979154c6530a161eeb7fdd1a4b82589aef692e6dae064be7a7e30a29e2fd8409.key
+  offset: 19198210
+
+=== 4. ATTEST ===
+Attested demo2.erebus
+  output: demo2.erebus.attest
+  key:    /home/ubuntu/.local/share/erebus/keys/979154c6530a161eeb7fdd1a4b82589aef692e6dae064be7a7e30a29e2fd8409.key
+
+=== 5. VERIFY ===
+Verified against /home/ubuntu/.erebus/trusted-keys/979154c6530a161eeb7fdd1a4b82589aef692e6dae064be7a7e30a29e2fd8409.pub
+OK: signature verified
+
+=== 6. INSPECT ===
+File:        demo2.erebus
+Format:      v3
+Arch:        x86_64
+Signed:      true
+Encrypted:   false
+Payload:     15.7MB -> 0B
+SHA-256:     7dfb8562252eeb61
+Sig offset:  0x124EE11
+Sig size:    64 bytes (ed25519)
+Name:        hello-web
+Runtime:     python
+Isolation:   level 0
+Entrypoint:  python3 /app/app.py
+Created:     2026-08-26T19:09:50.000000000Z
+Env vars:    2 var(s)
+  ERE_APP_NAME=hello-web
+  ERE_RUNTIME=python
+Layers:      1
+  [0] python (0B)
+App hash:    5a04bcafbf959f53...
+RT hash:     ...
+
+=== 7. RUN (3s) ===
+Traceback (most recent call last):
+  File "/home/ubuntu/.cache/erebus/7dfb8562252eeb616d411ce32760abb695c898666d16940de8f397a0f8b5ccf5/rootfs/app/app.py", line 45, in <module>
+    main()
+  File "/home/ubuntu/.cache/erebus/7dfb8562252eeb616d411ce32760abb695c898666d16940de8f397a0f8b5ccf5/rootfs/app/app.py", line 36, in main
+    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+  File "/home/ubuntu/.cache/erebus/7dfb8562252eeb616d411ce32760abb695c898666d16940de8f397a0f8b5ccf5/rootfs/usr/lib/python3.10/socketserver.py", line 452, in __init__
+    self.server_bind()
+  File "/home/ubuntu/.cache/erebus/7dfb8562252eeb616d411ce32760abb695c898666d16940de8f397a0f8b5ccf5/rootfs/usr/lib/python3.10/http/server.py", line 137, in server_bind
+    socketserver.TCPServer.server_bind(self)
+  File "/home/ubuntu/.cache/erebus/7dfb8562252eeb616d411ce32760abb695c898666d16940de8f397a0f8b5ccf5/rootfs/usr/lib/python3.10/socketserver.py", line 466, in server_bind
+    self.socket.bind(self.server_address)
+OSError: [Errno 98] Address already in use
+<!doctype html><html><head><meta charset=utf-8><title>xbin</title></head><body style='font-family:system-ui;max-width:40rem;margin:4rem auto'><h1>Hello from xbin 🚀</h1><p>Ce serveur tourne depuis un seul fichier exécutable.</p><p>Python 3.10.12 — PID 3268826</p></body></html>
+Script done on 2026-08-26 19:09:56+00:00 [COMMAND_EXIT_CODE="0"]
