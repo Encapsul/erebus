@@ -49,6 +49,10 @@ pub struct ChatArgs {
     #[arg(long)]
     pub model: Option<String>,
 
+    /// Run in non-interactive mode (no TUI, serve API only)
+    #[arg(long)]
+    pub no_input: bool,
+
     /// Force a specific engine binary (llama-server path)
     #[arg(long, env = "ERE_LLAMA_SERVER")]
     pub llama_server: Option<PathBuf>,

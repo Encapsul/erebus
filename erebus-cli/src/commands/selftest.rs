@@ -25,6 +25,10 @@ pub struct SelftestArgs {
     /// Verbose output
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Run in non-interactive mode (no prompts, fail if input required)
+    #[arg(long)]
+    pub no_input: bool,
 }
 
 pub fn run(args: SelftestArgs) -> Result<()> {

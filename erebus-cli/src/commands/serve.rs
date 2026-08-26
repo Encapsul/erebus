@@ -51,6 +51,10 @@ pub struct ServeArgs {
     /// Explicit llama-server binary (else: bundle bin dirs, then $PATH)
     #[arg(long, env = "ERE_LLAMA_SERVER")]
     pub llama_server: Option<PathBuf>,
+
+    /// Run in non-interactive mode (no browser auto-open)
+    #[arg(long)]
+    pub no_input: bool,
 }
 
 /// Everything `chat` and `serve` need to talk to a launched engine.

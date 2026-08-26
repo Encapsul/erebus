@@ -14,7 +14,7 @@ fn test_help_output() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("x.bin compiles"));
+        .stdout(predicate::str::contains("erebus packages"));
 }
 
 #[test]

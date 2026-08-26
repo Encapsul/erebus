@@ -19,7 +19,7 @@ use std::process::ExitCode;
     name = "erebus",
     version,
     about = "Package any app into a single self-extracting binary",
-    long_about = "x.bin compiles any web, server, or CLI application into a\nsingle self-extracting ELF executable.\n\nSupported runtimes: Python, Binary (static executables).\n\nExamples:\n  erebus build ./myapp -o myapp.erebus\n  erebus run myapp.erebus\n  erebus inspect myapp.erebus\n  erebus keygen\n  erebus sign myapp.erebus --key ~/.erebus/keys/*.key\n  erebus verify myapp.erebus\n  erebus doctor\n  erebus scan .\n  erebus dashboard\n  erebus completion bash >> ~/.bashrc\n  erebus completion zsh >> ~/.zshrc\n  erebus completion fish > ~/.config/fish/completions/erebus.fish"
+    long_about = "erebus packages any application into a single self-extracting ELF binary.\n\nSupported runtimes: Python, Node.js, Go, and static binaries.\nBuild, sign, attest, and serve AI agent bundles from one file.\n\nExamples:\n  erebus build ./myapp -o myapp.erebus\n  erebus run myapp.erebus\n  erebus inspect myapp.erebus\n  erebus keygen\n  erebus sign myapp.erebus --key ~/.erebus/keys/*.key\n  erebus verify myapp.erebus\n  erebus attest myapp.erebus --key ~/.erebus/keys/*.key\n  erebus audit myapp.erebus\n  erebus doctor\n  erebus scan .\n  erebus serve agent.erebus --port 8080\n  erebus chat agent.erebus\n  erebus completion bash >> ~/.bashrc\n  erebus completion zsh >> ~/.zshrc\n  erebus completion fish > ~/.config/fish/completions/erebus.fish\n\nReport bugs: https://github.com/Tednoob17/erebus/issues"
 )]
 struct Cli {
     /// Enable verbose output
@@ -106,7 +106,7 @@ enum Commands {
     /// Test a .erebus file in an ephemeral sandbox
     Selftest(commands::selftest::SelftestArgs),
 
-    /// Upgrade x.bin to the latest release
+    /// Upgrade erebus to the latest release
     Upgrade(commands::upgrade::UpgradeArgs),
 
     /// Migrate a legacy .erebus (v1) to the SISR-enabled v2 format
@@ -168,6 +168,27 @@ enum Shell {
 fn main() -> ExitCode {
     // Hide source locations in panic messages for security (no file/line info leakage)
     human_panic::setup_panic!();
+
+    // clig.dev: "When `myapp` requires arguments to function and is run
+    // with no arguments, display concise help text."
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() == 1 {
+        eprintln!("erebus — package any app into a single self-extracting binary");
+        eprintln!();
+        eprintln!("Usage: erebus <COMMAND> [OPTIONS]");
+        eprintln!();
+        eprintln!("Most used commands:");
+        eprintln!("  build       Build a .erebus binary from an app directory");
+        eprintln!("  run         Execute a .erebus file");
+        eprintln!("  inspect     Inspect a .erebus file's metadata");
+        eprintln!("  serve       Serve a bundle model as an OpenAI-compatible API");
+        eprintln!("  chat        Interactive chat with a bundled model");
+        eprintln!("  attest      Generate a detached attestation proving what executed");
+        eprintln!("  audit       Generate or verify a signed compliance audit report");
+        eprintln!();
+        eprintln!("Use 'erebus --help' for the full listing of commands and options.");
+        return ExitCode::SUCCESS;
+    }
 
     let cli = Cli::parse();
 
@@ -277,7 +298,7 @@ fn generate_man_pages(dir: &std::path::Path) -> anyhow::Result<()> {
     let cmd = Cli::command();
     let version = env!("CARGO_PKG_VERSION");
     let author = "Ted Kouhouenou <ted.sig42@tutamail.com>";
-    let manual = format!("x.bin {version}");
+    let manual = format!("erebus {version}");
 
     // ── Main man page (erebus.1) ────────────────────────────────────────
     let man = clap_mangen::Man::new(cmd.clone())
@@ -330,7 +351,7 @@ AUTHORS
        Written by {author}.
 
 HISTORY
-       x.bin was started in 2025 by {author} to solve the problem of
+       erebus was started in 2025 to solve the problem of
        packaging complex multi-dependency applications into a single
        portable binary.  The Rust CLI (v0.1.0) replaced the legacy
        Python CLI in 2026.
@@ -402,7 +423,7 @@ AUTHORS
        Written by {author}.
 
 HISTORY
-       Part of x.bin since v0.1.0.
+       Part of erebus since v0.1.0.
 {extra_footer}"
         );
         buffer.extend_from_slice(shared.as_bytes());
