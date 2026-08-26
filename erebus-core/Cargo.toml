@@ -56,6 +56,9 @@ regex = "1"
 # Timestamp formatting
 time = { version = "0.3", features = ["formatting"] }
 
+# Hostname for attestation machine identity
+hostname = "0.4"
+
 # Temporary files for extension downloads
 tempfile = "3"
 

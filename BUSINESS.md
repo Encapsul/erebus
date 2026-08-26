@@ -1,48 +1,68 @@
 # BUSINESS.md — Modèle économique erebus
 
-> Décidé le 2026-08-24. Le code client ET serveur restent MIT pour toujours :
+> Décidé le 2026-08-26. Le code client ET serveur restent MIT pour toujours :
 > on monétise le **service hébergé**, jamais le logiciel.
 
-## L'insight fondateur
+## L'insight fondateur (révisé)
 
-L'avantage structurel n'est pas le packaging — c'est **SISR**. Une mise à jour
-de modèle de 8 GB coûte ~50 MB de bande passante via les deltas
-content-defined, contre 8 GB chez un concurrent qui stocke bêtement sur S3.
-**Notre coût marginal de distribution est ~100× inférieur** : c'est la COGS
-protégée qu'on monétise.
+Le packaging d'IA est une feature, pas un business. Le vrai produit est la
+**preuve cryptographique** de ce qui a exécuté, sur quelle machine, à quelle
+date, et que rien n'a été altéré.
 
-## Les tiers
+Les entreprises réglementées (EU AI Act, SOC 2, ISO 27001, marchés publics)
+ont **besoin de cette preuve** et n'ont **aucun outil** qui la produit
+aujourd'hui. Notre format binaire `.erebus` génère cette preuve en
+arrière-plan — gratuitement en open source, payant en conformité et
+audit trail.
+
+**Le moat n'est pas SISR (commoditisé par XetHub/HF) — c'est la chaîne
+d'attestation d'exécution** : plus le registre grossit, plus l'historique
+de conformité est riche → lock-in naturel.
+
+## Les tiers (révisés)
 
 | Tier | Prix | Inclus |
 |---|---|---|
-| **Free** | 0 € | Packages publics, 20 GB transfert/mois |
-| **Solo** | 9 $/mois | 3 packages privés, 500 GB transfert, SISR CDN inclus |
-| **Team** | 49 $/mois | Privés illimités, organisations, RBAC, audit logs, webhooks, 2 TB |
-| **Enterprise** | 15–50 k$/an | Mirror air-gapped (licence appliance), SSO/SAML, SLA, support |
+| **Free** | 0 € | Packages publics, 10 GB transfert/mois |
+| **Pro** | 29 $/mois | Packages privés illimités, 1 TB SISR CDN, SBOM signé, attestations |
+| **Team** | 99 $/mois | TOUT Pro + RBAC, audit log, dashboard conformité, webhooks, 5 TB |
+| **Enterprise** | 24 k$/an | Mirror air-gapped, SSO/SAML, SLA, rapport conformité automatisé |
+| **Enterprise+** | 50 $/nœud/an | >50 nœuds, attestation par nœud, historique complet |
 
-## L'ICP réel (pas les gamers du llama local)
+## L'ICP réel
 
 ```
-🏭 Edge/offline industriel   kiosques retail, usines, véhicules —
-                             « pas d'internet, doit tourner partout »
-🏥 Santé / défense / admin   air-gapped par réglementation
-📦 Flottes internes          500 machines de terrain à updater sans rsync maison
+🏥 Santé / défense / admin    air-gapped par réglementation
+                              HAS/ANSM, AANSSI, UNECE WP.29
+🏭 Edge industriel            kiosques retail, usines, véhicules
+                              « 500 machines, preuve à l'auditeur »
+📦 Startups IA soumises       EU AI Act high-risk
+   à l'EU AI Act              documentation cycle de vie obligatoire
 ```
 
-Pitch une ligne : *« Sign once, ship everywhere, update for megabytes —
-not gigabytes. »*
+Pitch une ligne : *« Sign. Track. Prove. — Ship AI agents with verifiable
+attestation. »*
 
 ## Les interdits
 
-- ❌ Héberger de l'inférence (modèle ollama cloud) — capital intensif, zone
-  ultra-concurrentielle, incompatible avec notre stade
-- ❌ Paywaller le client ou le serveur — tuerait la confiance ; le moat est
-  la distribution, pas le lock-in
+- ❌ Héberger de l'inférence — capital intensif, zone ultra-concurrentielle
+- ❌ Paywaller le client open source — tuerait la confiance et l'adoption
 - ❌ Marketplace à rev-share maintenant — attendre la liquidité de l'offre
+- ❌ Vendre aux devs hobbyistes — ils ne paient pas pour un registry
 
-## Le slide YC en une ligne
+## Le slide YC en une ligne (révisé)
 
-> *« Docker Hub pour l'IA locale : les modèles pèsent 8 GB, nos mises à jour
-> 50 MB, et le fichier tourne partout sans rien installer. Gratuit en open
-> source, monétisé en hébergement privé — comme Docker, mais avec une
-> technologie de delta qui rend notre coût marginal 100× inférieur. »*
+> *« Nous fournissons la preuve cryptographique de ce qui a exécuté dans
+> chaque agent IA, sur chaque machine, à chaque instant. Les entreprises
+> réglementées ont besoin de cette traçabilité pour se conformer à
+> l'EU AI Act, SOC 2 et aux marchés publics. Notre format binaire
+> génère cette preuve en arrière-plan — gratuitement en open source,
+> payant en hébergé avec conformité et audit trail. »*
+
+## Les mathématiques du business
+
+- **COGS** : SISR = ~50 MB transfert pour 8 GB de modèle → coût CPU ~$0.001
+- **Marge brute** : >95% sur les tiers Pro/Team (pas de GPU à héberger)
+- **ACV Enterprise** : $24k/an × 10 clients = $240k ARR → seed viable
+- **Expansion** : $50/nœud/an pour les flottes → $25k/an pour 500 nœuds
+- **Lock-in** : l'historique d'attestations est le données accumulée

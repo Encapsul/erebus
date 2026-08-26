@@ -65,6 +65,19 @@ enum Commands {
     /// Sign a .erebus file
     Sign(commands::sign::SignArgs),
 
+    /// Generate a detached attestation proving what executed
+    ///
+    /// Produces a signed .erebus.attest JSON file containing artifact hashes,
+    /// provenance, and execution context. The hostname is never stored in
+    /// plaintext — only a SHA-256 hash is recorded.
+    Attest(commands::attest::AttestArgs),
+
+    /// Generate or verify a signed compliance audit report
+    ///
+    /// Aggregates attestations, SBOM, and integrity info into a single
+    /// signed JSON document suitable for regulators and auditors.
+    Audit(commands::audit::AuditArgs),
+
     /// Verify a .erebus file's signature
     Verify(commands::verify::VerifyArgs),
 
@@ -180,6 +193,18 @@ fn main() -> ExitCode {
                 args.quiet = true;
             }
             commands::sign::run(args)
+        }
+        Commands::Attest(mut args) => {
+            if cli.quiet {
+                args.quiet = true;
+            }
+            commands::attest::run(args)
+        }
+        Commands::Audit(mut args) => {
+            if cli.quiet {
+                args.quiet = true;
+            }
+            commands::audit::run(args)
         }
         Commands::Verify(mut args) => {
             if cli.quiet {

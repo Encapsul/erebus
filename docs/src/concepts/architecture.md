@@ -18,11 +18,11 @@ squashfs+mmap) without rewriting everything.
 │   │    Cache     │   Executor   │     │
 │   └──────────────┴──────────────┘     │
 ├──────────────────────────────────────┤
-│            Format .ere               │  shared binary spec
+│            Format .erebus            │  shared binary spec
 └──────────────────────────────────────┘
 ```
 
-Each layer only knows the one below it. The **`.ere` format** is the shared
+Each layer only knows the one below it. The **`.erebus` format** is the shared
 contract: the builder (Rust) writes it, the launcher (Rust) reads it. As
 long as the format is respected, both sides evolve independently.
 
@@ -51,7 +51,7 @@ The diagram flows top to bottom:
      static analysis*. This is the project's differentiator — see
      [Dependency detection](../guides/dependencies.md).
 
-3. **`.ere` Format** — the central layer: *ELF Launcher · zstd Payload ·
+3. **`.erebus` Format** — the central layer: *ELF Launcher · zstd Payload ·
    JSON Metadata · Magic + SHA-256*. This is the file format described in
    [reference](../reference/format.md).
 
@@ -97,7 +97,7 @@ DEV MACHINE                          TARGET MACHINE
 
 my_app/
   app.py
-  requirements.txt   →  erebus build  →   my_app.ere   →  ./my_app.ere  →  it runs
+  requirements.txt   →  erebus build  →   my_app.erebus   →  ./my_app.erebus  →  it runs
 + python3                              (1 file)
 + .so libs
 ```
@@ -115,7 +115,7 @@ on a default launch; SISR only engages on an explicit update.
 
 ```
 +-----------------------------------------------------------------+
-|                         APP.ERE (ELF)                          |
+|                       APP.EREBUS (ELF)                         |
 +-----------------------------------------------------------------+
 |  1. Entrypoint Launcher  --> Bootstrap + runtime isolation       |
 +-----------------------------------------------------------------+
@@ -145,7 +145,7 @@ Every step is verified: signature before anything runs, anti-rollback index
 before applying, per-block SHA-256 and a Merkle commitment before commit. An
 interruption leaves `v1.0` intact.
 
-| Layer | Static `.ere` | SISR `.ere` |
+| Layer | Static `.erebus` | SISR `.erebus` |
 |---|---|---|
 | Launcher | same | same (unchanged) |
 | SISR engine | absent | embedded, dormant by default |

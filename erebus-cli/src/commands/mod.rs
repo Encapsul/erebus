@@ -1,3 +1,5 @@
+pub mod attest;
+pub mod audit;
 pub mod build;
 pub mod chat;
 pub mod clean;

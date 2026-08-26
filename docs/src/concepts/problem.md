@@ -1,39 +1,63 @@
 # The Problem
 
-Distributing a server application is unnecessarily complicated.
+## Comment prouver ce qui a exécuté?
 
-An app depends on a set of things installed on the developer's machine:
+Une entreprise déploie un agent IA sur 500 machines de terrain.
+L'agent contient : un modèle GGUF (4 GB), un serveur Python (FastAPI),
+des outils système, et une configuration.
 
-- a **runtime** (Node.js, Python, Java, Ruby...);
-- **system shared libraries** (`.so` files);
-- **packages** (`node_modules`, pip packages, gems...);
-- **configuration files** and assets.
+**La question de l'auditeur :**
 
-When you give this app to someone else — a colleague, a production server,
-a client — **it breaks**. Node is not installed, or it's the wrong version,
-or a system library is missing, or the paths are different.
+> « Prouvez-moi que l'agent exécuté sur la machine #247 le 15 septembre
+> correspond exactement à la version que vous avez validée en juillet,
+> et qu'aucun code n'a été altéré entre-temps. »
 
-This is the classic *"it works on my machine"* problem.
+**La réponse aujourd'hui :** aucune. Il n'existe aucun outil qui produit
+cette preuve automatiquement.
 
-## Why Docker is not enough (for this case)
+## Pourquoi les solutions existantes ne suffisent pas
 
-Docker solves part of the problem but introduces significant friction:
+| Outil | Ce qu'il fait | Ce qu'il ne fait PAS |
+|---|---|---|
+| Docker | Container avec layers signés | Daemon requis, pas d'attestation d'exécution, pas d'air-gap |
+| Ollama | Store de modèles avec pull | Pas de signatures, pas de sandbox, pas de traçabilité |
+| llamafile | Binaire unique portable | Pas de delta, pas d'audit trail, mono-runtime |
+| Git LFS / rsync | Transfert de fichiers | Pas de format d'artefact, pas de signature, pas d'attestation |
 
-- you must **install Docker** (root daemon, system service);
-- you must **understand** images, registries, volumes, networking;
-- the daemon runs **constantly**, often as root;
-- it's **heavy** for simply distributing a tool or a small service.
+Le problème n'est pas le packaging. Le problème est **l'absence de preuve**.
 
-Docker remains excellent for orchestration, multi-container, Kubernetes.
-But for *"here, run this server"*, it's overkill.
+## Le contexte réglementaire
 
-## The erebus idea
+- **EU AI Act** : obligatoire pour les systèmes high-risk d'ici 2026-2027.
+  Exige la documentation du cycle de vie complet de l'IA.
+- **SOC 2 / ISO 27001** : exigent des preuves d'intégrité logicielle
+  et de contrôle d'accès aux déploiements.
+- **Marchés publics** (USA, UE) : imposent la SBOM (Software Bill of
+  Materials) et la chaîne de traçabilité du modèle.
+- **UNECE WP.29** (automobile) : traçabilité obligatoire des mises à jour
+  logicielles embarquées.
 
-A single self-contained binary file that contains absolutely everything the
-app needs, and runs like a normal program.
+## L'idée erebus
+
+Un format binaire qui contient tout (runtime + modèle + code + config)
+et qui génère **automatiquement** une preuve signée de ce qui a exécuté :
 
 ```bash
-chmod +x my_app.ere && ./my_app.ere
+erebus build ./mon-agent --embed-model model.gguf -o agent.erebus
+erebus sign agent.erebus --key my-key.pem
+erebus attest agent.erebus -o agent.erebus.attest
 ```
 
-Zero installation. Zero configuration. The file is self-sufficient.
+L'auditeur reçoit trois fichiers :
+1. `agent.erebus` — le bundle exécutable
+2. `agent.erebus.attest` — la preuve signée de ce qui a exécuté
+3. La clé publique — pour vérifier la signature
+
+Vérification offline, sans daemon, sans internet :
+
+```bash
+erebus verify agent.erebus
+erebus verify-attest agent.erebus.attest --key auditeur-pub.pem
+```
+
+**Zéro installation. Zéro configuration. La preuve est le produit.**

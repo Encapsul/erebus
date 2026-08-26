@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to x.bin will be documented in this file.
+All notable changes to this project will be documented in this file.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 

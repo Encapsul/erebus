@@ -1,6 +1,11 @@
 # MISSION_LOG.md — Suivi des missions SISR (Prompt 1→10)
 
-Fichier unique consignant toutes les modifications apportées au projet x.bin
+> **Note (2026-08-26) :** Ce document couvre les missions techniques initiales.
+> Le produit a depuis pivoté vers la conformité IA (attestation d'exécution,
+> SBOM, audit trail). Voir [BUSINESS.md](../BUSINESS.md) pour la vision actuelle
+> et [ROADMAP.md](../ROADMAP.md) pour le plan d'exécution.
+
+Fichier unique consignant toutes les modifications apportées au projet erebus
 dans le cadre de l'initiative SISR (Self-Incremental Sovereign
 Reconstruction). Tenue à jour à chaque mission.
 

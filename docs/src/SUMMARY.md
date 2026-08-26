@@ -20,11 +20,11 @@
 # Spec
 
 - [Delta Manifest Format](./spec/delta-manifest-format.md)
-- [`.ere` Format v2 — SISR extension](./spec/erebus-format-v2.md)
+- [`.erebus` Format v2 — SISR extension](./spec/erebus-format-v2.md)
 
 # Technical Reference
 
-- [`.ere` Format](./reference/format.md)
+- [`.erebus` Format](./reference/format.md)
 - [The Launcher (stub)](./reference/launcher.md)
 - [The Builder](./reference/builder.md)
 - [Cache](./reference/cache.md)
@@ -34,18 +34,10 @@
 
 - [Quickstart](./guides/quickstart.md)
 - [Python](./guides/python.md)
-- [Node.js](./guides/node.md)
-- [Java](./guides/java.md)
-- [Ruby](./guides/ruby.md)
-- [.NET / C#](./guides/dotnet.md)
-- [Deno](./guides/deno.md)
-- [Go](./guides/go.md)
-- [PHP](./guides/php.md)
-- [Perl](./guides/perl.md)
 - [Native Binary](./guides/binary.md)
 - [Dependency Detection](./guides/dependencies.md)
 - [Incremental Updates (SISR)](./guides/incremental-updates.md)
-- [Updating a deployed `.ere` (SISR)](./guides/user-updates.md)
+- [Updating a deployed `.erebus` (SISR)](./guides/user-updates.md)
 
 # Migration
 

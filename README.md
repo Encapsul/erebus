@@ -134,7 +134,7 @@ blobs, quota races stay crash-consistent ([battery](benchmarks/security.md)).
 
 ### 5 · Update without re-shipping gigabytes
 
-SISR (Self-Incremental Self-Repair) splits payloads with content-defined
+SISR (Self-Incremental Sovereign Reconstruction) splits payloads with content-defined
 chunking; updates transfer only changed chunks. Signed delta manifests verify
 fail-cold at boot.
 

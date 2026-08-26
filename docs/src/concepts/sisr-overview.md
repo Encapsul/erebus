@@ -7,12 +7,12 @@
 
 ## The two erebus models
 
-erebus ships in two shapes. They look alike (same `./app.ere`), but only one
+erebus ships in two shapes. They look alike (same `./app.erebus`), but only one
 can update itself.
 
-| | **Classic .ere** (default) | **SISR .ere** (opt-in) |
+| | **Classic .erebus** (default) | **SISR .erebus** (opt-in) |
 |---|---|---|
-| Build | `erebus build ./app -o app.ere` | `erebus build ./app -o app.ere --self-update` |
+| Build | `erebus build ./app -o app.erebus` | `erebus build ./app -o app.erebus --self-update` |
 | Contents | launcher + payload (SquashFS) | launcher + payload + **embedded SISR engine** |
 | Update | rebuild + redistribute | `./app.ere update` — self-rebuilds from signed deltas |
 | Toolchain on target | none | **still none** (engine is embedded) |
@@ -26,7 +26,7 @@ explicitly (invariant I-2 of the [SISR spec](../architecture/sisr-spec.md)).
 
 ## Why SISR exists
 
-A classic `.ere` is immutable. Shipping a fix means:
+A classic `.erebus` is immutable. Shipping a fix means:
 
 ```
 [dev machine] erebus build  →  [v1.1 .ere]  →  redistribute  →  [target]

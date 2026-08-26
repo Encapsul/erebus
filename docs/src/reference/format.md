@@ -1,6 +1,6 @@
-# `.ere` Format
+# `.erebus` Format
 
-A `.ere` file is a **valid ELF executable** with a compressed payload,
+A `.erebus` file is a **valid ELF executable** with a compressed payload,
 JSON metadata, and a **footer** at the very end of the file. The launcher
 reads itself via `/proc/self/exe`, seeks to the end, reads the footer, and
 finds everything else from the offsets stored there.
@@ -50,7 +50,7 @@ truth, shared by the launcher (stub) and the CLI. There is no separate
 
 **Constraint:** The Linux kernel requires ELF magic (`\x7fELF`) at offset 0
 to execute the file. We cannot put our own bytes at the start without
-breaking `chmod +x && ./my_app.ere`.
+breaking `chmod +x && ./my_app.erebus`.
 
 **Options considered:**
 1. Custom header before ELF — rejected. The kernel would refuse to execute
@@ -210,8 +210,8 @@ The footer is versioned (`format_version`). A launcher rejects a file with
 a version higher than it understands:
 
 ```bash
-$ ./old-erebus new-format.ere
-[erebus] error: unsupported .ere format version (binary newer than launcher)
+$ ./old-erebus new-format.erebus
+[erebus] error: unsupported .erebus format version (binary newer than launcher)
 ```
 
 | Version | Changes                                            |

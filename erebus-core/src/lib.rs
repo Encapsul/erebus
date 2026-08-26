@@ -5,6 +5,8 @@
 //! (`erebus-stub`).
 
 pub mod assembly;
+pub mod attest;
+pub mod audit;
 pub mod cas;
 pub mod chunker;
 pub mod compress;

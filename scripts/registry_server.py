@@ -11,6 +11,10 @@ Routes (backward compatible with erebus CLI publish/pull):
     POST /auth/register       -> {"username","password"} -> {"token"}
     POST /auth/login          -> same shape, rotates nothing (token is stable)
     POST /waitlist            -> {"email"} throttled per IP
+    GET  /mcp                 -> list MCP servers
+    GET  /mcp/<name>          -> MCP server details
+    POST /mcp                 -> upload MCP server (multipart, auth required)
+    GET  /mcp/<name>/install  -> 1-line install script
 
 Storage layout under --dir:
     packages/<file>           blobs
@@ -72,7 +76,8 @@ class Store:
         self.pkg_dir = os.path.join(root, "packages")
         self.meta_dir = os.path.join(root, "meta")
         self.usage_dir = os.path.join(root, "usage")
-        for d in (self.pkg_dir, self.meta_dir, self.usage_dir):
+        self.mcp_dir = os.path.join(root, "mcp")
+        for d in (self.pkg_dir, self.meta_dir, self.usage_dir, self.mcp_dir):
             os.makedirs(d, exist_ok=True)
         self.users_path = os.path.join(root, "users.json")
         self.stats_path = os.path.join(root, "stats.json")
@@ -269,6 +274,30 @@ class Store:
             "packages": npkg,
         }
 
+    # ---- MCP servers ------------------------------------------------------
+    def mcp_index(self) -> list[dict]:
+        """List all MCP servers with their metadata."""
+        servers = []
+        for name in sorted(os.listdir(self.mcp_dir)):
+            if not name.endswith(".mcp.json"):
+                continue
+            path = os.path.join(self.mcp_dir, name)
+            meta = self._load(path, {})
+            servers.append(meta)
+        return servers
+
+    def get_mcp(self, name: str) -> dict | None:
+        path = os.path.join(self.mcp_dir, f"{name}.mcp.json")
+        if not os.path.isfile(path):
+            return None
+        return self._load(path, None)
+
+    def set_mcp(self, name: str, meta: dict):
+        atomic_write(
+            os.path.join(self.mcp_dir, f"{name}.mcp.json"),
+            json.dumps(meta).encode(),
+        )
+
     # ---- waitlist ---------------------------------------------------------
     def waitlist_add(self, email: str, ip: str) -> tuple[bool, str]:
         if not SAFE_EMAIL.match(email or "") or len(email) > 254:
@@ -401,6 +430,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/packages/"):
             return self._serve_package(path[len("/packages/"):])
+        if path == "/mcp":
+            return self._mcp_list()
+        if re.match(r"^/mcp/[^/]+/install$", path):
+            return self._mcp_install(path.split("/")[2])
+        if re.match(r"^/mcp/[^/]+$", path):
+            return self._mcp_detail(path.split("/")[2])
         self.send_json({"error": "not found"}, 404)
 
     def _send_index(self):
@@ -504,6 +539,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"message": msg})
             code = 429 if "rate limited" in msg else 400
             return self.send_json({"error": msg}, code)
+        if path == "/mcp":
+            return self._mcp_upload()
         if path == "/" or path.startswith("/packages/"):
             return self._upload()
         self.send_json({"error": "not found"}, 404)
@@ -524,6 +561,89 @@ class Handler(BaseHTTPRequestHandler):
         if not ok:
             return self.send_json({"error": msg}, 400)
         return self.send_json({"username": username, "token": msg})
+
+    def _mcp_list(self):
+        servers = self.store.mcp_index()
+        self.send_json({"mcp_servers": servers, "count": len(servers)})
+
+    def _mcp_detail(self, name: str):
+        meta = self.store.get_mcp(name)
+        if meta is None:
+            return self.send_json({"error": "MCP server not found"}, 404)
+        self.send_json(meta)
+
+    def _mcp_install(self, name: str):
+        meta = self.store.get_mcp(name)
+        if meta is None:
+            return self.send_json({"error": "MCP server not found"}, 404)
+        runtime = meta.get("runtime", "python")
+        pkg_file = meta.get("file", "")
+        install_cmd = f'erebus pull {pkg_file} && erebus run {pkg_file}'
+        body = f"""# Install {name}
+# {meta.get('description', '')}
+# Runtime: {runtime}
+# Tools: {', '.join(meta.get('tools', []))}
+{install_cmd}
+""".encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _mcp_upload(self):
+        self.close_connection = True
+        open_mode = self.store.bootstrap_open_uploads()
+        owner = self._authorized_user() if not open_mode else "__anon__"
+        if not open_mode and owner is None:
+            return self.send_json(
+                {"error": "authentication required — register via /auth/register"}, 401
+            )
+        ctype = self.headers.get("Content-Type", "")
+        if "boundary=" not in ctype:
+            return self.send_json({"error": "expected multipart/form-data"}, 400)
+        declared = int(self.headers.get("Content-Length", 0) or 0)
+        if declared > self.store.upload_cap:
+            return self.send_json({"error": "payload exceeds upload cap"}, 413)
+        boundary = ctype.split("boundary=", 1)[1].strip('"').encode()
+
+        tmp = os.path.join(self.store.pkg_dir, f".incoming.{uuid.uuid4().hex}")
+        fname, nbytes = stream_multipart(self, boundary, tmp, self.store.upload_cap, declared)
+        if not fname:
+            os.unlink(tmp)
+            return self.send_json({"error": "missing file part / filename"}, 400)
+        if nbytes > self.store.upload_cap:
+            os.unlink(tmp)
+            return self.send_json({"error": "upload exceeds --upload-cap"}, 413)
+        fname = os.path.basename(fname)
+        if not SAFE_FILE.match(fname):
+            os.unlink(tmp)
+            return self.send_json(
+                {"error": "invalid upload filename (want *.erebus)"}, 400
+            )
+        final = os.path.join(self.store.pkg_dir, fname)
+        os.replace(tmp, final)
+        self.close_connection = True
+        self.store.set_meta(fname, None if open_mode else owner, private=bool(not open_mode and owner != "__anon__"))
+
+        # Extract MCP metadata from JSON body fields or use defaults
+        mcp_name = fname[: -len(".erebus")]
+        mcp_meta = {
+            "name": mcp_name,
+            "version": "1.0.0",
+            "description": f"MCP server: {mcp_name}",
+            "tools": [],
+            "transport": "stdio",
+            "runtime": "python",
+            "tags": [],
+            "file": fname,
+            "sha256": self.store.sha256_cached(final),
+            "size": nbytes,
+            "owner": owner,
+        }
+        self.store.set_mcp(mcp_name, mcp_meta)
+        self.store._hash_cache.pop(final, None)
+        self.send_json({"status": "ok", "stored": fname, "mcp": mcp_name, "size": nbytes})
 
     def _upload(self):
         # The body may be huge and we may respond before reading all of it

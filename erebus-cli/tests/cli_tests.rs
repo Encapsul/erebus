@@ -290,3 +290,80 @@ fn test_inspect_reports_encrypted_v4() {
     assert_eq!(footer.payload_csize, ciphertext.len() as u64);
     assert_eq!(footer.payload_usize, CRYPTO_AES_256_GCM);
 }
+
+#[test]
+fn test_attest_roundtrip() {
+    use erebus_core::assembly::assemble_erebus;
+    use erebus_core::assembly::AssemblyInput;
+
+    let dir = tempdir().unwrap();
+    let rootfs = dir.path().join("rootfs");
+    std::fs::create_dir_all(rootfs.join("app")).unwrap();
+    std::fs::write(rootfs.join("app/main.py"), b"print('hello')").unwrap();
+
+    let payload = erebus_core::tar::create_tar_zstd_with_level(&rootfs, 3).unwrap();
+    let meta = serde_json::json!({
+        "name": "attest-test",
+        "author": "test-user",
+        "license": "MIT",
+        "layers": [{
+            "kind": "runtime",
+            "name": "runtime/python3",
+            "size": 1024,
+        }],
+    });
+    let bin_path = dir.path().join("test.erebus");
+    assemble_erebus(
+        &bin_path,
+        &AssemblyInput {
+            stub_bytes: b"STUB",
+            payload: &payload,
+            meta_bytes: serde_json::to_vec(&meta).unwrap().as_slice(),
+            encrypt: false,
+            squashfs: false,
+            target_arch: None,
+            sisr: None,
+        },
+    )
+    .unwrap();
+
+    // Generate key pair
+    let key_dir = dir.path().join("keys");
+    erebus()
+        .args(["keygen", "--key-dir", key_dir.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let key_file = std::fs::read_dir(&key_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .find(|e| e.path().extension().map_or(false, |ext| ext == "key"))
+        .expect("key file not found");
+
+    // Run attest
+    let attest_out = dir.path().join("test.erebus.attest");
+    erebus()
+        .args([
+            "attest",
+            bin_path.to_str().unwrap(),
+            "--key",
+            key_file.path().to_str().unwrap(),
+            "--output",
+            attest_out.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    // Verify output file exists and is valid JSON
+    assert!(attest_out.exists(), ".attest file must exist");
+    let attest_data = std::fs::read(&attest_out).unwrap();
+    let parsed: serde_json::Value = serde_json::from_slice(&attest_data).unwrap();
+    assert_eq!(parsed["spec_version"], "1.0");
+    assert_eq!(parsed["attestation_type"], "erebus-execution");
+    assert!(parsed["artifact"]["bundle_hash"].is_string());
+    assert!(parsed["artifact"]["payload_hash"].is_string());
+    assert!(parsed["execution"]["machine_id_hash"].is_string());
+    assert!(parsed["signature"]["signature_hex"].is_string());
+    assert!(parsed["signature"]["key_fingerprint"].is_string());
+}

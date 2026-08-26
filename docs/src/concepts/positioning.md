@@ -2,95 +2,111 @@
 
 ## Customer profile
 
-Un **développeur (solo ou petite équipe)** qui construit un **agent IA local** (llama.cpp + modèle
-GGUF + serveur inference + web UI) et veut le **distribuer à des collègues** ou le déployer sur
-des serveurs où il ne contrôle pas l'environnement. Il ne veut pas demander à ses utilisateurs
-d'installer Python, Node, un runtime, ou Docker. Il veut un fichier unique, auto-extractible, qu'il
-peut signer pour prouver son origine, et mettre à jour de manière incrémentale.
+Un **opérateur d'IA** qui déploie des agents sur des **flottes de machines**
+(edge, serveurs, kiosques, véhicules) et qui doit **prouver à un auditeur**
+ce qui a exécuté, où, quand, et que le code n'a pas été altéré.
 
-## Le segment : local AI / agents IA
+Il est soumis à des contraintes réglementaires (EU AI Act, SOC 2, ISO 27001,
+marchés publics défense/santé) et n'a **aucun outil** qui produit cette
+preuve automatiquement aujourd'hui.
 
-| | Docker | PyInstaller/pkg | llamafile | **erebus** |
+## Le segment : conformité IA + flottes
+
+| | Docker | Ollama | llamafile | **erebus** |
 |---|---|---|---|---|
-| Runtime | Container daemon | Mono-language | C++ only | **Multi-runtime** |
-| Delta updates | Layer cache (partial) | None | None | **SISR content-defined** |
-| Sandbox | Namespace | None | None | **seccomp + Landlock** |
-| Portable format | Image OCI | Executable | Single file | **Single .erebus file** |
-| Self-contained | Needs daemon | Runtime bundled | All-in-one binary | **Stub + rootfs + model** |
+| Exécution signée | ❌ | ❌ | ❌ | **✅ Ed25519 + attestation** |
+| Delta updates | Layer cache | Store layers | ❌ | **SISR content-defined** |
+| Sandbox | Namespace | ❌ | ❌ | **seccomp + Landlock** |
+| Audit trail | ❌ | ❌ | ❌ | **✅ attestation chain** |
+| Portable format | Image OCI | Store pull | Single file | **Single .erebus file** |
+| Offline verification | ❌ (daemon) | ❌ (daemon) | Partial | **✅ fully offline** |
 
 ### Qui a ce problème aujourd'hui?
 
-1. **Développeurs d'agents IA open-source** : publient un GitHub repo avec `requirements.txt` + `model.gguf`, mais leurs utilisateurs doivent installer Python + télécharger 4GB de dépendances + le modèle. Temps de setup : 30+ minutes.
+1. **Hôpitaux / intégrateurs santé** : déploient des agents IA de diagnostic
+   sur des postes médicaux. La HAS/ANSM exige la preuve que le logiciel
+   exécuté correspond à la version validée. Aucun outil ne fournit cette
+   preuve automatiquement.
 
-2. **Startups MLOps** : construisent des API d'inference avec llama.cpp + un serveur FastAPI, mais le déploiement sur des serveurs edge heterogènes (x64/ARM64, Linux/macOS/Windows) nécessite des builds par architecture.
+2. **Intégrateurs défense / administration** : agents IA sur des systèmes
+   air-gapped. L'AANSSI exige la traçabilité complète de la chaîne
+   d'approvisionnement logicielle (SBOM + signatures + preuve d'exécution).
 
-3. **Équipes de prototypage** : veulent partager un agent IA expérimental entre collègues sans créer d'image Docker (trop lourd), sans PyInstaller (mono-language), sans setup manuel.
+3. **Fabricants automobiles / industrie** : agents IA embarqués dans des
+   véhicules ou des usines. La réglementation UNECE WP.29 impose la
+   traçabilité des mises à jour logicielles.
+
+4. **Startups IA soumises à l'EU AI Act** : tout système d'IA "high-risk"
+   doit documenter son cycle de vie complet — modèle, code, dépendances,
+   exécutions. Personne ne construit cet outil aujourd'hui.
 
 ## Pourquoi maintenant?
 
-- **Modèles GGUF font 4-70 GB** : le téléchargement est devenu le goulot d'étranglement.
-- **llamafile (Mozilla-Ocho, 25k★)** : le concurrent direct, mais C++ only, pas de delta updates, pas de sandbox, pas de multi-runtime.
-- **Écosystème agents IA en explosion** : LlamaIndex, LangChain, MCP — mais aucune solution de packaging pour les agent locaux.
-- **Docker est trop lourd pour le laptop** : daemon, root, ressources. Un agent IA local devrait démarrer en 2 secondes, pas nécessiter un container engine.
+- **EU AI Act entre en vigueur** : obligatoire pour les systèmes high-risk
+  d'ici 2026-2027. Les entreprises n'ont aucun outil de traçabilité IA.
+- **SOC 2 + ISO 27001** exigent des preuves d'intégrité logicielle.
+- **Marchés publics IA** ($4B+ USA, UE en explosion) imposent la chaîne
+  de traçabilité du modèle.
+- **Modèles GGUF 4-70 GB** : la distribution est le goulot, les deltas
+  SISR réduisent le coût de 100×.
+- **llamafile (25k★)** et **Ollama (176k★)** n'ont aucune功能 de
+  traçabilité ou d'attestation d'exécution.
 
 ## Pourquoi erebus?
 
-### Against llamafile
-llamafile = un binaire C++ qui package un modèle + un runtime llama.cpp. C'est fait pour tourner
-un modèle, pas pour packager un agent IA complet avec serveur web + API + tools Python.
+### Le format comme preuve
 
-erebus = packager **n'importe quel runtime** (Python, Node, Go, Binary) + modèle + code + config
-dans un format unifié, avec **delta updates Sisir** (llamafile télécharge le fichier entier à
-chaque mise à jour) et **sandbox seccomp+Landlock** (llamafile n'a pas de isolation).
+Chaque binaire `.erebus` contient :
+- Un **SHA-256** du payload et des métadonnées (vérifié à chaque lancement)
+- Une **signature Ed25519** (fail-cold, anti-downgrade)
+- Un **Merkle tree** des chunks SISR (chaque byte est traçable)
+
+erebus étend cela en générant un **document d'attestation détaché**
+(`.erebus.attest`) qui prouve :
+- quel bundle a été exécuté (hash)
+- sur quel type de machine (OS, arch — jamais le hostname en clair)
+- à quelle date (horodatage signé)
+- par quel builder (clé publique)
+
+### Against Ollama
+
+Ollama est un daemon avec un store de modèles. Excellent pour le
+développement local. Mais :
+- Pas de signatures sur les bundles
+- Pas d'attestation d'exécution
+- Pas de sandbox (le modèle tourne avec les droits de l'utilisateur)
+- Pas de delta updates content-defined (layer dedup, pas chunk-level)
+
+### Against llamafile
+
+llamafile = binaire C++ mono-runtime. Excellent pour la portabilité.
+Mais :
+- Pas de delta updates (fichier entier à chaque mise à jour)
+- Pas de sandbox seccomp+Landlock
+- Pas de multi-runtime (C++ only)
+- Pas d'attestation ni de traçabilité
 
 ### Against Docker
-Docker est fait pour l'orchestration, pas pour la distribution locale. Besoin d'un daemon,
-de root (ou de user namespaces), de network pour pull l'image.
 
-erebus = un fichier exécutable (`./agent.erebus`), extraction atomique, fonctionne sans daemon
-et sans privilèges root (user namespaces).
+Docker est fait pour l'orchestration, pas pour la distribution edge.
+erebus = un fichier exécutable, extraction atomique, fonctionne sans
+daemon, sans privilèges root, avec attestation d'exécution intégrée.
 
-### Against PyInstaller/pkg
-Mono-language : PyInstaller marche pour Python, pkg pour Node. Mais un agent IA a souvent
-besoin de **plusieurs langages** : llama.cpp (C++), un serveur web (Python/Node/Go), des
-tools système (shell scripts), et potentiellement un modèle native binary.
+## Le format
 
-erebus = multi-runtime dans un seul format. Un agent IA peut avoir un runtime Python pour l'API,
-un binaire C++ pour llama.cpp, et un script Node pour un worker — le tout dans un `.erebus`.
-
-## Pourquoi ce n'est PAS un "13e format"?
-
-Nous ne créons pas un nouveau standard. Le format `.erebus` est :
+Le format `.erebus` est :
 - Un **ELF valide** (Linux) — `chmod +x && ./app.erebus` fonctionne
-- Un **payload tar/zstd ou SquashFS** — décompressible avec `tar`/`unsquashfs`
-- Des **signatures Ed25519 standards** — vérifiables avec la librarie crypto standard
+- Un **payload tar/zstd ou SquashFS** — décompressible avec `tar`
+- Des **signatures Ed25519 standards** — vérifiables offline
 - Un **rootfs POSIX** — pas de kernel features propriétaires
+- Des **attestations détachées** (`.erebus.attest`) — preuve signée
 
-Le format existe depuis v2 (plain) → v3 (signed) → v4 (encrypted) → v5 (squashfs),
-et lit les versions anciennes. Nous ne forkons jamais le format.
+Versions : v2 (plain) → v3 (signed) → v4 (encrypted) → v5 (squashfs).
+Backward-compatible. Forward-compatible via attestation détachée.
 
-## Ce erebus n'est PAS
+## Ce que erebus n'est PAS
 
-- **Pas un Docker killer** : Docker reste pour l'orchestration et multi-container.
-- **Pas une VM** : on ne virtualise pas le kernel; l'app tourne sur le kernel host.
-- **Pas un package manager** : pas de registry centrale requise (pour l'instant).
-- **Pas desktop packaging** : AppImage/Snap/Flatpak gèrent l'intégration desktop (icônes,
-  menus, X11/Wayland). erebus cible **headless web/server apps** — "je lance le binaire,
-  un serveur démarre, j'ouvre mon navigateur."
-- **Pas un format inter-language bridge** : erebus ne compile pas du Python vers du WASM.
-  Chaque runtime marche dans son propre environnement (Python/venv, Node/node_modules, Go/binary).
-
-## The most promising use case
-
-Distributing **local AI models + agents** : packager `llama.cpp` + un modèle GGUF multi-GB +
-un serveur web (FastAPI/Flask/Express) + des tools Python/Go, dans un seul fichier qui démarre
-avec `./agent.erebus` et qui se met à jour via Sisir delta updates (15MB au lieu de 4GB).
-
-Aujourd'hui ce cas a pas de solution clean :
-- Docker : trop lourd, daemon requis, pas fait pour laptop
-- AppImage : pas fait pour des gros fichiers (50GB modèles)
-- PyInstaller : mono-language, peut pas gérer le binaire C++ llama.cpp + le serveur Python
-
-erebus's architecture est naturellement adaptée : le SISR chunk engine est fait pour les gros
-fichiers (FastCDC content-defined chunking), l'encryption AES-256-GCM protège les poids,
-la sandbox seccomp+Landlock isole l'exécution.
+- **Pas un Docker killer** : Docker reste pour l'orchestration.
+- **Pas un package manager** : la registry est optionnelle.
+- **Pas un outil de dev local** : Ollama fait mieux pour ça.
+- **Pas un hébergeur d'infèrement** : on ne touche pas au GPU côté serveur.

@@ -1,32 +1,42 @@
 # Comparison
 
-## erebus vs alternatives
+## erebus vs alternatives — l'angle traçabilité
 
-| Criteria | erebus | AppImage | Docker | pkg/PyInstaller |
+| Critère | erebus | Docker | Ollama | llamafile |
 |---|---|---|---|---|
-| Target | **web/server headless** | desktop GUI | everything (server) | single language |
-| Zero installation for user | ✅ | ✅ | ❌ (daemon) | ✅ |
-| Language-agnostic | ✅ | ✅ | ✅ | ❌ |
-| Single file | ✅ | ✅ | ❌ (image+runtime) | ✅ |
-| Auto dependency detection | ✅ (+ AI planned) | ❌ (manual) | ❌ | partial |
-| Smart caching | ✅ | partial | ✅ | n/a |
-| Rootless isolation | ✅ (level 2) | ❌ | ⚠️ (rootless) | ❌ |
-| Built-in signatures | ✅ (Phase 2) | optional | ⚠️ | ❌ |
-| Open format | ✅ | ✅ | partial | ❌ |
+| **Exécution signée** | **✅ Ed25519** | ❌ | ❌ | ❌ |
+| **Attestation d'exécution** | **✅ détachée** | ❌ | ❌ | ❌ |
+| **SBOM automatisé** | **✅** | ❌ | ❌ | ❌ |
+| **Delta updates** | **✅ SISR** | Layer cache | Store layers | ❌ |
+| **Sandbox** | **✅ seccomp+Landlock** | Namespace | ❌ | ❌ |
+| **Offline verification** | **✅** | ❌ (daemon) | ❌ (daemon) | Partial |
+| Fichier unique | ✅ | ❌ | ❌ | ✅ |
+| Multi-runtime | ✅ Python+Binary | ✅ | ❌ (GGUF) | ❌ (C++) |
 
-## What erebus is
+## Ce que erebus résout
 
-Go and Rust already produce a single static binary — erebus adds nothing there. Node 21+ includes native Single Executable Applications (SEA). Python has PyInstaller, Nuitka, PyOxidizer, shiv, pex. Java has GraalVM native-image.
+Chaque outil existant résout une partie du problème. Aucun ne résout
+**la traçabilité complète** :
 
-erebus's angle is not "make a single binary" (already solved language by language), but:
+```
+                  Packaging   Delta   Sandbox   Signing   Attestation   Audit
+Docker              ✅         ✅      ✅        ⚠️        ❌           ❌
+Ollama              ✅         ✅      ❌        ❌        ❌           ❌
+llamafile           ✅         ❌      ❌        ❌        ❌           ❌
+erebus              ✅         ✅      ✅        ✅        ✅           ✅
+```
 
-1. **language-agnostic**: one tool, same UX, regardless of the runtime;
-2. **web/server headless**: a niche that AppImage/Snap/Flatpak don't address;
-3. **AI-powered hidden dependency detection**: what no static tool can do (subprocess, `dlopen`, plugins) — see [Dependency detection](./guides/dependencies.md);
-4. **the local AI model use case**: multi-GB payloads + native binaries + server, with no clean solution today.
+## La question à toujours se poser
 
-## The question to always answer
+> *« Pourquoi pas Docker / Ollama / llamafile? »*
 
-> *"Why not AppImage / Docker / pkg?"*
+Réponse en une phrase : **Docker est un daemon, Ollama n'a pas de
+signatures, llamafile est mono-runtime — erebus génère une preuve
+signée de ce qui a exécuté, vérifiable offline, pour la conformité
+réglementaire.**
 
-One-sentence answer: **AppImage is for desktop, Docker is heavy and needs a daemon, pkg/PyInstaller are mono-language — erebus is for headless web servers, language-agnostic, in a single self-executing file.**
+## Le cas d'usage le plus prometteur
+
+Déployer des **agents IA sur des flottes** (edge, industriel, santé,
+défense) où chaque exécution doit être traçable et prouvable à un
+auditeur. Aujourd'hui aucune solution ne fait ça.
