@@ -61,3 +61,47 @@ Pourquoi maintenant:
 - [ ] Documentation guides étape par étape (TODO)
 - [ ] Application YC 4 questions répondues (TODO)
 
+
+---
+
+# Google Africa Applied AI Lab — candidature
+
+> Deadline : **31 août 2026**. Source : https://labs.google/aifuturesfund/africaailab
+> Verdict : OUI postuler, avec recadrage Afrique + Gemma du pitch.
+
+## Ce qu'ils cherchent
+1. Usage **matériel** de Gemini/Gemma/Veo (exigence explicite FAQ #9)
+2. Impact **africain** (« uniquely African challenges ») — pas l'EU AI Act
+3. Thèmes : travail, connaissance, **développement logiciel**, créativité, divertissement
+4. Fondateurs full-time, démo day présentiel à Accra début décembre
+
+## Fit erebus (recadré)
+
+| Atout erebus | Angle africain |
+|---|---|
+| SISR : 8GB via ~50MB delta | Data plans chers + connectivité faible |
+| Binaire unique offline | Déploiement offline-first, zones mal desservies |
+| Attestation signée | Souveraineté données fintechs/banques/gouvernements |
+| serve/chat inférence locale | **Gemma embarqué** = agent IA sans cloud ni GPU |
+
+Pitch : *« Erebus déploie des agents IA propulsés par Gemma en Afrique comme
+des binaires uniques vérifiables — offline, à faible bande passante, avec
+preuve cryptographique de ce qui a tourné. Pendant le lab : intégration
+Gemini API + Gemma on-device comme runtime packagé de première classe. »*
+
+## Réponses formulaire
+
+- **Company name** : Erebus (à confirmer : entité Cerco ?)
+- **Website** : ⚠️ REQUIS — déployer landing / GH Pages docs
+- **HQ Location** : Lomé, Togo
+- **Field** : Future of Software Development
+- **One sentence** :
+  > Erebus turns any AI application into a single self-verifying binary — letting African companies deploy Gemma-powered agents offline, update them over low-bandwidth networks with 100× smaller deltas, and prove cryptographically exactly what code ran, where, and when.
+- **Stage** : Pre-Launch · **ARR** : $0 · **MAU** : 0–1,000 · **Raised** : $0–100k
+- **Open to raising from Google** : Yes
+
+## TODO avant soumission
+1. [ ] Pitch deck 10 slides (narratif Afrique + Gemma) — REQUIS
+2. [ ] Site web en ligne — REQUIS
+3. [ ] Démo CLI filmée (build → sign → attest → run agent Gemma) — gros plus
+4. [ ] Confirmer entité légale + statut full-time
