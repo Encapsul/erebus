@@ -24,6 +24,10 @@ pub struct SignArgs {
     #[arg(short, long)]
     pub force: bool,
 
+    /// Run in non-interactive mode (no prompts, fail if input required)
+    #[arg(long)]
+    pub no_input: bool,
+
     /// Output result as JSON
     #[arg(long)]
     pub json: bool,
@@ -48,7 +52,7 @@ pub fn run(args: SignArgs) -> Result<()> {
         }
     };
 
-    if !args.force && !args.quiet {
+    if !args.force && !args.quiet && is_interactive() && !args.no_input {
         eprint!("Sign {}? [y/N] ", args.file.display());
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
@@ -70,6 +74,11 @@ pub fn run(args: SignArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn is_interactive() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
 }
 
 /// Sign a `.erebus` file in-place with the given key. Used by both `erebus sign`

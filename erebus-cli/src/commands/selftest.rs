@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use erebus_core::format::Footer;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
 
 #[derive(Args)]
@@ -22,16 +22,12 @@ pub struct SelftestArgs {
     #[arg(long)]
     pub probe: Option<String>,
 
-    /// Verbose output
-    #[arg(short, long)]
-    pub verbose: bool,
-
     /// Run in non-interactive mode (no prompts, fail if input required)
     #[arg(long)]
     pub no_input: bool,
 }
 
-pub fn run(args: SelftestArgs) -> Result<()> {
+pub fn run(args: SelftestArgs) -> Result<ExitCode> {
     let path = args
         .file
         .canonicalize()
@@ -60,7 +56,9 @@ pub fn run(args: SelftestArgs) -> Result<()> {
 
     let effective_timeout = Duration::from_secs(2 + args.timeout);
 
-    if args.verbose {
+    let verbose = || std::env::var("ERE_VERBOSE").map_or(false, |v| !v.is_empty() && v != "0");
+
+    if verbose() {
         let rt = meta.get("runtime").and_then(|v| v.as_str()).unwrap_or("?");
         let ep: Vec<&str> = meta
             .get("entrypoint")
@@ -98,7 +96,7 @@ pub fn run(args: SelftestArgs) -> Result<()> {
         .spawn()
         .with_context(|| format!("failed to launch {}", path.display()))?;
 
-    if args.verbose {
+    if verbose() {
         eprintln!("[erebus] selftest: started pid={}", child.id());
     }
 
@@ -107,10 +105,10 @@ pub fn run(args: SelftestArgs) -> Result<()> {
         args.timeout,
         &mode,
         args.probe.as_deref(),
-        args.verbose,
+        verbose(),
     )?;
 
-    if args.verbose {
+    if verbose() {
         let label = match rc {
             0 => "PASS",
             1 => "FAIL",
@@ -120,7 +118,7 @@ pub fn run(args: SelftestArgs) -> Result<()> {
         eprintln!("[erebus] selftest: {label}");
     }
 
-    std::process::exit(rc);
+    Ok(ExitCode::from(rc as u8))
 }
 
 fn detect_mode(meta: &serde_json::Value) -> String {

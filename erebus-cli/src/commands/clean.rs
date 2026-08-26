@@ -15,6 +15,10 @@ pub struct CleanArgs {
     /// Skip confirmation
     #[arg(short, long)]
     pub force: bool,
+
+    /// Run in non-interactive mode (no prompts, fail if input required)
+    #[arg(long)]
+    pub no_input: bool,
 }
 
 pub fn run(args: CleanArgs) -> Result<()> {
@@ -34,7 +38,7 @@ pub fn run(args: CleanArgs) -> Result<()> {
 
     let size = dir_size(&cache_dir)?;
 
-    if !args.force {
+    if !args.force && !args.no_input && is_interactive() {
         eprintln!(
             "This will remove {} ({})",
             cache_dir.display(),
@@ -68,4 +72,9 @@ fn dir_size(path: &std::path::Path) -> Result<u64> {
         }
     }
     Ok(total)
+}
+
+fn is_interactive() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
 }

@@ -110,7 +110,7 @@ enum Commands {
     Upgrade(commands::upgrade::UpgradeArgs),
 
     /// Migrate a legacy .erebus (v1) to the SISR-enabled v2 format
-    UpgradeBinary(commands::upgrade_binary::UpgradeBinaryArgs),
+    Migrate(commands::upgrade_binary::MigrateArgs),
 
     /// Download a bundle from a registry (integrity-checked)
     Pull(commands::pull::PullArgs),
@@ -201,7 +201,12 @@ fn main() -> ExitCode {
 
     let result = match cli.command {
         Commands::Build(args) => commands::build::run(*args, effective_verbose),
-        Commands::Run(args) => commands::run::run(args),
+        Commands::Run(mut args) => {
+            if cli.verbose {
+                args.verbose = true;
+            }
+            commands::run::run(args)
+        }
         Commands::Inspect(args) => commands::inspect::run(args),
         Commands::Keygen(mut args) => {
             if cli.quiet {
@@ -240,29 +245,38 @@ fn main() -> ExitCode {
             commands::trust::run(args)
         }
         Commands::Scan(args) => commands::scan::run(args),
-        Commands::Doctor(args) => commands::doctor::run(args),
-        Commands::Clean(args) => commands::clean::run(args),
-        Commands::Dashboard(args) => commands::dashboard::run(&args),
-        Commands::Selftest(mut args) => {
-            if cli.quiet {
-                args.verbose = false;
-            }
-            commands::selftest::run(args)
-        }
-        Commands::Upgrade(mut args) => {
-            if cli.quiet {
-                args.verbose = false;
-            }
-            commands::upgrade::run(args)
-        }
-        Commands::UpgradeBinary(mut args) => {
+        Commands::Doctor(mut args) => {
             if cli.quiet {
                 args.quiet = true;
             }
-            commands::upgrade_binary::run(args)
+            commands::doctor::run(args)
         }
-        Commands::Publish(args) => commands::publish::run(args),
-        Commands::Pull(args) => commands::pull::run(args),
+        Commands::Clean(args) => commands::clean::run(args),
+        Commands::Dashboard(args) => commands::dashboard::run(&args),
+        Commands::Selftest(args) => match commands::selftest::run(args) {
+            Ok(code) => return code,
+            Err(e) => return error::exit_code_for_error(&e),
+        },
+        Commands::Upgrade(args) => commands::upgrade::run(args),
+        Commands::Migrate(args) => commands::upgrade_binary::run(args),
+        Commands::Publish(mut args) => {
+            if cli.verbose {
+                args.verbose = true;
+            }
+            if cli.quiet {
+                args.verbose = false;
+            }
+            commands::publish::run(args)
+        }
+        Commands::Pull(mut args) => {
+            if cli.verbose {
+                args.verbose = true;
+            }
+            if cli.quiet {
+                args.verbose = false;
+            }
+            commands::pull::run(args)
+        }
         Commands::Chat(args) => commands::chat::run(args),
         Commands::Serve(args) => commands::serve::run(args),
         Commands::Swap(args) => commands::swap::run(args),

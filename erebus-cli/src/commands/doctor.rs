@@ -18,11 +18,15 @@ pub struct DoctorArgs {
 
     /// Attempt to auto-install missing prerequisites
     #[arg(long)]
-    pub r#fix: bool,
+    r#fix: bool,
 
     /// Skip confirmation prompt for `--fix`
     #[arg(short, long)]
     pub force: bool,
+
+    /// Run in non-interactive mode (no prompts, fail if input required)
+    #[arg(long)]
+    pub no_input: bool,
 }
 
 struct Check {
@@ -50,7 +54,7 @@ pub fn run(args: DoctorArgs) -> Result<()> {
 
     // Auto-fix missing prerequisites
     if args.r#fix {
-        if !args.force {
+        if !args.force && !args.no_input {
             if !is_interactive() {
                 anyhow::bail!("interactive prompt required; pass --force for non-interactive use");
             }
@@ -94,15 +98,23 @@ pub fn run(args: DoctorArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&items)?);
     } else {
         let mut all_ok = true;
+        let use_color = std::env::var("NO_COLOR").is_err();
         for check in &checks {
             let marker = if check.ok { "✓" } else { "✗" };
-            let color = if check.ok { "\x1b[32m" } else { "\x1b[31m" };
             let optional_tag = if check.optional { " (optional)" } else { "" };
             if !args.quiet || !check.ok {
-                eprintln!(
-                    "  {color}{marker}\x1b[0m {:<20} {}{optional_tag}",
-                    check.name, check.detail
-                );
+                if use_color {
+                    let color = if check.ok { "\x1b[32m" } else { "\x1b[31m" };
+                    eprintln!(
+                        "  {color}{marker}\x1b[0m {:<20} {}{optional_tag}",
+                        check.name, check.detail
+                    );
+                } else {
+                    eprintln!(
+                        "  {marker} {:<20} {}{optional_tag}",
+                        check.name, check.detail
+                    );
+                }
             }
             if !check.ok && !check.optional {
                 all_ok = false;

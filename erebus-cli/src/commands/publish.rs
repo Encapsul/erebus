@@ -12,9 +12,13 @@ pub struct PublishArgs {
     #[arg(long, env = "ERE_REGISTRY")]
     pub registry: Option<String>,
 
-    /// Authentication token for the registry
+    /// Authentication token for the registry (prefer --token-file for secrets)
     #[arg(long, env = "ERE_TOKEN")]
     pub token: Option<String>,
+
+    /// Path to a file containing the authentication token (preferred over --token)
+    #[arg(long)]
+    pub token_file: Option<PathBuf>,
 
     /// Skip upload, just validate the file and print info
     #[arg(long)]
@@ -69,7 +73,7 @@ pub fn run(args: PublishArgs) -> Result<()> {
         return Ok(());
     }
 
-    let token = args.token.or_else(|| std::env::var("ERE_TOKEN").ok());
+    let token = resolve_token(args.token.as_deref(), args.token_file.as_deref())?;
 
     eprintln!(
         "Publishing {}...",
@@ -112,4 +116,20 @@ pub fn run(args: PublishArgs) -> Result<()> {
 
     eprintln!("  Upload complete (HTTP {})", response.status());
     Ok(())
+}
+
+/// Resolve token from --token-file, --token flag, or ERE_TOKEN env var.
+/// --token-file takes precedence (clig.dev: secrets via files, not flags).
+fn resolve_token(
+    token: Option<&str>,
+    token_file: Option<&std::path::Path>,
+) -> Result<Option<String>> {
+    if let Some(path) = token_file {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read token file {}", path.display()))?;
+        return Ok(Some(content.trim().to_string()));
+    }
+    Ok(token
+        .map(String::from)
+        .or_else(|| std::env::var("ERE_TOKEN").ok()))
 }

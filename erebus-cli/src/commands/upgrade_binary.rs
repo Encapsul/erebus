@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 #[derive(Args)]
-pub struct UpgradeBinaryArgs {
+pub struct MigrateArgs {
     /// Input legacy .erebus (built without --enable-sisr)
     pub input: PathBuf,
 
@@ -35,7 +35,7 @@ pub struct UpgradeBinaryArgs {
     pub json: bool,
 }
 
-pub fn run(args: UpgradeBinaryArgs) -> Result<()> {
+pub fn run(args: MigrateArgs) -> Result<()> {
     if args.output.exists() && !args.force {
         anyhow::bail!(
             "output {} already exists — pass --force to overwrite",

@@ -7,10 +7,6 @@ const GITHUB_API: &str = "https://api.github.com/repos/Tednoob17/erebus/releases
 
 #[derive(Args)]
 pub struct UpgradeArgs {
-    /// Verbose output
-    #[arg(short, long)]
-    pub verbose: bool,
-
     /// Skip confirmation prompt
     #[arg(short, long)]
     pub force: bool,
@@ -22,17 +18,21 @@ pub struct UpgradeArgs {
     /// Show what would be done without doing it
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Run in non-interactive mode (no prompts, fail if input required)
+    #[arg(long)]
+    pub no_input: bool,
 }
 
 pub fn run(args: UpgradeArgs) -> Result<()> {
     let current = env!("CARGO_PKG_VERSION");
-    if args.verbose {
+    if verbose() {
         eprintln!("[erebus] current version: {current}");
     }
 
     let latest = fetch_latest_version().context("failed to fetch latest version")?;
 
-    if args.verbose {
+    if verbose() {
         eprintln!("[erebus] latest version:  {latest}");
     }
 
@@ -42,7 +42,7 @@ pub fn run(args: UpgradeArgs) -> Result<()> {
     }
 
     let platform = detect_platform()?;
-    if args.verbose {
+    if verbose() {
         eprintln!("[erebus] platform: {platform}");
     }
 
@@ -65,12 +65,12 @@ pub fn run(args: UpgradeArgs) -> Result<()> {
     let checksum_url = format!("{url}.sha256");
     let expected = fetch_checksum(&checksum_url)
         .context("failed to fetch release checksum; refusing an unverified upgrade")?;
-    if args.verbose {
+    if verbose() {
         eprintln!("[erebus] expected checksum {expected}");
     }
 
     // Download
-    if args.verbose {
+    if verbose() {
         eprintln!("[erebus] downloading {asset}...");
     }
     download_file(&url, &tarball).context("download failed")?;
@@ -80,7 +80,7 @@ pub fn run(args: UpgradeArgs) -> Result<()> {
     if expected != got {
         anyhow::bail!("checksum mismatch: expected {expected}, got {got}");
     }
-    if args.verbose {
+    if verbose() {
         eprintln!("[erebus] checksum verified");
     }
 
@@ -116,7 +116,7 @@ pub fn run(args: UpgradeArgs) -> Result<()> {
         .parent()
         .context("cannot determine install directory")?;
 
-    if args.verbose {
+    if verbose() {
         eprintln!("[erebus] installing to {}...", install_dir.display());
     }
 
@@ -127,7 +127,7 @@ pub fn run(args: UpgradeArgs) -> Result<()> {
             install_dir.display()
         );
     }
-    if needs_sudo && !args.force {
+    if needs_sudo && !args.force && !args.no_input {
         if !is_interactive() {
             anyhow::bail!(
                 "sudo required for {}; pass --force for non-interactive use",
@@ -307,6 +307,10 @@ fn is_writable(path: &Path) -> bool {
 fn is_interactive() -> bool {
     use std::io::IsTerminal;
     std::io::stdin().is_terminal()
+}
+
+fn verbose() -> bool {
+    std::env::var("ERE_VERBOSE").map_or(false, |v| !v.is_empty() && v != "0")
 }
 
 #[cfg(test)]

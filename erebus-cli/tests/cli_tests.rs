@@ -145,10 +145,10 @@ fn test_build_dry_run_does_not_enable_sisr_by_default() {
         .stderr(predicate::str::contains("SISR:      enabled").not());
 }
 
-/// `upgrade-binary` turns a legacy (SISR-less) file into a valid v2 file and
+/// `migrate` turns a legacy (SISR-less) file into a valid v2 file and
 /// preserves the original payload bytes.
 #[test]
-fn test_upgrade_binary_converts_legacy_file() {
+fn test_migrate_converts_legacy_file() {
     use erebus_core::assembly::{assemble_erebus, AssemblyInput};
     use erebus_core::format::Footer;
     use erebus_core::sisr_header::read_sisr;
@@ -176,7 +176,7 @@ fn test_upgrade_binary_converts_legacy_file() {
     let output = dir.path().join("migrated.erebus");
     erebus()
         .args([
-            "upgrade-binary",
+            "migrate",
             input.to_str().unwrap(),
             output.to_str().unwrap(),
             "--force",
