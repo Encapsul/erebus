@@ -25,6 +25,10 @@ pub struct SelftestArgs {
     /// Run in non-interactive mode (no prompts, fail if input required)
     #[arg(long)]
     pub no_input: bool,
+
+    /// Output result as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 pub fn run(args: SelftestArgs) -> Result<ExitCode> {
@@ -116,6 +120,23 @@ pub fn run(args: SelftestArgs) -> Result<ExitCode> {
             _ => "UNKNOWN",
         };
         eprintln!("[erebus] selftest: {label}");
+    }
+
+    if args.json {
+        let label = match rc {
+            0 => "pass",
+            1 => "fail",
+            2 => "degraded",
+            _ => "unknown",
+        };
+        let info = serde_json::json!({
+            "file": path.display().to_string(),
+            "mode": mode,
+            "result": label,
+            "exit_code": rc,
+            "timeout_secs": args.timeout,
+        });
+        println!("{}", serde_json::to_string_pretty(&info)?);
     }
 
     Ok(ExitCode::from(rc as u8))

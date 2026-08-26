@@ -27,6 +27,10 @@ pub struct PublishArgs {
     /// Verbose output
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Output result as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 const DEFAULT_REGISTRY_PLACEHOLDER: &str = "https://erebus.example.com";
@@ -115,6 +119,15 @@ pub fn run(args: PublishArgs) -> Result<()> {
     }
 
     eprintln!("  Upload complete (HTTP {})", response.status());
+    if args.json {
+        let info = serde_json::json!({
+            "file": file.display().to_string(),
+            "registry": registry,
+            "status": response.status().as_u16(),
+            "size_bytes": meta_size,
+        });
+        println!("{}", serde_json::to_string_pretty(&info)?);
+    }
     Ok(())
 }
 

@@ -30,6 +30,10 @@ pub struct SwapArgs {
     /// zstd level used when repacking a tar.zst payload (ignored for squashfs)
     #[arg(long, default_value_t = 3)]
     pub compression_level: i32,
+
+    /// Output result as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// `erebus swap` — replace one file inside a built binary without rebuilding.
@@ -64,7 +68,21 @@ pub fn run(args: SwapArgs) -> Result<()> {
         .with_context(|| format!("failed to write {}", out_path.display()))?;
 
     post_swap_cleanup(&out_path, &parts.footer, &args.key);
-    report(&out_path, replaced, layer_updated);
+    if args.json {
+        let new_size = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
+        let info = serde_json::json!({
+            "binary": args.binary.display().to_string(),
+            "target": args.target,
+            "replacement": args.from.display().to_string(),
+            "output": out_path.display().to_string(),
+            "replaced": replaced,
+            "layer_updated": layer_updated,
+            "output_size_bytes": new_size,
+        });
+        println!("{}", serde_json::to_string_pretty(&info)?);
+    } else {
+        report(&out_path, replaced, layer_updated);
+    }
     Ok(())
 }
 

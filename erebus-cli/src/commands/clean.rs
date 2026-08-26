@@ -19,6 +19,10 @@ pub struct CleanArgs {
     /// Run in non-interactive mode (no prompts, fail if input required)
     #[arg(long)]
     pub no_input: bool,
+
+    /// Output result as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 pub fn run(args: CleanArgs) -> Result<()> {
@@ -55,7 +59,16 @@ pub fn run(args: CleanArgs) -> Result<()> {
 
     std::fs::remove_dir_all(&cache_dir)
         .with_context(|| format!("failed to remove cache directory {}", cache_dir.display()))?;
-    eprintln!("Cleaned {} ({})", cache_dir.display(), format_size(size));
+    if args.json {
+        let info = serde_json::json!({
+            "cleaned": cache_dir.display().to_string(),
+            "size_bytes": size,
+            "size_human": format_size(size),
+        });
+        println!("{}", serde_json::to_string_pretty(&info)?);
+    } else {
+        eprintln!("Cleaned {} ({})", cache_dir.display(), format_size(size));
+    }
 
     Ok(())
 }

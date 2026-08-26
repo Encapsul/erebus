@@ -41,6 +41,10 @@ pub struct PullArgs {
     /// Verbose output
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Output result as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Package names become path components — lock them down hard.
@@ -116,8 +120,20 @@ pub fn run(args: PullArgs) -> Result<()> {
         // Content-addressed short-circuit: re-verify instead of redownload.
         let current = sha256_file(&dest)?;
         if current == expected_sha {
-            eprintln!("[erebus] already downloaded: {}", dest.display());
-            println!("{}", dest.display());
+            if args.json {
+                let info = serde_json::json!({
+                    "package": entry.name,
+                    "version": entry.version,
+                    "sha256": expected_sha,
+                    "size_bytes": std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0),
+                    "path": dest.display().to_string(),
+                    "cached": true,
+                });
+                println!("{}", serde_json::to_string_pretty(&info)?);
+            } else {
+                eprintln!("[erebus] already downloaded: {}", dest.display());
+                println!("{}", dest.display());
+            }
             return Ok(());
         }
         eprintln!("[erebus] cache mismatch — re-downloading");
@@ -189,13 +205,24 @@ pub fn run(args: PullArgs) -> Result<()> {
     }
     std::fs::rename(&tmp, &dest).context("failed to finalize download")?;
 
-    eprintln!(
-        "[erebus] pulled {} ({}) → {}",
-        entry.name,
-        fmt_size(received),
-        dest.display()
-    );
-    println!("{}", dest.display());
+    if args.json {
+        let info = serde_json::json!({
+            "package": entry.name,
+            "version": entry.version,
+            "sha256": expected_sha,
+            "size_bytes": received,
+            "path": dest.display().to_string(),
+        });
+        println!("{}", serde_json::to_string_pretty(&info)?);
+    } else {
+        eprintln!(
+            "[erebus] pulled {} ({}) → {}",
+            entry.name,
+            fmt_size(received),
+            dest.display()
+        );
+        println!("{}", dest.display());
+    }
     Ok(())
 }
 

@@ -22,6 +22,10 @@ pub struct UpgradeArgs {
     /// Run in non-interactive mode (no prompts, fail if input required)
     #[arg(long)]
     pub no_input: bool,
+
+    /// Output result as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 pub fn run(args: UpgradeArgs) -> Result<()> {
@@ -170,6 +174,14 @@ pub fn run(args: UpgradeArgs) -> Result<()> {
     }
 
     eprintln!("[erebus] upgraded to {latest}");
+    if args.json {
+        let info = serde_json::json!({
+            "previous": current,
+            "upgraded_to": latest,
+            "platform": platform,
+        });
+        println!("{}", serde_json::to_string_pretty(&info)?);
+    }
     Ok(())
 }
 
