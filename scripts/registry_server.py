@@ -15,6 +15,14 @@ Routes (backward compatible with erebus CLI publish/pull):
     GET  /mcp/<name>          -> MCP server details
     POST /mcp                 -> upload MCP server (multipart, auth required)
     GET  /mcp/<name>/install  -> 1-line install script
+    POST /billing/checkout    -> {"url"} Stripe Checkout session (auth)
+    POST /billing/webhook     -> Stripe-signed events -> tier updates
+    GET  /billing/status      -> {"tier": ...} (auth)
+    POST /orgs                -> create org (Team tier)
+    GET  /orgs/<name>         -> members list (members only)
+    POST /orgs/<n>/members    -> add member {username, role} (owner/admin)
+    DELETE /orgs/<n>/members/<u> -> remove member (owner/admin)
+    GET  /audit/download?month=YYYY-MM[&org=n] -> JSONL audit trail (Team)
 
 Storage layout under --dir:
     packages/<file>           blobs
@@ -23,6 +31,8 @@ Storage layout under --dir:
     usage/<user>.json         {"month","bytes_served"}
     stats.json                weekly served / full-equivalent / saved / pulls
     waitlist.txt              one email per line
+    orgs.json                 {"orgs": {name: {owner, members:{user:role}}}}
+    audit/YYYY-MM.jsonl       append-only action log
 """
 import argparse
 import fcntl
@@ -35,6 +45,9 @@ import secrets
 import sys
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -46,9 +59,16 @@ SAFE_PACK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*\.pack(\.tar\.gz)?$")
 SAFE_SIDECAR = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*\.pack(\.tar\.gz)?\.sha256$")
 SAFE_USER = re.compile(r"^[a-z0-9_-]{1,32}$")
 SAFE_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,16}$")
+SAFE_ORG = re.compile(r"^[a-z0-9][a-z0-9_-]{1,38}$")
+SAFE_MONTH = re.compile(r"^\d{4}-\d{2}$")
 CHUNK = 64 * 1024
 MONTH_FMT = "%Y-%m"
 WEEK_FMT = "%G-W%V"
+
+# BUSINESS.md tiers. Quotas are monthly private-transfer bytes.
+TIER_QUOTAS = {"free": 20 * 10**9, "pro": 1000 * 10**9, "team": 5000 * 10**9}
+PAID_TIERS = ("pro", "team")
+ROLE_ORDER = {"viewer": 0, "developer": 1, "admin": 2, "owner": 3}
 
 
 def month_now():
@@ -83,6 +103,9 @@ class Store:
         self.users_path = os.path.join(root, "users.json")
         self.stats_path = os.path.join(root, "stats.json")
         self.waitlist_path = os.path.join(root, "waitlist.txt")
+        self.orgs_path = os.path.join(root, "orgs.json")
+        self.audit_dir = os.path.join(root, "audit")
+        os.makedirs(self.audit_dir, exist_ok=True)
         self.quota_bytes = quota_bytes
         self.upload_cap = upload_cap
         self.require_auth = require_auth
@@ -181,6 +204,155 @@ class Store:
             ):
                 return name
         return None
+
+    # ---- tiers / billing --------------------------------------------------
+    def user_tier(self, username: str) -> str:
+        with self.lock:
+            rec = self.users.get(username or "")
+        tier = (rec or {}).get("tier", "free")
+        return tier if tier in TIER_QUOTAS else "free"
+
+    def set_tier(self, username: str, tier: str) -> bool:
+        if tier not in TIER_QUOTAS:
+            return False
+        with self.lock:
+            if username not in self.users:
+                return False
+            users = self._load(self.users_path, {}).get("users", {})
+            if username not in users:
+                return False
+            users[username]["tier"] = tier
+            self._save_locked(self.users_path, {"users": users})
+            self.users = users
+        self.record_audit(username, "billing_tier", tier)
+        return True
+
+    def quota_for(self, username: str) -> int:
+        return TIER_QUOTAS[self.user_tier(username)]
+
+    # ---- orgs / RBAC ------------------------------------------------------
+    def create_org(self, name: str, owner: str) -> tuple[bool, str]:
+        if not SAFE_ORG.match(name or ""):
+            return False, "invalid org name ([a-z0-9][a-z0-9_-], max 39)"
+        if self.user_tier(owner) != "team":
+            return False, "orgs require the Team plan"
+        with self.lock:
+            orgs = self._load(self.orgs_path, {}).get("orgs", {})
+            if name in orgs:
+                return False, "org name taken"
+            orgs[name] = {
+                "owner": owner,
+                "members": {owner: "owner"},
+                "created": time.time(),
+            }
+            self._save_locked(self.orgs_path, {"orgs": orgs})
+        self.record_audit(owner, "org_create", f"org:{name}", org=name)
+        return True, "created"
+
+    def get_org(self, name: str) -> dict | None:
+        with self.lock:
+            return self._load(self.orgs_path, {}).get("orgs", {}).get(name)
+
+    def org_role(self, name: str, username: str) -> str | None:
+        org = self.get_org(name)
+        if not org:
+            return None
+        role = org.get("members", {}).get(username or "")
+        return role if role in ROLE_ORDER else None
+
+    def add_member(self, org: str, actor: str, member: str, role: str) -> tuple[bool, str]:
+        if role not in ("viewer", "developer", "admin"):
+            return False, "role must be viewer|developer|admin"
+        if not SAFE_USER.match(member or ""):
+            return False, "invalid username"
+        if actor not in self.users:
+            return False, "no such user"
+        with self.lock:
+            orgs = self._load(self.orgs_path, {}).get("orgs", {})
+            o = orgs.get(org)
+            if not o:
+                return False, "no such org"
+            actor_role = ROLE_ORDER.get(o["members"].get(actor, ""), -1)
+            if actor_role < ROLE_ORDER["admin"]:
+                return False, "admin role required"
+            if member == o["owner"]:
+                return False, "owner role cannot be reassigned"
+            o.setdefault("members", {})[member] = role
+            self._save_locked(self.orgs_path, {"orgs": orgs})
+        self.record_audit(actor, "org_member_add", f"org:{org}:{member}:{role}", org=org)
+        return True, "added"
+
+    def remove_member(self, org: str, actor: str, member: str) -> tuple[bool, str]:
+        with self.lock:
+            orgs = self._load(self.orgs_path, {}).get("orgs", {})
+            o = orgs.get(org)
+            if not o:
+                return False, "no such org"
+            if member == o["owner"]:
+                return False, "the org owner cannot be removed"
+            actor_role = ROLE_ORDER.get(o["members"].get(actor, ""), -1)
+            if actor_role < ROLE_ORDER["admin"]:
+                return False, "admin role required"
+            target_role = ROLE_ORDER.get(o["members"].get(member, ""), -1)
+            if target_role < 0:
+                return False, "not a member"
+            # Admins may only remove viewers/developers — protects admin pool.
+            if actor_role == ROLE_ORDER["admin"] and target_role >= ROLE_ORDER["admin"]:
+                return False, "admins can only remove viewers and developers"
+            del o["members"][member]
+            self._save_locked(self.orgs_path, {"orgs": orgs})
+        self.record_audit(actor, "org_member_remove", f"org:{org}:{member}", org=org)
+        return True, "removed"
+
+    def user_orgs(self, username: str) -> dict[str, str]:
+        """Map of org name -> role for all memberships of a user."""
+        result: dict[str, str] = {}
+        for name, o in self._load(self.orgs_path, {}).get("orgs", {}).items():
+            role = o.get("members", {}).get(username or "")
+            if role in ROLE_ORDER:
+                result[name] = role
+        return result
+
+    # ---- audit log --------------------------------------------------------
+    def record_audit(self, actor: str, action: str, target: str = "",
+                     org: str | None = None):
+        line = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "actor": actor,
+            "action": action,
+            "target": target,
+            "ip": None,
+        }
+        if org:
+            line["org"] = org
+        path = os.path.join(self.audit_dir, month_now() + ".jsonl")
+        data = json.dumps(line).encode() + b"\n"
+        with open(path, "ab") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.write(data)
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+    def read_audit(self, month: str, actor: str | None = None,
+                   org: str | None = None) -> list[dict]:
+        """Lines filtered by actor (personal) XOR by org tag (org trail)."""
+        out: list[dict] = []
+        try:
+            with open(os.path.join(self.audit_dir, month + ".jsonl"), "rb") as f:
+                raw = f.read()
+        except OSError:
+            return out
+        for line in raw.splitlines():
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue  # torn tail write from a crashed process
+            if actor is not None and rec.get("actor") == actor and "org" not in rec:
+                out.append(rec)
+            elif org is not None and rec.get("org") == org:
+                out.append(rec)
+        return out
 
     # ---- packages ---------------------------------------------------------
     def set_meta(self, fname: str, owner: str | None, private: bool):
@@ -323,6 +495,43 @@ class Store:
         return True, "added"
 
 
+# ---- Stripe (stdlib REST, no SDK) -----------------------------------------
+# Keys come from CLI flags or env; never logged, never stored on disk here.
+
+def stripe_api(endpoint: str, params: dict, key: str) -> dict:
+    """POST form-encoded params to the Stripe REST API. Raises on HTTP errors."""
+    data = urllib.parse.urlencode(params).encode()
+    req = urllib.request.Request(
+        f"https://api.stripe.com/v1/{endpoint}",
+        data=data,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read())
+
+
+def verify_stripe_signature(payload: bytes, header: str, secret: str,
+                            tolerance: int = 300) -> bool:
+    """Stripe-Signature: t=<ts>,v1=<hmac>. Constant-time compare, replay guard."""
+    parts = {}
+    for piece in header.split(","):
+        if "=" in piece:
+            k, _, v = piece.partition("=")
+            parts[k.strip()] = v.strip()
+    ts, v1 = parts.get("t"), parts.get("v1")
+    if not ts or not v1 or not ts.isdigit():
+        return False
+    if abs(time.time() - int(ts)) > tolerance:
+        return False
+    signed = ts.encode() + b"." + payload
+    expected = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, v1)
+
+
 LANDING = """<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>erebus registry</title>
 <style>
@@ -381,6 +590,7 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
 
     store: Store = None  # type: ignore[assignment]
+    billing: dict = {}  # stripe config, set in main(); empty -> billing off
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
@@ -436,6 +646,22 @@ class Handler(BaseHTTPRequestHandler):
             return self._mcp_install(path.split("/")[2])
         if re.match(r"^/mcp/[^/]+$", path):
             return self._mcp_detail(path.split("/")[2])
+        if path == "/billing/status":
+            user = self._authorized_user()
+            if not user:
+                return self.send_json({"error": "authentication required"}, 401)
+            tier = self.store.user_tier(user)
+            return self.send_json({
+                "user": user,
+                "tier": tier,
+                "quota_bytes": TIER_QUOTAS[tier],
+                "orgs": self.store.user_orgs(user),
+            })
+        m = re.match(r"^/orgs/([^/]+)$", path)
+        if m:
+            return self._org_detail(urllib.parse.unquote(m.group(1)))
+        if path == "/audit/download":
+            return self._audit_download(self.path.split("?", 1)[1] if "?" in self.path else "")
         self.send_json({"error": "not found"}, 404)
 
     def _send_index(self):
@@ -481,13 +707,21 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": "range not satisfiable"}, 416)
         if meta.get("private") and not is_sidecar:
             user = self._authorized_user()
-            if user != meta.get("owner"):
+            owner = meta.get("owner", "")
+            allowed = user == owner
+            if not allowed and owner.startswith("org:") and user:
+                allowed = self.store.org_role(owner[4:], user) is not None
+            if not allowed:
                 return self.send_json({"error": "private package"}, 401)
-            if self.store.month_served(user) + (end - start + 1) > self.store.quota_bytes:
+            if self.store.month_served(user) + (end - start + 1) > self.store.quota_for(user):
                 return self.send_json(
                     {"error": "monthly transfer quota exceeded (upgrade tier)"}, 402
                 )
             self.store.charge_bytes(user, end - start + 1, size)
+            self.store.record_audit(
+                user, "private_download", fname,
+                org=owner[4:] if owner.startswith("org:") else None,
+            )
         elif not is_pack and not is_sidecar:
             # Anonymous public pull: count toward the public SISR story.
             # Runtime packs stay out of the savings narrative on purpose.
@@ -541,8 +775,30 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": msg}, code)
         if path == "/mcp":
             return self._mcp_upload()
+        if path == "/billing/webhook":
+            return self._billing_webhook()
+        if path == "/billing/checkout":
+            body = self.read_body(2048)
+            return self._billing_checkout(body)
+        if path == "/orgs":
+            body = self.read_body(2048)
+            return self._org_create(body)
+        m = re.match(r"^/orgs/([^/]+)/members$", path)
+        if m:
+            body = self.read_body(2048)
+            return self._org_member_add(urllib.parse.unquote(m.group(1)), body)
         if path == "/" or path.startswith("/packages/"):
             return self._upload()
+        self.send_json({"error": "not found"}, 404)
+
+    def do_DELETE(self):
+        self.connection.settimeout(30)
+        path = self.path.split("?", 1)[0]
+        m = re.match(r"^/orgs/([^/]+)/members/([^/]+)$", path)
+        if m:
+            return self._org_member_remove(
+                urllib.parse.unquote(m.group(1)), urllib.parse.unquote(m.group(2))
+            )
         self.send_json({"error": "not found"}, 404)
 
     def _auth(self, payload: dict, login: bool):
@@ -554,13 +810,194 @@ class Handler(BaseHTTPRequestHandler):
             user = self.store.login(username, password, None)
             if not user:
                 return self.send_json({"error": "invalid credentials"}, 401)
-            with self.lock:
-                tok_hash = self.store.users[user]["token_hash"]
             return self.send_json({"username": user, "note": "use your registration token"})
         ok, msg = self.store.register(username, password)
         if not ok:
             return self.send_json({"error": msg}, 400)
+        self.store.record_audit(username, "register")
         return self.send_json({"username": username, "token": msg})
+
+    # ---- json body helper ---------------------------------------------------
+    def _read_json(self, raw: bytes | None) -> dict | None:
+        if raw is None:
+            return None
+        try:
+            parsed = json.loads(raw.decode("utf-8", "replace"))
+            return parsed if isinstance(parsed, dict) else None
+        except (ValueError, RecursionError):
+            return None
+
+    # ---- billing -------------------------------------------------------------
+    def _billing_checkout(self, raw: bytes | None):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        cfg = self.billing
+        if not cfg.get("secret_key") or not cfg.get("webhook_secret"):
+            return self.send_json(
+                {"error": "billing not configured on this registry "
+                          "(--stripe-secret-key / --stripe-webhook-secret)"}, 501
+            )
+        payload = self._read_json(raw)
+        if payload is None:
+            return self.send_json({"error": "invalid json"}, 400)
+        plan = str(payload.get("plan", ""))
+        price = cfg.get(f"price_{plan}")
+        if plan not in PAID_TIERS or not price:
+            return self.send_json({"error": f"plan must be one of {list(PAID_TIERS)}"}, 400)
+        params = {
+            "mode": "subscription",
+            "line_items[0][price]": price,
+            "line_items[0][quantity]": 1,
+            "success_url": cfg["success_url"],
+            "cancel_url": cfg["cancel_url"],
+            "client_reference_id": user,
+            "metadata[user]": user,
+            "metadata[plan]": plan,
+            "subscription_data[metadata][user]": user,
+            "subscription_data[metadata][plan]": plan,
+        }
+        try:
+            session = stripe_api("checkout/sessions", params, cfg["secret_key"])
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")[:200]
+            return self.send_json({"error": f"stripe error: {detail}"}, 502)
+        except (urllib.error.URLError, TimeoutError, OSError):
+            return self.send_json({"error": "stripe unreachable"}, 502)
+        self.store.record_audit(user, "billing_checkout_started", plan)
+        return self.send_json({"url": session.get("url"), "id": session.get("id")})
+
+    def _billing_webhook(self):
+        """Stripe events. Signature-verified; unconfigured secret -> 503."""
+        cfg = self.billing
+        secret = cfg.get("webhook_secret")
+        if not secret:
+            return self.send_json({"error": "webhooks not configured"}, 503)
+        declared = int(self.headers.get("Content-Length", 0) or 0)
+        if declared <= 0 or declared > 1 << 20:
+            return self.send_json({"error": "bad body size"}, 400)
+        raw = self.rfile.read(declared)
+        sig = self.headers.get("Stripe-Signature", "")
+        if not verify_stripe_signature(raw, sig, secret):
+            self.store.record_audit("__stripe__", "billing_webhook_bad_signature")
+            return self.send_json({"error": "invalid signature"}, 400)
+        try:
+            event = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError:
+            return self.send_json({"error": "invalid event"}, 400)
+        etype = str(event.get("type", ""))
+        obj = event.get("data", {}).get("object", {})
+        meta = obj.get("metadata", {}) or {}
+        user = str(meta.get("user", ""))
+        if not SAFE_USER.match(user):
+            return self.send_json({"received": True})  # not ours; ack silently
+        if etype == "checkout.session.completed":
+            plan = str(meta.get("plan", ""))
+            if plan in PAID_TIERS and obj.get("payment_status") == "paid":
+                self.store.set_tier(user, plan)
+                return self.send_json({"applied": f"{user}->{plan}"})
+        elif etype == "customer.subscription.deleted":
+            self.store.set_tier(user, "free")
+            return self.send_json({"applied": f"{user}->free"})
+        return self.send_json({"received": True})
+
+    # ---- orgs ----------------------------------------------------------------
+    def _org_create(self, raw: bytes | None):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        payload = self._read_json(raw)
+        if payload is None:
+            return self.send_json({"error": "invalid json"}, 400)
+        ok, msg = self.store.create_org(str(payload.get("name", "")), user)
+        return self.send_json(
+            {"status": msg} if ok else {"error": msg},
+            200 if ok else 400,
+        )
+
+    def _org_detail(self, name: str):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        org = self.store.get_org(name)
+        if not org:
+            return self.send_json({"error": "no such org"}, 404)
+        role = self.store.org_role(name, user)
+        if role is None:
+            # Existence probe denied without membership.
+            return self.send_json({"error": "no such org"}, 404)
+        return self.send_json({
+            "name": name,
+            "your_role": role,
+            "owner": org["owner"],
+            "members": org.get("members", {}),
+            "created": org.get("created"),
+        })
+
+    def _org_member_add(self, org: str, raw: bytes | None):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        payload = self._read_json(raw)
+        if payload is None:
+            return self.send_json({"error": "invalid json"}, 400)
+        ok, msg = self.store.add_member(
+            org, user, str(payload.get("username", "")), str(payload.get("role", ""))
+        )
+        return self.send_json(
+            {"status": msg} if ok else {"error": msg},
+            200 if ok else (404 if "no such" in msg else 400 if "role must" in msg or "invalid" in msg else 403),
+        )
+
+    def _org_member_remove(self, org: str, member: str):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        ok, msg = self.store.remove_member(org, user, member)
+        return self.send_json(
+            {"status": msg} if ok else {"error": msg},
+            200 if ok else (404 if "no such" in msg else 400 if "cannot be removed" in msg else 403),
+        )
+
+    # ---- audit trail -----------------------------------------------------------
+    def _audit_download(self, query: str):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        qs = urllib.parse.parse_qs(query)
+        month = (qs.get("month") or [""])[0]
+        org = (qs.get("org") or [None])[0]
+        if not SAFE_MONTH.match(month):
+            return self.send_json({"error": "month must be YYYY-MM"}, 400)
+        if org is not None:
+            # Org trail entitlement follows the ORG OWNER's plan — admins
+            # without their own Team seat still serve the org they manage.
+            role = self.store.org_role(org, user)
+            if role not in ("owner", "admin"):
+                return self.send_json({"error": "owner/admin role required"}, 403)
+            owner_tier = self.store.user_tier(self.store.get_org(org)["owner"])
+            if owner_tier != "team":
+                return self.send_json(
+                    {"error": "org audit log requires the org owner to be on Team"}, 402
+                )
+            records = self.store.read_audit(month, org=org)
+        else:
+            if self.store.user_tier(user) != "team":
+                return self.send_json(
+                    {"error": "audit log download requires the Team plan"}, 402
+                )
+            records = self.store.read_audit(month, actor=user)
+        records.sort(key=lambda r: r.get("ts", ""))
+        records.sort(key=lambda r: r.get("ts", ""))
+        body = ("\n".join(json.dumps(r) for r in records) + "\n").encode() \
+            if records else b""
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Content-Disposition",
+                         f'attachment; filename="erebus-audit-{month}.jsonl"')
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _mcp_list(self):
         servers = self.store.mcp_index()
@@ -656,6 +1093,21 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(
                 {"error": "authentication required — register via /auth/register"}, 401
             )
+        # Optional org publish: X-Erebus-Org header keeps the streamed
+        # multipart parser untouched. Developer role required.
+        audit_org = None
+        if not open_mode:
+            org_name = (self.headers.get("X-Erebus-Org") or "").strip()
+            if org_name:
+                if not SAFE_ORG.match(org_name):
+                    return self.send_json({"error": "invalid org name"}, 400)
+                if ROLE_ORDER.get(self.store.org_role(org_name, owner), -1) \
+                        < ROLE_ORDER["developer"]:
+                    return self.send_json(
+                        {"error": "developer role required in this org"}, 403
+                    )
+                owner = f"org:{org_name}"
+                audit_org = org_name
         ctype = self.headers.get("Content-Type", "")
         if "boundary=" not in ctype:
             return self.send_json({"error": "expected multipart/form-data"}, 400)
@@ -692,6 +1144,9 @@ class Handler(BaseHTTPRequestHandler):
         self.close_connection = True
         self.store.set_meta(fname, None if open_mode else owner, private=bool(not open_mode and owner != "__anon__"))
         self.store._hash_cache.pop(final, None)
+        self.store.record_audit(
+            owner if not open_mode else "__anon__", "publish", fname, org=audit_org
+        )
         self.send_json({"status": "ok", "stored": fname, "size": nbytes})
 
 
@@ -778,6 +1233,24 @@ def main() -> None:
                     help="path to TLS certificate file (PEM)")
     ap.add_argument("--tls-key",
                     help="path to TLS private key file (PEM)")
+    ap.add_argument("--stripe-secret-key",
+                    default=os.environ.get("STRIPE_SECRET_KEY"),
+                    help="Stripe secret key (or STRIPE_SECRET_KEY env)")
+    ap.add_argument("--stripe-webhook-secret",
+                    default=os.environ.get("STRIPE_WEBHOOK_SECRET"),
+                    help="Stripe webhook signing secret (or env)")
+    ap.add_argument("--stripe-price-pro",
+                    default=os.environ.get("STRIPE_PRICE_PRO"),
+                    help="Stripe price ID for the Pro plan")
+    ap.add_argument("--stripe-price-team",
+                    default=os.environ.get("STRIPE_PRICE_TEAM"),
+                    help="Stripe price ID for the Team plan")
+    ap.add_argument("--billing-success-url",
+                    default="https://registry.erebus.dev/billing/success",
+                    help="redirect target after Stripe Checkout payment")
+    ap.add_argument("--billing-cancel-url",
+                    default="https://registry.erebus.dev/billing/cancelled",
+                    help="redirect target after Checkout cancellation")
     args = ap.parse_args()
 
     if bool(args.tls_cert) != bool(args.tls_key):
@@ -787,6 +1260,14 @@ def main() -> None:
         args.dir, int(args.quota_gb * 1e9), int(args.upload_cap_gb * 1e9),
         require_auth=args.require_auth,
     )
+    Handler.billing = {
+        "secret_key": args.stripe_secret_key,
+        "webhook_secret": args.stripe_webhook_secret,
+        "price_pro": args.stripe_price_pro,
+        "price_team": args.stripe_price_team,
+        "success_url": args.billing_success_url,
+        "cancel_url": args.billing_cancel_url,
+    }
     class Server(ThreadingHTTPServer):
         # Default listen backlog is 5; fleet-style bursts of concurrent
         # pulls/uploads otherwise get connection resets.
@@ -812,10 +1293,13 @@ def main() -> None:
         scheme = "http"
 
     bootstrap = Handler.store.bootstrap_open_uploads()
+    billing_state = ("on" if Handler.billing.get("secret_key")
+                     and Handler.billing.get("webhook_secret") else "off")
     print(
         f"erebus registry v2 on {scheme}://{args.host}:{args.port} dir={args.dir} "
         f"quota={args.quota_gb}GB/month cap={args.upload_cap_gb}GB/upload "
-        f"auth={'required (bootstrap disabled)' if args.require_auth else 'OPEN — bootstrap mode' if bootstrap else 'require auth'}",
+        f"auth={'required (bootstrap disabled)' if args.require_auth else 'OPEN — bootstrap mode' if bootstrap else 'require auth'} "
+        f"billing={billing_state}",
         flush=True,
     )
     try:
