@@ -4,13 +4,19 @@
 
 use anyhow::{anyhow, Context, Result};
 use arbitrary::{Arbitrary, Unstructured};
+
+use crate::cli_fuzz::CliFuzzTarget;
+use crate::format_fuzz::FormatFuzzTarget;
+use crate::registry_fuzz::RegistryFuzzTarget;
+use crate::serve_fuzz::ServeFuzzTarget;
+use crate::stub_fuzz::StubFuzzTarget;
 use rand::Rng;
-use rand_chacha::ChaCha20Rng;
 use rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::sync::Mutex;
@@ -57,11 +63,21 @@ pub struct GlobalStats {
 }
 
 impl GlobalStats {
-    pub fn new() -> Self { Self::default() }
-    pub fn record_iteration(&self) { self.iterations.fetch_add(1, Ordering::Relaxed); }
-    pub fn record_crash(&self, sig: &str) { self.crashes.fetch_add(1, Ordering::Relaxed); }
-    pub fn record_panic(&self) { self.panics.fetch_add(1, Ordering::Relaxed); }
-    pub fn record_timeout(&self) { self.timeouts.fetch_add(1, Ordering::Relaxed); }
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn record_iteration(&self) {
+        self.iterations.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn record_crash(&self, sig: &str) {
+        self.crashes.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn record_panic(&self) {
+        self.panics.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn record_timeout(&self) {
+        self.timeouts.fetch_add(1, Ordering::Relaxed);
+    }
     pub fn snapshot(&self) -> FuzzStats {
         FuzzStats {
             iterations: self.iterations.load(Ordering::Relaxed),
@@ -92,7 +108,9 @@ pub enum MutationStrategy {
 }
 
 impl Default for MutationStrategy {
-    fn default() -> Self { MutationStrategy::Havoc }
+    fn default() -> Self {
+        MutationStrategy::Havoc
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -114,7 +132,13 @@ pub struct FuzzConfig {
 impl Default for FuzzConfig {
     fn default() -> Self {
         Self {
-            target_names: vec!["format".into(), "stub".into(), "cli".into(), "registry".into(), "serve".into()],
+            target_names: vec![
+                "format".into(),
+                "stub".into(),
+                "cli".into(),
+                "registry".into(),
+                "serve".into(),
+            ],
             iterations: None,
             duration: Some(Duration::from_secs(3600)),
             workers: num_cpus::get(),
@@ -135,8 +159,12 @@ pub trait FuzzTarget: Send + Sync {
     fn generate_seed(&self, u: &mut Unstructured) -> Result<Vec<u8>>;
     fn mutate(&self, input: &[u8], u: &mut Unstructured) -> Result<Vec<u8>>;
     fn execute(&self, input: &[u8]) -> Result<()>;
-    fn minimize(&self, input: &[u8]) -> Result<Vec<u8>> { Ok(input.to_vec()) }
-    fn is_valid(&self, input: &[u8]) -> bool { !input.is_empty() }
+    fn minimize(&self, input: &[u8]) -> Result<Vec<u8>> {
+        Ok(input.to_vec())
+    }
+    fn is_valid(&self, input: &[u8]) -> bool {
+        !input.is_empty()
+    }
 }
 
 pub struct TargetRegistry {
@@ -149,17 +177,28 @@ impl TargetRegistry {
         targets.insert("format", Box::new(FormatFuzzTarget) as Box<dyn FuzzTarget>);
         targets.insert("stub", Box::new(StubFuzzTarget) as Box<dyn FuzzTarget>);
         targets.insert("cli", Box::new(CliFuzzTarget) as Box<dyn FuzzTarget>);
-        targets.insert("registry", Box::new(RegistryFuzzTarget::default()) as Box<dyn FuzzTarget>);
+        targets.insert(
+            "registry",
+            Box::new(RegistryFuzzTarget::default()) as Box<dyn FuzzTarget>,
+        );
         targets.insert("serve", Box::new(ServeFuzzTarget) as Box<dyn FuzzTarget>);
         Self { targets }
     }
-    pub fn get(&self, name: &str) -> Option<&dyn FuzzTarget> { self.targets.get(name).map(|b| b.as_ref()) }
-    pub fn all_names(&self) -> Vec<&'static str> { self.targets.keys().copied().collect() }
-    pub fn all_targets(&self) -> Vec<&dyn FuzzTarget> { self.targets.values().map(|b| b.as_ref()).collect() }
+    pub fn get(&self, name: &str) -> Option<&dyn FuzzTarget> {
+        self.targets.get(name).map(|b| b.as_ref())
+    }
+    pub fn all_names(&self) -> Vec<&'static str> {
+        self.targets.keys().copied().collect()
+    }
+    pub fn all_targets(&self) -> Vec<&dyn FuzzTarget> {
+        self.targets.values().map(|b| b.as_ref()).collect()
+    }
 }
 
 impl Default for TargetRegistry {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 pub struct FuzzHarness {
@@ -177,7 +216,14 @@ impl FuzzHarness {
         let global_stats = Arc::new(GlobalStats::new());
         let corpus = Arc::new(Mutex::new(Vec::new()));
         let crash_cases = Arc::new(Mutex::new(Vec::new()));
-        Self { config, registry, global_stats, corpus, crash_cases, start_time: Instant::now() }
+        Self {
+            config,
+            registry,
+            global_stats,
+            corpus,
+            crash_cases,
+            start_time: Instant::now(),
+        }
     }
 
     pub async fn load_corpus(&self) -> Result<()> {
@@ -226,9 +272,21 @@ impl FuzzHarness {
 
     pub async fn run(&self) -> Result<FuzzStats> {
         self.load_corpus().await?;
-        let targets: Vec<_> = self.config.target_names.iter().filter_map(|n| self.registry.get(n)).collect();
-        if targets.is_empty() { anyhow::bail!("no valid targets"); }
-        eprintln!("[fuzz] {} workers, {} targets, seed={}", self.config.workers, targets.len(), self.config.seed);
+        let targets: Vec<_> = self
+            .config
+            .target_names
+            .iter()
+            .filter_map(|n| self.registry.get(n))
+            .collect();
+        if targets.is_empty() {
+            anyhow::bail!("no valid targets");
+        }
+        eprintln!(
+            "[fuzz] {} workers, {} targets, seed={}",
+            self.config.workers,
+            targets.len(),
+            self.config.seed
+        );
 
         let mut handles = Vec::new();
         for worker_id in 0..self.config.workers {
@@ -239,7 +297,16 @@ impl FuzzHarness {
             let crash_cases = self.crash_cases.clone();
             let seed = self.config.seed.wrapping_add(worker_id as u64);
             handles.push(tokio::spawn(async move {
-                worker_loop(worker_id, targets, config, global_stats, corpus, crash_cases, seed).await
+                worker_loop(
+                    worker_id,
+                    targets,
+                    config,
+                    global_stats,
+                    corpus,
+                    crash_cases,
+                    seed,
+                )
+                .await
             }));
         }
 
@@ -249,10 +316,14 @@ impl FuzzHarness {
             let corpus = self.corpus.clone();
             let crash_cases = self.crash_cases.clone();
             let harness = self.clone();
-            tokio::spawn(async move { periodic_tasks(global_stats, config, corpus, crash_cases, harness).await })
+            tokio::spawn(async move {
+                periodic_tasks(global_stats, config, corpus, crash_cases, harness).await
+            })
         };
 
-        for h in handles { let _ = h.await; }
+        for h in handles {
+            let _ = h.await;
+        }
         stats_handle.abort();
         self.save_corpus().await?;
         self.save_crashes().await?;
@@ -262,20 +333,46 @@ impl FuzzHarness {
 
 impl Clone for FuzzHarness {
     fn clone(&self) -> Self {
-        Self { config: self.config.clone(), registry: TargetRegistry::new(), global_stats: self.global_stats.clone(), corpus: self.corpus.clone(), crash_cases: self.crash_cases.clone(), start_time: self.start_time }
+        Self {
+            config: self.config.clone(),
+            registry: TargetRegistry::new(),
+            global_stats: self.global_stats.clone(),
+            corpus: self.corpus.clone(),
+            crash_cases: self.crash_cases.clone(),
+            start_time: self.start_time,
+        }
     }
 }
 
-async fn worker_loop(worker_id: usize, targets: Vec<&dyn FuzzTarget>, config: FuzzConfig, global_stats: Arc<GlobalStats>, corpus: Arc<Mutex<Vec<CorpusEntry>>>, crash_cases: Arc<Mutex<Vec<CrashCase>>>, seed: u64) -> Result<()> {
+async fn worker_loop(
+    worker_id: usize,
+    targets: Vec<&dyn FuzzTarget>,
+    config: FuzzConfig,
+    global_stats: Arc<GlobalStats>,
+    corpus: Arc<Mutex<Vec<CorpusEntry>>>,
+    crash_cases: Arc<Mutex<Vec<CrashCase>>>,
+    seed: u64,
+) -> Result<()> {
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
     let timeout = config.timeout_per_iteration;
     let mut iteration = 0u64;
     let deadline = config.duration.map(|d| Instant::now() + d);
     loop {
-        if let Some(d) = deadline { if Instant::now() >= d { break; } }
-        if let Some(max_iter) = config.iterations { if iteration >= max_iter { break; } }
+        if let Some(d) = deadline {
+            if Instant::now() >= d {
+                break;
+            }
+        }
+        if let Some(max_iter) = config.iterations {
+            if iteration >= max_iter {
+                break;
+            }
+        }
         let target = targets[rng.gen_range(0..targets.len())];
-        let input = if rng.gen_bool(0.3) && { let c = corpus.lock().await; !c.is_empty() } {
+        let input = if rng.gen_bool(0.3) && {
+            let c = corpus.lock().await;
+            !c.is_empty()
+        } {
             let c = corpus.lock().await;
             let entry = c.choose(&mut rng).unwrap();
             let mut u = Unstructured::new(&entry.data);
@@ -284,20 +381,39 @@ async fn worker_loop(worker_id: usize, targets: Vec<&dyn FuzzTarget>, config: Fu
             let mut u = Unstructured::new(&rng.gen::<[u8; 32]>());
             target.generate_seed(&mut u)?
         };
-        if input.len() > config.max_input_size { continue; }
+        if input.len() > config.max_input_size {
+            continue;
+        }
         let target_name = target.name();
         let result = tokio::time::timeout(timeout, target.execute(&input)).await;
         global_stats.record_iteration();
         match result {
-            Ok(Ok(())) => { if config.enable_cross_over && rng.gen_bool(0.1) { let mut c = corpus.lock().await; if c.len() < 10000 { c.push(CorpusEntry::new(input)); } } }
-            Ok(Err(e)) => { global_stats.record_crash(&format!("{}:{}", target_name, e)); }
-            Err(_) => { global_stats.record_timeout(); }
+            Ok(Ok(())) => {
+                if config.enable_cross_over && rng.gen_bool(0.1) {
+                    let mut c = corpus.lock().await;
+                    if c.len() < 10000 {
+                        c.push(CorpusEntry::new(input));
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                global_stats.record_crash(&format!("{}:{}", target_name, e));
+            }
+            Err(_) => {
+                global_stats.record_timeout();
+            }
         }
     }
     Ok(())
 }
 
-fn periodic_tasks(global_stats: Arc<GlobalStats>, config: FuzzConfig, corpus: Arc<Mutex<Vec<CorpusEntry>>>, crash_cases: Arc<Mutex<Vec<CrashCase>>>, harness: FuzzHarness) {
+async fn periodic_tasks(
+    global_stats: Arc<GlobalStats>,
+    config: FuzzConfig,
+    corpus: Arc<Mutex<Vec<CorpusEntry>>>,
+    crash_cases: Arc<Mutex<Vec<CrashCase>>>,
+    harness: FuzzHarness,
+) {
     let mut stats_interval = interval(config.stats_print_interval);
     let mut corpus_interval = interval(config.corpus_save_interval);
     let mut crash_interval = interval(Duration::from_secs(300));

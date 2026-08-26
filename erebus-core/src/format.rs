@@ -35,7 +35,7 @@ pub const SIG_BLOCK_SIZE_FIELD: usize = 4;
 pub const SIG_LEN: usize = SIG_BLOCK_SIZE - SIG_BLOCK_SIZE_FIELD;
 
 /// Fixed footer at the very end of a .erebus file.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Footer {
     pub format_version: u8,
     pub arch: u8,
