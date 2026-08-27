@@ -6,6 +6,9 @@
 //! `hostname + os + arch` is recorded.
 
 use crate::format::Footer;
+use crate::intoto::{
+    digest_value as intoto_digest, InTotoStatement, EREBUS_PREDICATE_TYPE, INTOTO_STATEMENT_TYPE,
+};
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -28,6 +31,9 @@ pub struct Attestation {
     pub artifact: ArtifactInfo,
     pub provenance: ProvenanceInfo,
     pub execution: ExecutionInfo,
+    /// The in-toto statement this attestation is about; the Ed25519 signature
+    /// in [`SignatureInfo::signature_hex`] covers these canonical bytes.
+    pub statement: InTotoStatement,
     pub signature: SignatureInfo,
 }
 
@@ -183,29 +189,82 @@ pub fn generate_attestation(
         })
         .unwrap_or_default();
 
-    // Build attestation (unsigned first)
-    let attestation = Attestation {
+    // Build the structured fields first, then derive the in-toto statement
+    // from them (the statement is the signed payload; the sig covers its
+    // canonical bytes). Cloning here lets a single source of truth feed both
+    // the human-readable fields and the in-toto predicate.
+    let artifact = ArtifactInfo {
+        bundle_hash: bundle_hash.clone(),
+        payload_hash: payload_hash.clone(),
+        metadata_hash: metadata_hash.clone(),
+        format_version: footer.format_version,
+        flags: flag_names(footer.flags),
+    };
+    let provenance = ProvenanceInfo {
+        builder: builder.clone(),
+        author: author.clone(),
+        license: license.clone(),
+        layers: layers.clone(),
+    };
+    let execution = ExecutionInfo {
+        attested_at: utc_now_iso8601(),
+        machine_id_hash: machine_id_hash(),
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+    };
+
+    let statement = InTotoStatement {
+        statement_type: INTOTO_STATEMENT_TYPE.to_string(),
+        subject: vec![
+            crate::intoto::Subject {
+                name: "bundle".to_string(),
+                digest: {
+                    let mut d = std::collections::HashMap::new();
+                    d.insert("sha256".to_string(), intoto_digest(&artifact.bundle_hash));
+                    d
+                },
+            },
+            crate::intoto::Subject {
+                name: "payload".to_string(),
+                digest: {
+                    let mut d = std::collections::HashMap::new();
+                    d.insert("sha256".to_string(), intoto_digest(&artifact.payload_hash));
+                    d
+                },
+            },
+        ],
+        predicate_type: EREBUS_PREDICATE_TYPE.to_string(),
+        predicate: serde_json::json!({
+            "builder": provenance.builder,
+            "author": provenance.author,
+            "license": provenance.license,
+            "layers": provenance.layers.iter().map(|l| serde_json::json!({
+                "name": l.name,
+                "kind": l.kind,
+                "sha256": l.sha256,
+            })).collect::<Vec<_>>(),
+            "execution": {
+                "attested_at": execution.attested_at,
+                "machine_id_hash": execution.machine_id_hash,
+                "os": execution.os,
+                "arch": execution.arch,
+            },
+            "artifact": {
+                "metadata_hash": artifact.metadata_hash,
+                "format_version": artifact.format_version,
+                "flags": artifact.flags,
+            },
+        }),
+    };
+
+    // Assemble the attestation (unsigned first).
+    let mut attestation = Attestation {
         spec_version: ATTESTATION_SPEC_VERSION.to_string(),
         attestation_type: ATTESTATION_TYPE.to_string(),
-        artifact: ArtifactInfo {
-            bundle_hash,
-            payload_hash,
-            metadata_hash,
-            format_version: footer.format_version,
-            flags: flag_names(footer.flags),
-        },
-        provenance: ProvenanceInfo {
-            builder,
-            author,
-            license,
-            layers,
-        },
-        execution: ExecutionInfo {
-            attested_at: utc_now_iso8601(),
-            machine_id_hash: machine_id_hash(),
-            os: std::env::consts::OS.to_string(),
-            arch: std::env::consts::ARCH.to_string(),
-        },
+        artifact,
+        provenance,
+        execution,
+        statement: statement.clone(),
         signature: SignatureInfo {
             algorithm: "ed25519".to_string(),
             key_fingerprint: format!(
@@ -216,15 +275,14 @@ pub fn generate_attestation(
         },
     };
 
-    // Serialize, sign, fill signature
-    let doc_bytes = serde_json::to_vec_pretty(&attestation)
-        .map_err(|e| anyhow::anyhow!("failed to serialize attestation: {e}"))?;
+    // Sign the in-toto statement's canonical bytes and fill the signature.
+    let doc_bytes = serde_json::to_vec_pretty(&attestation.statement)
+        .map_err(|e| anyhow::anyhow!("failed to serialize statement: {e}"))?;
     let sig = signing_key.sign(&doc_bytes);
 
-    let mut signed = attestation;
-    signed.signature.signature_hex = hex::encode(sig.to_bytes());
+    attestation.signature.signature_hex = hex::encode(sig.to_bytes());
 
-    Ok(signed)
+    Ok(attestation)
 }
 
 /// ISO 8601 UTC timestamp.
@@ -248,17 +306,15 @@ fn get_hostname() -> String {
 
 /// Verify an attestation against a set of trusted public keys.
 ///
-/// Returns the verifying key that matched, or an error.
+/// The signature covers the in-toto statement's canonical bytes (the same
+/// object produced by [`generate_attestation`]). Returns the verifying key
+/// that matched, or an error.
 pub fn verify_attestation(
     attestation: &Attestation,
     trusted_keys: &[VerifyingKey],
 ) -> Result<VerifyingKey, anyhow::Error> {
-    // Reconstruct the unsigned document by clearing the signature
-    let mut doc = attestation.clone();
-    doc.signature.signature_hex = String::new();
-
-    let doc_bytes = serde_json::to_vec(&doc)
-        .map_err(|e| anyhow::anyhow!("failed to serialize attestation: {e}"))?;
+    let doc_bytes = serde_json::to_vec(&attestation.statement)
+        .map_err(|e| anyhow::anyhow!("failed to serialize statement: {e}"))?;
 
     let sig_bytes = hex::decode(&attestation.signature.signature_hex)
         .map_err(|e| anyhow::anyhow!("invalid signature hex: {e}"))?;
@@ -316,6 +372,7 @@ mod tests {
                     os,
                     arch,
                 },
+                statement: sample_statement(),
                 signature: SignatureInfo {
                     algorithm: "ed25519".to_string(),
                     key_fingerprint: "sha256:dead".to_string(),
@@ -332,6 +389,22 @@ mod tests {
 
     fn test_key() -> SigningKey {
         SigningKey::from_bytes(&[1u8; 32])
+    }
+
+    fn sample_statement() -> InTotoStatement {
+        InTotoStatement {
+            statement_type: INTOTO_STATEMENT_TYPE.to_string(),
+            subject: vec![crate::intoto::Subject {
+                name: "bundle".to_string(),
+                digest: {
+                    let mut d = std::collections::HashMap::new();
+                    d.insert("sha256".to_string(), "abc".to_string());
+                    d
+                },
+            }],
+            predicate_type: EREBUS_PREDICATE_TYPE.to_string(),
+            predicate: serde_json::json!({}),
+        }
     }
 
     #[test]
@@ -365,7 +438,7 @@ mod tests {
     #[test]
     fn roundtrip_verify() {
         let key = test_key();
-        let attestation = Attestation {
+        let mut attestation = Attestation {
             spec_version: "1.0".to_string(),
             attestation_type: "erebus-execution".to_string(),
             artifact: ArtifactInfo {
@@ -387,6 +460,7 @@ mod tests {
                 os: "linux".to_string(),
                 arch: "x86_64".to_string(),
             },
+            statement: sample_statement(),
             signature: SignatureInfo {
                 algorithm: "ed25519".to_string(),
                 key_fingerprint: format!(
@@ -397,14 +471,13 @@ mod tests {
             },
         };
 
-        // Sign
-        let doc_bytes = serde_json::to_vec(&attestation).unwrap();
+        // Sign the statement's canonical bytes.
+        let doc_bytes = serde_json::to_vec(&attestation.statement).unwrap();
         let sig = key.sign(&doc_bytes);
-        let mut signed = attestation;
-        signed.signature.signature_hex = hex::encode(sig.to_bytes());
+        attestation.signature.signature_hex = hex::encode(sig.to_bytes());
 
         // Verify
-        let result = verify_attestation(&signed, &[key.verifying_key()]);
+        let result = verify_attestation(&attestation, &[key.verifying_key()]);
         assert!(result.is_ok());
     }
 
@@ -413,7 +486,7 @@ mod tests {
         let key = test_key();
         let wrong_key = SigningKey::from_bytes(&[2u8; 32]);
 
-        let attestation = Attestation {
+        let mut attestation = Attestation {
             spec_version: "1.0".to_string(),
             attestation_type: "erebus-execution".to_string(),
             artifact: ArtifactInfo {
@@ -435,6 +508,7 @@ mod tests {
                 os: "linux".to_string(),
                 arch: "x86_64".to_string(),
             },
+            statement: sample_statement(),
             signature: SignatureInfo {
                 algorithm: "ed25519".to_string(),
                 key_fingerprint: "sha256:wrong".to_string(),
@@ -442,12 +516,11 @@ mod tests {
             },
         };
 
-        let doc_bytes = serde_json::to_vec(&attestation).unwrap();
+        let doc_bytes = serde_json::to_vec(&attestation.statement).unwrap();
         let sig = key.sign(&doc_bytes);
-        let mut signed = attestation;
-        signed.signature.signature_hex = hex::encode(sig.to_bytes());
+        attestation.signature.signature_hex = hex::encode(sig.to_bytes());
 
-        let result = verify_attestation(&signed, &[wrong_key.verifying_key()]);
+        let result = verify_attestation(&attestation, &[wrong_key.verifying_key()]);
         assert!(result.is_err());
     }
 
@@ -479,6 +552,7 @@ mod tests {
                 os: "linux".to_string(),
                 arch: "x86_64".to_string(),
             },
+            statement: sample_statement(),
             signature: SignatureInfo {
                 algorithm: "ed25519".to_string(),
                 key_fingerprint: "sha256:fff".to_string(),
@@ -491,5 +565,6 @@ mod tests {
         assert_eq!(parsed.artifact.flags.len(), 2);
         assert_eq!(parsed.provenance.layers.len(), 1);
         assert_eq!(parsed.provenance.layers[0].kind, "runtime");
+        assert_eq!(parsed.statement.statement_type, INTOTO_STATEMENT_TYPE);
     }
 }

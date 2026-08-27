@@ -19,6 +19,7 @@ pub mod format;
 pub mod gpu;
 pub mod include;
 pub mod inference;
+pub mod intoto;
 pub mod layer;
 pub mod legacy;
 pub mod manifest;

@@ -27,21 +27,64 @@ pub struct ArtifactSummary {
     pub arch: String,
 }
 
-/// Software bill of materials.
+/// A `CycloneDX`-compatible software bill of materials.
+///
+/// Fields follow the `CycloneDX` 1.5 JSON schema (`bomFormat`, `specVersion`,
+/// `serialNumber`, `version`, `components`) so the output is consumable by
+/// standard `CycloneDX` tooling.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Sbom {
-    pub format: String,
+    pub bom_format: String,
+    pub spec_version: String,
+    pub serial_number: String,
+    pub version: u32,
     pub components: Vec<SbomComponent>,
 }
 
-/// A single component in the SBOM.
+/// A single component in the SBOM (`CycloneDX` `component`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SbomComponent {
     #[serde(rename = "type")]
     pub component_type: String,
     pub name: String,
-    pub hash: String,
+    pub hashes: Vec<CycloneHash>,
     pub size: u64,
+}
+
+/// A `CycloneDX` `hash` entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CycloneHash {
+    pub alg: String,
+    pub value: String,
+}
+
+/// New `CycloneDX` SBOM with a generated `serialNumber`.
+pub fn new_sbom() -> Sbom {
+    Sbom {
+        bom_format: "CycloneDX".to_string(),
+        spec_version: "1.5".to_string(),
+        serial_number: format!("urn:uuid:{}", uuid_v4()),
+        version: 1,
+        components: Vec::new(),
+    }
+}
+
+/// Generate a UUID v4 string for the `CycloneDX` `serialNumber`.
+fn uuid_v4() -> String {
+    use rand::Rng;
+    let mut rng = rand::rngs::OsRng;
+    let mut bytes = [0u8; 16];
+    rng.fill(&mut bytes);
+    // RFC 4122: version 4, variant 10xx.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11],
+        bytes[12], bytes[13], bytes[14], bytes[15],
+    )
 }
 
 /// Summary of the attestation chain.
@@ -92,19 +135,29 @@ pub fn generate_sbom(meta: &serde_json::Value) -> Sbom {
                 "layer"
             };
 
+            let hashes = layer
+                .get("sha256")
+                .and_then(|v| v.as_str())
+                .map(|s| {
+                    vec![CycloneHash {
+                        alg: "SHA-256".to_string(),
+                        value: s.to_string(),
+                    }]
+                })
+                .unwrap_or_default();
+
             components.push(SbomComponent {
                 component_type: component_type.to_string(),
                 name,
-                hash: "sha256:unavailable".to_string(),
+                hashes,
                 size,
             });
         }
     }
 
-    Sbom {
-        format: "erebus-sbom/v1".to_string(),
-        components,
-    }
+    let mut sbom = new_sbom();
+    sbom.components = components;
+    sbom
 }
 
 /// Aggregate a list of attestations into a chain summary.
@@ -197,7 +250,8 @@ mod tests {
     fn sbom_empty_when_no_layers() {
         let meta = serde_json::json!({});
         let sbom = generate_sbom(&meta);
-        assert_eq!(sbom.format, "erebus-sbom/v1");
+        assert_eq!(sbom.bom_format, "CycloneDX");
+        assert_eq!(sbom.spec_version, "1.5");
         assert!(sbom.components.is_empty());
     }
 
@@ -250,6 +304,12 @@ mod tests {
                 os: "linux".to_string(),
                 arch: "x86_64".to_string(),
             },
+            statement: crate::intoto::InTotoStatement {
+                statement_type: crate::intoto::INTOTO_STATEMENT_TYPE.to_string(),
+                subject: vec![],
+                predicate_type: crate::intoto::EREBUS_PREDICATE_TYPE.to_string(),
+                predicate: serde_json::json!({}),
+            },
             signature: crate::attest::SignatureInfo {
                 algorithm: "ed25519".to_string(),
                 key_fingerprint: "sha256:eee".to_string(),
@@ -274,9 +334,18 @@ mod tests {
                 os: "linux".to_string(),
                 arch: "x86_64".to_string(),
             },
-            sbom: Sbom {
-                format: "erebus-sbom/v1".to_string(),
-                components: vec![],
+            sbom: {
+                let mut sbom = new_sbom();
+                sbom.components = vec![SbomComponent {
+                    component_type: "runtime".to_string(),
+                    name: "runtime/python3".to_string(),
+                    hashes: vec![CycloneHash {
+                        alg: "SHA-256".to_string(),
+                        value: "abc".to_string(),
+                    }],
+                    size: 1024,
+                }];
+                sbom
             },
             attestation_chain: AttestationChain {
                 count: 0,
@@ -299,6 +368,8 @@ mod tests {
         let parsed: AuditReport = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.spec_version, "1.0");
         assert_eq!(parsed.report_type, "erebus-audit");
-        assert!(parsed.sbom.components.is_empty());
+        assert_eq!(parsed.sbom.components.len(), 1);
+        assert_eq!(parsed.sbom.components[0].hashes[0].alg, "SHA-256");
+        assert_eq!(parsed.sbom.components[0].hashes[0].value, "abc");
     }
 }
