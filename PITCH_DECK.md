@@ -92,7 +92,7 @@ Ted Kouhouenou · Lomé, Togo · ted.kouhouenou@groupecerco.com
 | **Tests** | 400+ unit + integration + chaos (SIGKILL mid-extraction, tampered bundles) |
 | **Security** | CSO audit: 0 critical, 3 high fixed; Ed25519 v2.2 (CVE-2023-48022 mitigated) |
 | **Binaries** | Universal: x86_64 + ARM64 (Linux/macOS) + Windows PE stub |
-| **SISR benchmark** | Llama 3.1 8B Q4_K_M: 4.5 GB → 48 MB delta (99% savings) |
+| **SISR benchmark** | Measured through the engine: 100 MB payload, 1% change → 1.28 MB delta (98.7% savings) |
 | **Registry** | Auth (scrypt), quotas, SISR stats, MCP server listing |
 
 **Live**: `cargo install erebus` → `erebus build ./agent --embed-gemma-2b -o agent.erebus`
