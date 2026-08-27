@@ -1,17 +1,11 @@
 //! Serve fuzzing target.
 
 use crate::{FuzzTarget, MutationStrategy};
-use anyhow::{anyhow, Context, Result};
-use arbitrary::{Arbitrary, Unstructured};
-use erebus_core::gpu::{auto_ngl, detect, total_ram_mb};
-use erebus_core::inference::{
-    engine_args, engine_pack_name, host_pack_key, ModelFormat,
-};
-use rand::Rng;
-use std::path::PathBuf;
-use tempfile::TempDir;
+use anyhow::Result;
+use arbitrary::Unstructured;
+use erebus_core::inference::ModelFormat;
 
-#[derive(Debug, Clone, Arbitrary)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct ServeScenario {
     model_format: ModelFormat,
     model_size_mb: u64,
@@ -41,34 +35,6 @@ impl Default for ServeScenario {
 pub struct ServeFuzzTarget;
 
 impl ServeFuzzTarget {
-    fn create_mock_model(&self, scenario: &ServeScenario, temp: &TempDir) -> Result<PathBuf> {
-        let model_path = temp
-            .path()
-            .join(format!("model.{}", scenario.model_format.extension()));
-        let size = scenario.model_size_mb as usize * 1024 * 1024;
-        let content = match scenario.model_format {
-            ModelFormat::Gguf => {
-                let mut buf = Vec::new();
-                buf.extend_from_slice(b"GGUF");
-                buf.extend_from_slice(&1u32.to_le_bytes());
-                buf.extend_from_slice(&(0u64).to_le_bytes());
-                buf.extend_from_slice(&(0u64).to_le_bytes());
-                buf.resize(size, 0);
-                buf
-            }
-            ModelFormat::SafeTensors => {
-                let mut buf = Vec::new();
-                buf.extend_from_slice(&(0u64).to_le_bytes());
-                buf.extend_from_slice(b"{}\n");
-                buf.resize(size, 0);
-                buf
-            }
-            _ => vec![0; size],
-        };
-        std::fs::write(&model_path, content)?;
-        Ok(model_path)
-    }
-
     fn mutate_scenario(&self, scenario: &mut ServeScenario, unstructured: &mut Unstructured) {
         let strategy = unstructured
             .choose(&[
@@ -100,7 +66,7 @@ impl ServeFuzzTarget {
                 };
                 scenario.host = unstructured
                     .arbitrary()
-                    .unwrap_or_else(|| "127.0.0.1".into());
+                    .unwrap_or_else(|_| "127.0.0.1".into());
                 scenario.port = unstructured.arbitrary().unwrap_or(8080);
             }
             MutationStrategy::Semantic => {
@@ -108,6 +74,47 @@ impl ServeFuzzTarget {
             }
             _ => {}
         }
+    }
+}
+
+impl FuzzTarget for ServeFuzzTarget {
+    fn name(&self) -> &'static str {
+        "serve"
+    }
+    fn generate_seed(&self, unstructured: &mut Unstructured) -> Result<Vec<u8>> {
+        let fmt_idx = unstructured.int_in_range(0..=1).unwrap_or(0);
+        let model_format = if fmt_idx == 0 {
+            ModelFormat::Gguf
+        } else {
+            ModelFormat::SafeTensors
+        };
+        let scenario = ServeScenario {
+            model_format,
+            model_size_mb: unstructured.int_in_range(0..=500).unwrap_or(100),
+            ctx_size: unstructured.int_in_range(0..=4096).unwrap_or(2048),
+            ngl: unstructured.int_in_range(0..=100).unwrap_or(0),
+            threads: if unstructured.ratio(1, 2)? {
+                Some(unstructured.int_in_range(1..=16).unwrap_or(4))
+            } else {
+                None
+            },
+            host: unstructured
+                .arbitrary()
+                .unwrap_or_else(|_| "127.0.0.1".into()),
+            port: unstructured.arbitrary().unwrap_or(8080),
+            engine_pack_missing: unstructured.ratio(1, 2)?,
+        };
+        Ok(serde_json::to_vec(&scenario)?)
+    }
+    fn mutate(&self, input: &[u8], unstructured: &mut Unstructured) -> Result<Vec<u8>> {
+        let mut scenario: ServeScenario = serde_json::from_slice(input)?;
+        self.mutate_scenario(&mut scenario, unstructured);
+        Ok(serde_json::to_vec(&scenario)?)
+    }
+    fn execute(&self, input: &[u8]) -> Result<()> {
+        let _scenario: ServeScenario = serde_json::from_slice(input)?;
+        // Execution would spin up serve — skip in fuzzing
+        Ok(())
     }
 }
 

@@ -2,8 +2,8 @@
 
 #![forbid(unsafe_code)]
 
-use anyhow::{anyhow, Context, Result};
-use arbitrary::{Arbitrary, Unstructured};
+use anyhow::Result;
+use arbitrary::Unstructured;
 
 use crate::cli_fuzz::CliFuzzTarget;
 use crate::format_fuzz::FormatFuzzTarget;
@@ -14,13 +14,11 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tempfile::TempDir;
 use tokio::sync::Mutex;
-use tokio::time::{interval, sleep};
+use tokio::time::interval;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CorpusEntry {
@@ -60,6 +58,8 @@ pub struct GlobalStats {
     pub crashes: AtomicU64,
     pub panics: AtomicU64,
     pub timeouts: AtomicU64,
+    pub corpus_size: AtomicU64,
+    pub unique_crashes: std::sync::Mutex<HashMap<String, u64>>,
 }
 
 impl GlobalStats {
@@ -71,6 +71,8 @@ impl GlobalStats {
     }
     pub fn record_crash(&self, sig: &str) {
         self.crashes.fetch_add(1, Ordering::Relaxed);
+        let mut m = self.unique_crashes.lock().unwrap();
+        *m.entry(sig.to_string()).or_insert(0) += 1;
     }
     pub fn record_panic(&self) {
         self.panics.fetch_add(1, Ordering::Relaxed);
@@ -78,13 +80,21 @@ impl GlobalStats {
     pub fn record_timeout(&self) {
         self.timeouts.fetch_add(1, Ordering::Relaxed);
     }
+    pub fn record_corpus(&self) {
+        self.corpus_size.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn record_unique_crash(&self, sig: String) {
+        let mut m = self.unique_crashes.lock().unwrap();
+        *m.entry(sig).or_insert(0) += 1;
+    }
     pub fn snapshot(&self) -> FuzzStats {
         FuzzStats {
             iterations: self.iterations.load(Ordering::Relaxed),
             crashes: self.crashes.load(Ordering::Relaxed),
             panics: self.panics.load(Ordering::Relaxed),
             timeouts: self.timeouts.load(Ordering::Relaxed),
-            unique_crashes: HashMap::new(),
+            unique_crashes: self.unique_crashes.lock().unwrap().clone(),
+            corpus_size: self.corpus_size.load(Ordering::Relaxed),
         }
     }
 }
@@ -96,21 +106,18 @@ pub struct FuzzStats {
     pub panics: u64,
     pub timeouts: u64,
     pub unique_crashes: HashMap<String, u64>,
+    pub corpus_size: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum MutationStrategy {
     BitFlip,
     ByteInsertDelete,
     Structured,
     Semantic,
+    Crossover,
+    #[default]
     Havoc,
-}
-
-impl Default for MutationStrategy {
-    fn default() -> Self {
-        MutationStrategy::Havoc
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +134,8 @@ pub struct FuzzConfig {
     pub stats_print_interval: Duration,
     pub mutation_strategy: MutationStrategy,
     pub max_input_size: usize,
+    pub enable_cross_over: bool,
+    pub minimize_crashes: bool,
 }
 
 impl Default for FuzzConfig {
@@ -150,6 +159,8 @@ impl Default for FuzzConfig {
             stats_print_interval: Duration::from_secs(10),
             mutation_strategy: MutationStrategy::Havoc,
             max_input_size: 10 * 1024 * 1024,
+            enable_cross_over: true,
+            minimize_crashes: true,
         }
     }
 }
@@ -168,30 +179,28 @@ pub trait FuzzTarget: Send + Sync {
 }
 
 pub struct TargetRegistry {
-    targets: std::collections::HashMap<&'static str, Box<dyn FuzzTarget>>,
+    targets: std::collections::HashMap<&'static str, Arc<dyn FuzzTarget>>,
 }
 
 impl TargetRegistry {
     pub fn new() -> Self {
-        let mut targets = std::collections::HashMap::new();
-        targets.insert("format", Box::new(FormatFuzzTarget) as Box<dyn FuzzTarget>);
-        targets.insert("stub", Box::new(StubFuzzTarget) as Box<dyn FuzzTarget>);
-        targets.insert("cli", Box::new(CliFuzzTarget) as Box<dyn FuzzTarget>);
-        targets.insert(
-            "registry",
-            Box::new(RegistryFuzzTarget::default()) as Box<dyn FuzzTarget>,
-        );
-        targets.insert("serve", Box::new(ServeFuzzTarget) as Box<dyn FuzzTarget>);
+        let mut targets: std::collections::HashMap<&'static str, Arc<dyn FuzzTarget>> =
+            std::collections::HashMap::new();
+        targets.insert("format", Arc::new(FormatFuzzTarget));
+        targets.insert("stub", Arc::new(StubFuzzTarget));
+        targets.insert("cli", Arc::new(CliFuzzTarget));
+        targets.insert("registry", Arc::new(RegistryFuzzTarget));
+        targets.insert("serve", Arc::new(ServeFuzzTarget));
         Self { targets }
     }
-    pub fn get(&self, name: &str) -> Option<&dyn FuzzTarget> {
-        self.targets.get(name).map(|b| b.as_ref())
+    pub fn get(&self, name: &str) -> Option<Arc<dyn FuzzTarget>> {
+        self.targets.get(name).cloned()
     }
     pub fn all_names(&self) -> Vec<&'static str> {
         self.targets.keys().copied().collect()
     }
-    pub fn all_targets(&self) -> Vec<&dyn FuzzTarget> {
-        self.targets.values().map(|b| b.as_ref()).collect()
+    pub fn all_targets(&self) -> Vec<Arc<dyn FuzzTarget>> {
+        self.targets.values().cloned().collect()
     }
 }
 
@@ -233,7 +242,7 @@ impl FuzzHarness {
                 for entry in std::fs::read_dir(dir)? {
                     let entry = entry?;
                     let path = entry.path();
-                    if path.extension().map_or(false, |e| e == "bin") {
+                    if path.extension().is_some_and(|e| e == "bin") {
                         if let Ok(data) = std::fs::read(&path) {
                             if data.len() <= self.config.max_input_size {
                                 corpus.push(CorpusEntry::new(data));
@@ -345,17 +354,17 @@ impl Clone for FuzzHarness {
 }
 
 async fn worker_loop(
-    worker_id: usize,
-    targets: Vec<&dyn FuzzTarget>,
+    _worker_id: usize,
+    targets: Vec<Arc<dyn FuzzTarget>>,
     config: FuzzConfig,
     global_stats: Arc<GlobalStats>,
     corpus: Arc<Mutex<Vec<CorpusEntry>>>,
-    crash_cases: Arc<Mutex<Vec<CrashCase>>>,
+    _crash_cases: Arc<Mutex<Vec<CrashCase>>>,
     seed: u64,
 ) -> Result<()> {
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
     let timeout = config.timeout_per_iteration;
-    let mut iteration = 0u64;
+    let iteration = 0u64;
     let deadline = config.duration.map(|d| Instant::now() + d);
     loop {
         if let Some(d) = deadline {
@@ -368,36 +377,47 @@ async fn worker_loop(
                 break;
             }
         }
-        let target = targets[rng.gen_range(0..targets.len())];
+        let target = targets[rng.gen_range(0..targets.len())].clone();
         let input = if rng.gen_bool(0.3) && {
             let c = corpus.lock().await;
             !c.is_empty()
         } {
             let c = corpus.lock().await;
-            let entry = c.choose(&mut rng).unwrap();
+            let len = c.len();
+            let idx = rng.gen_range(0..len);
+            let entry = &c[idx];
             let mut u = Unstructured::new(&entry.data);
             target.mutate(&entry.data, &mut u)?
         } else {
-            let mut u = Unstructured::new(&rng.gen::<[u8; 32]>());
+            let seed_bytes = rng.gen::<[u8; 32]>();
+            let mut u = Unstructured::new(&seed_bytes);
             target.generate_seed(&mut u)?
         };
         if input.len() > config.max_input_size {
             continue;
         }
         let target_name = target.name();
-        let result = tokio::time::timeout(timeout, target.execute(&input)).await;
+        // Execute is sync in targets; run in blocking pool to avoid blocking tokio
+        let input_owned = input.to_vec();
+        let _target_name_owned = target_name.to_string();
+        let execute_fut = tokio::task::spawn_blocking(move || target.execute(&input_owned));
+        let result = tokio::time::timeout(timeout, execute_fut).await;
         global_stats.record_iteration();
         match result {
-            Ok(Ok(())) => {
+            Ok(Ok(Ok(()))) => {
                 if config.enable_cross_over && rng.gen_bool(0.1) {
                     let mut c = corpus.lock().await;
                     if c.len() < 10000 {
                         c.push(CorpusEntry::new(input));
+                        global_stats.record_corpus();
                     }
                 }
             }
-            Ok(Err(e)) => {
+            Ok(Ok(Err(e))) => {
                 global_stats.record_crash(&format!("{}:{}", target_name, e));
+            }
+            Ok(Err(e)) => {
+                global_stats.record_crash(&format!("{}:join error:{}", target_name, e));
             }
             Err(_) => {
                 global_stats.record_timeout();
@@ -411,7 +431,7 @@ async fn periodic_tasks(
     global_stats: Arc<GlobalStats>,
     config: FuzzConfig,
     corpus: Arc<Mutex<Vec<CorpusEntry>>>,
-    crash_cases: Arc<Mutex<Vec<CrashCase>>>,
+    _crash_cases: Arc<Mutex<Vec<CrashCase>>>,
     harness: FuzzHarness,
 ) {
     let mut stats_interval = interval(config.stats_print_interval);

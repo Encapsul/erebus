@@ -10,7 +10,8 @@
 
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ModelFormat {
     Gguf,
     SafeTensors,
@@ -26,6 +27,17 @@ impl ModelFormat {
             ModelFormat::SafeTensors => "safetensors",
             ModelFormat::Onnx => "onnx",
             ModelFormat::TensorRt => "tensorrt",
+            ModelFormat::Mlx => "mlx",
+        }
+    }
+
+    /// File extension for this model format (without leading dot).
+    pub fn extension(self) -> &'static str {
+        match self {
+            ModelFormat::Gguf => "gguf",
+            ModelFormat::SafeTensors => "safetensors",
+            ModelFormat::Onnx => "onnx",
+            ModelFormat::TensorRt => "plan",
             ModelFormat::Mlx => "mlx",
         }
     }

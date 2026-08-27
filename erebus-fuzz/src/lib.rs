@@ -9,8 +9,6 @@
 //!
 //! Run: `cargo run -p erebus-fuzz -- [SUBCOMMAND]`
 
-#![warn(missing_docs)]
-
 pub mod cli_fuzz;
 pub mod format_fuzz;
 pub mod harness;

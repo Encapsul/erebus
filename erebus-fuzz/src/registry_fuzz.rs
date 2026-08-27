@@ -1,17 +1,12 @@
 //! Registry fuzzing target (public API only).
 
 use crate::{FuzzTarget, MutationStrategy};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use arbitrary::{Arbitrary, Unstructured};
-use erebus_core::registry::{LayerEntry, LayerRegistry};
-use rand::Rng;
-use std::collections::HashMap;
-use std::sync::Arc;
 use tempfile::TempDir;
-use tokio::sync::Mutex;
 
 /// Local copy of LayerKind for fuzzing (core keeps it private).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Arbitrary)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Arbitrary, serde::Serialize, serde::Deserialize)]
 enum LayerKindLocal {
     Runtime,
     Model,
@@ -20,39 +15,12 @@ enum LayerKindLocal {
     Custom,
 }
 
-pub struct RegistryFuzzTarget {
-    temp_dir: TempDir,
-    layer_registry: Arc<Mutex<Option<erebus_core::registry::LayerRegistry>>>,
-}
-
-impl Default for RegistryFuzzTarget {
-    fn default() -> Self {
-        let temp_dir = TempDir::new().expect("temp dir");
-        Self {
-            temp_dir,
-            layer_registry: Arc::new(Mutex::new(None)),
-        }
-    }
-}
+pub struct RegistryFuzzTarget;
 
 impl RegistryFuzzTarget {
-    async fn get_layer_registry(
-        &self,
-    ) -> anyhow::Result<Arc<Mutex<erebus_core::registry::LayerRegistry>>> {
-        let mut guard = self.layer_registry.lock().await;
-        if guard.is_none() {
-            let reg =
-                erebus_core::registry::LayerRegistry::open(self.temp_dir.path().join("layers"))
-                    .context("opening layer registry")?;
-            *guard = Some(reg);
-        }
-        drop(guard);
-        Ok(self.layer_registry.clone())
-    }
-
     fn mutate_ops(
         &self,
-        ops: &mut [RegistryOp],
+        ops: &mut Vec<RegistryOp>,
         unstructured: &mut Unstructured,
     ) -> anyhow::Result<()> {
         let strategy =
@@ -70,10 +38,8 @@ impl RegistryFuzzTarget {
                     }
                 }
             }
-            MutationStrategy::Structured => {
-                if unstructured.ratio(1, 3)? && ops.len() < 50 {
-                    ops.push(RegistryOp::arbitrary(&mut Unstructured::new(&[]))?);
-                }
+            MutationStrategy::Structured if unstructured.ratio(1, 3)? && ops.len() < 50 => {
+                ops.push(RegistryOp::arbitrary(&mut Unstructured::new(&[]))?);
             }
             _ => {}
         }
@@ -81,31 +47,40 @@ impl RegistryFuzzTarget {
     }
 
     async fn execute_op(&self, op: &RegistryOp) -> anyhow::Result<()> {
-        let layer_reg = self.get_layer_registry().await?;
-        let mut reg_guard = layer_reg.lock().await;
+        // Create a fresh registry for each operation to avoid borrowing issues.
+        let temp_dir = TempDir::new()?;
+        let mut reg = erebus_core::registry::LayerRegistry::open(&temp_dir.path().join("layers"))
+            .context("opening layer registry")?;
         match op {
             RegistryOp::CreateLayer { name, kind, data } => {
-                let _ = reg_guard.push(name, kind, data)?;
+                let core_kind = match kind {
+                    LayerKindLocal::Runtime => erebus_core::layer::LayerKind::Runtime,
+                    LayerKindLocal::Model => erebus_core::layer::LayerKind::Model,
+                    LayerKindLocal::Tool => erebus_core::layer::LayerKind::Tool,
+                    LayerKindLocal::Config => erebus_core::layer::LayerKind::Config,
+                    LayerKindLocal::Custom => erebus_core::layer::LayerKind::Custom,
+                };
+                let _ = reg.push(name, core_kind, data)?;
             }
             RegistryOp::MaterializeLayer { name } => {
                 let tmp = std::env::temp_dir().join("materialized");
-                let _ = reg_guard.materialize(name, &tmp)?;
+                let _ = reg.materialize(name, &tmp)?;
             }
             RegistryOp::DeleteLayer { name } => {
-                let _ = reg_guard.remove(name)?;
+                let _ = reg.remove(name)?;
             }
             RegistryOp::ListLayers => {
-                let _ = reg_guard.list()?;
+                let _ = reg.list()?;
             }
             RegistryOp::ResolveLayer { name } => {
-                let _ = reg_guard.resolve(name)?;
+                let _ = reg.resolve(name)?;
             }
         }
         Ok(())
     }
 }
 
-#[derive(Debug, Clone, Arbitrary, PartialEq, Eq)]
+#[derive(Debug, Clone, Arbitrary, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum RegistryOp {
     CreateLayer {
         name: String,
@@ -124,12 +99,40 @@ enum RegistryOp {
     },
 }
 
+impl FuzzTarget for RegistryFuzzTarget {
+    fn name(&self) -> &'static str {
+        "registry"
+    }
+    fn generate_seed(&self, unstructured: &mut Unstructured) -> Result<Vec<u8>> {
+        let ops: Vec<RegistryOp> = (0..unstructured.int_in_range(1..=5)?)
+            .map(|_| RegistryOp::arbitrary(unstructured).map_err(anyhow::Error::from))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(serde_json::to_vec(&ops)?)
+    }
+    fn mutate(&self, input: &[u8], unstructured: &mut Unstructured) -> Result<Vec<u8>> {
+        let mut ops: Vec<RegistryOp> = serde_json::from_slice(input)?;
+        self.mutate_ops(&mut ops, unstructured)?;
+        Ok(serde_json::to_vec(&ops)?)
+    }
+    fn execute(&self, input: &[u8]) -> Result<()> {
+        let ops: Vec<RegistryOp> = serde_json::from_slice(input)?;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for op in ops {
+            rt.block_on(self.execute_op(&op))?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[tokio::test]
     async fn test_registry_target_creation() {
-        let target = RegistryFuzzTarget::default();
+        let target = RegistryFuzzTarget;
         assert_eq!(target.name(), "registry");
     }
 }

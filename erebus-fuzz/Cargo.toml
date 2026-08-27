@@ -6,12 +6,12 @@ publish = false
 
 [dependencies]
 erebus-core = { path = "../erebus-core" }
-erebus-stub = { path = "../erebus-stub" }
-erebus-cli = { path = "../erebus-cli" }
 arbitrary = { version = "1.3", features = ["derive"] }
 proptest = "1.0"
 rand = "0.8"
 rand_chacha = "0.3"
+num_cpus = "1.16"
+humantime = "2.1"
 tempfile = "3.8"
 anyhow = "1.0"
 sha2 = "0.10"

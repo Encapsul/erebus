@@ -1,12 +1,16 @@
 //! erebus-fuzz — high-throughput structure-aware fuzzer for the erebus ecosystem.
 
-use clap::{Parser, Subcommand};
-use erebus_fuzz::{FuzzConfig, FuzzHarness, TargetRegistry, MutationStrategy};
+use clap::Parser;
+use erebus_fuzz::{FuzzConfig, FuzzHarness, MutationStrategy, TargetRegistry};
 use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Parser, Debug)]
-#[command(name = "erebus-fuzz", version, about = "High-throughput structure-aware fuzzer for erebus")]
+#[command(
+    name = "erebus-fuzz",
+    version,
+    about = "High-throughput structure-aware fuzzer for erebus"
+)]
 struct Args {
     /// Target(s) to fuzz (comma-separated: format,stub,cli,registry,serve)
     #[arg(short, long, default_value = "format,stub,cli,registry,serve")]
@@ -109,13 +113,21 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let target_names: Vec<String> = args.targets.split(',').map(|s| s.trim().to_string()).collect();
+    let target_names: Vec<String> = args
+        .targets
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
 
     // Validate target names
     let registry = TargetRegistry::new();
     for name in &target_names {
         if registry.get(name).is_none() {
-            anyhow::bail!("unknown target: {}. Available: {:?}", name, registry.all_names());
+            anyhow::bail!(
+                "unknown target: {}. Available: {:?}",
+                name,
+                registry.all_names()
+            );
         }
     }
 
