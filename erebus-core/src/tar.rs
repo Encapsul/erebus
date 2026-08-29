@@ -251,9 +251,17 @@ fn is_executable_extension(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether a path should be marked executable when the source fs loses the
+/// exec bit (vfat). Any file under a directory named `bin` is a candidate
+/// runtime helper (interpreter, cli binary) regardless of its name.
+fn is_in_bin_dir(path: &Path) -> bool {
+    path.components()
+        .any(|c| matches!(c, Component::Normal(n) if n.eq_ignore_ascii_case("bin")))
+}
+
 /// Whether a file should be marked executable in the tar entry. On unix the
 /// source permission bits decide; on other platforms (e.g. vfat or windows)
-/// only the extension-based heuristic applies.
+/// only the extension-based heuristic and bin-directory heuristic apply.
 fn is_executable_file(path: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -264,7 +272,7 @@ fn is_executable_file(path: &Path) -> bool {
             return true;
         }
     }
-    is_executable_extension(path)
+    is_executable_extension(path) || is_in_bin_dir(path)
 }
 
 #[cfg(test)]
@@ -437,5 +445,57 @@ mod tests {
 
         let extracted = std::fs::read_to_string(dst.join("hello.txt")).unwrap();
         assert_eq!(extracted, "hello world");
+    }
+
+    #[test]
+    fn bin_dir_marks_files_executable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("helper"), b"not a script").unwrap();
+
+        let tar_bytes = create_deterministic_tar(&src).unwrap();
+        let mut archive = tar::Archive::new(&tar_bytes[..]);
+        let entry = archive
+            .entries()
+            .unwrap()
+            .find(|e| e.as_ref().unwrap().path().unwrap() == Path::new("helper"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            entry.header().mode().unwrap() & 0o111,
+            0,
+            "plain file not in bin/"
+        );
+    }
+
+    #[test]
+    fn bin_dir_file_gets_exec_bit_even_on_vfat_missing_perms() {
+        // Simulate a vfat-style file (no exec bit) that must still be marked
+        // executable at archive time because it lives in a bin/ directory.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src/bin");
+        std::fs::create_dir_all(&src).unwrap();
+        let helper = src.join("llama-cli");
+        std::fs::write(&helper, b"ELF").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        let tar_bytes = create_deterministic_tar(&tmp.path().join("src")).unwrap();
+        let mut archive = tar::Archive::new(&tar_bytes[..]);
+        let entry = archive
+            .entries()
+            .unwrap()
+            .find(|e| e.as_ref().unwrap().path().unwrap() == Path::new("bin/llama-cli"))
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            entry.header().mode().unwrap() & 0o111,
+            0,
+            "bin/ file must be +x"
+        );
     }
 }

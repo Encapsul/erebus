@@ -22,23 +22,31 @@ curl -X POST http://localhost:8000/infer -H "Content-Type: application/json" \
 
 ## Files
 
-- `app.py` - FastAPI server with llama.cpp inference
+- `app.py` - Flask server with llama.cpp inference
 - `requirements.txt` - Python dependencies (flask)
+- `models/model.gguf` - GGUF weights (downloaded, not committed)
+- `.deps/llama/` - bundled llama.cpp (`llama-cli` + libs, gitignored)
 - `README.md` - This file
 
 ## Model
 
-The agent expects a GGUF model at `/app/models/model.gguf` inside the extracted rootfs.
-When building with `--embed-model`, the model is embedded in the payload.
+The agent expects a GGUF model at `models/model.gguf` next to `app.py`. When
+building, the model is embedded in the payload as a ModelLayer:
 
 ```bash
-erebus build . --embed-model model.gguf --embed-interpreter python3 -o agent.erebus
+erebus build . --embed-model models/model.gguf -o agent.erebus
 ```
+
+`app.py` resolves the model and `llama-cli` relative to its own location, so
+the same bundle runs inside the pivot_root sandbox (`/app`) and with
+`--isolation none` (rootfs under `~/.cache/erebus/<hash>/`).
 
 ## llama.cpp
 
-The agent expects `llama-cli` at `/usr/local/bin/llama-cli`. 
-For the demo, you can symlink or copy it there, or build llama.cpp static and embed it as a binary layer.
+A working `llama-cli` plus its shared libs live in `.deps/llama/` (this is
+gitignored; stage it manually, then `erebus build` bundles it). `app.py`
+prepends that directory to `LD_LIBRARY_PATH` for the subprocess so the
+bundled libs resolve against the system glibc.
 
 ## Endpoints
 

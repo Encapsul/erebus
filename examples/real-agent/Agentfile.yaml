@@ -29,5 +29,4 @@ build:
   landlock: true
   health_port: 8000
   env:
-    LLAMA_CLI: /app/bin/llama-cli
     PORT: "8000"

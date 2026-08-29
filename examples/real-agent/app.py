@@ -14,9 +14,13 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# Model path - can be overridden by env var
-MODEL_PATH = os.environ.get("MODEL_PATH", "/app/models/model.gguf")
-LLAMA_CLI = os.environ.get("LLAMA_CLI", "/usr/local/bin/llama-cli")
+# Model path - can be overridden by env var. Resolve relative to this file so
+# the bundle runs both inside the pivot_root sandbox (/app) and with
+# isolation=none (the script sits in ~/.cache/erebus/<hash>/rootfs/app).
+APP_DIR = Path(__file__).resolve().parent
+MODEL_PATH = os.environ.get("MODEL_PATH", str(APP_DIR / "models" / "model.gguf"))
+LLAMA_CLI = os.environ.get("LLAMA_CLI", str(APP_DIR / ".deps" / "llama" / "llama-cli"))
+LLAMA_LIB = str(APP_DIR / ".deps" / "llama")
 
 SYSTEM_PROMPT = """You are a helpful AI assistant running locally inside an erebus self-extracting binary.
 You have no internet access and run completely offline.
@@ -35,6 +39,7 @@ def run_inference(prompt: str, max_tokens: int = 512) -> str:
             "--top-p", "0.9",
             "--repeat-penalty", "1.1",
             "-c", "2048",
+            "-st",
             "--no-display-prompt",
         ]
 
@@ -44,14 +49,24 @@ def run_inference(prompt: str, max_tokens: int = 512) -> str:
         if ngl.isdigit() and int(ngl) > 0:
             cmd += ["-ngl", ngl]
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env={**os.environ, "LD_LIBRARY_PATH": LLAMA_LIB + ":" + os.environ.get("LD_LIBRARY_PATH", "")},
+        )
         
         if result.returncode != 0:
             return f"Error: {result.stderr}"
         
         # Extract just the generated response (after the prompt)
         output = result.stdout.strip()
-        return output
+        marker = f"User: {prompt}\n\nAssistant:"
+        if marker in output:
+            output = output.split(marker, 1)[1]
+            output = output.split("[ Prompt:", 1)[0]
+        return output.strip()
     
     except subprocess.TimeoutExpired:
         return "Error: Inference timed out"
