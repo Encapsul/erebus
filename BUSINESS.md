@@ -32,13 +32,17 @@ de conformité est riche → lock-in naturel.
 ## L'ICP réel
 
 ```
-🏥 Santé / défense / admin    air-gapped par réglementation
-                              HAS/ANSM, AANSSI, UNECE WP.29
+🛡️ Défense / admin           air-gapped par réglementation
+                              AANSSI, marchés publics
 🏭 Edge industriel            kiosques retail, usines, véhicules
                               « 500 machines, preuve à l'auditeur »
 📦 Startups IA soumises       EU AI Act high-risk
    à l'EU AI Act              documentation cycle de vie obligatoire
 ```
+
+Exclus : **Santé** (Lattice Health / Parachute / Wedge ont l'avance GTM),
+**devs OSS / hobbyistes** (ne paient pas). Cross-industrie + air-gapped +
+chaîne d'attestation signée = notre différenciateur.
 
 Pitch une ligne : *« Sign. Track. Prove. — Ship AI agents with verifiable
 attestation. »*

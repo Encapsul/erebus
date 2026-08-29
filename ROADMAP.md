@@ -97,7 +97,7 @@ Voir [HANDOFF.md](HANDOFF.md) et [benchmarks/](benchmarks/README.md) pour les pr
 
 ### 1.5 Nouveau pitch BUSINESS.md
 
-- [ ] Réécrire `BUSINESS.md` slide YC et ICP :
+- [x] Réécrire `BUSINESS.md` slide YC et ICP :
   « Nous fournissons la preuve cryptographique de ce qui a exécuté dans
   chaque agent IA, sur chaque machine, à chaque instant. Les entreprises
   réglementées ont besoin de cette traçabilité pour se conformer à
@@ -167,21 +167,21 @@ erebus attest <file.erebus> [-o <output.json>] [--key <key>]
 
 ### Fichiers
 
-- [ ] `erebus-core/src/attest.rs` : **Nouveau module.** Types `Attestation`,
+- [x] `erebus-core/src/attest.rs` : **Nouveau module.** Types `Attestation`,
   `ArtifactInfo`, `ProvenanceInfo`, `ExecutionInfo`, `SignatureInfo`.
   Fonctions `generate_attestation()`, `serialize_attestation()`,
   `verify_attestation()`. Zéro unsafe.
-- [ ] `erebus-core/src/lib.rs` : Ajouter `pub mod attest;`
-- [ ] `erebus-cli/src/commands/attest.rs` : **Nouvelle commande.**
-- [ ] `erebus-cli/src/commands/mod.rs` : Ajouter `pub mod attest;`
-- [ ] `erebus-cli/src/main.rs` : Ajouter `Attest` au enum `Subcommand`
+- [x] `erebus-core/src/lib.rs` : Ajouter `pub mod attest;`
+- [x] `erebus-cli/src/commands/attest.rs` : **Nouvelle commande.**
+- [x] `erebus-cli/src/commands/mod.rs` : Ajouter `pub mod attest;`
+- [x] `erebus-cli/src/main.rs` : Ajouter `Attest` au enum `Subcommand`
 
 ### Tests
 
-- [ ] Unit core : roundtrip generate → serialize → parse → verify
-- [ ] Unit core : signature corrompue → erreur
-- [ ] Integration CLI : build → sign → attest → verify-attest
-- [ ] Proptest : document valide après serialization
+- [x] Unit core : roundtrip generate → serialize → parse → verify
+- [x] Unit core : signature corrompue → erreur
+- [x] Integration CLI : build → sign → attest → verify-attest
+- [x] Proptest : document valide après serialization
 
 ---
 
@@ -237,13 +237,13 @@ erebus audit <file.erebus> [--attest-dir <dir>] [-o <output.json>]
 
 ### Fichiers
 
-- [ ] `erebus-core/src/audit.rs` : **Nouveau module.** Types `AuditReport`,
+- [x] `erebus-core/src/audit.rs` : **Nouveau module.** Types `AuditReport`,
   `SbomEntry`, `AttestationChain`. Fonctions `generate_sbom()`,
   `aggregate_attestations()`, `generate_audit_report()`.
-- [ ] `erebus-core/src/lib.rs` : Ajouter `pub mod audit;`
-- [ ] `erebus-cli/src/commands/audit.rs` : **Nouvelle commande.**
-- [ ] `erebus-cli/src/commands/mod.rs` : Ajouter `pub mod audit;`
-- [ ] `erebus-cli/src/main.rs` : Ajouter `Audit` au enum `Subcommand`
+- [x] `erebus-core/src/lib.rs` : Ajouter `pub mod audit;`
+- [x] `erebus-cli/src/commands/audit.rs` : **Nouvelle commande.**
+- [x] `erebus-cli/src/commands/mod.rs` : Ajouter `pub mod audit;`
+- [x] `erebus-cli/src/main.rs` : Ajouter `Audit` au enum `Subcommand`
 
 ---
 

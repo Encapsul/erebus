@@ -40,6 +40,8 @@ demo-yc/
 useful_commands.md
 session-*.md
 MATOMO.md
+# Internal strategy / pitch / competitive analysis (see research/hn-post-draft.md)
+research/
 # OpenCode plugin dependencies (installed via npm)
 .opencode/node_modules/
 # supply-chain-risk-auditor skill output (results.md written on each audit)
