@@ -762,12 +762,14 @@ pub(crate) fn build_single_target(
                     // Reuse `model_name` (already derived from the source
                     // path) instead of re-deriving from the destination — a
                     // path with no filename cannot panic here.
+                    use sha2::{Digest, Sha256};
+                    let model_sha256 = hex::encode(Sha256::digest(&model_bytes));
                     let model_layer = ModelLayer {
                         name: model_name.clone(),
                         format: "gguf".to_string(),
                         path: format!("models/{model_name}"),
                         size: model_bytes.len() as u64,
-                        metadata: None,
+                        metadata: Some(serde_json::json!({ "sha256": model_sha256 })),
                     };
                     layers.push(SerializableLayer::Model(model_layer));
                 }

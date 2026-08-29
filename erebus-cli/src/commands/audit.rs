@@ -84,6 +84,7 @@ pub fn run(args: AuditArgs) -> Result<()> {
     let attest_dir = args.attest_dir.unwrap_or_else(|| {
         args.file
             .parent()
+            .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf()
     });

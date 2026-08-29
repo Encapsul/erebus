@@ -170,6 +170,8 @@ pub fn generate_attestation(
         .map(|s| s.to_string());
 
     // Extract layers
+    let rt_deps_hash = metadata.get("rt_deps_hash").and_then(|v| v.as_str());
+    let runtime_name = metadata.get("runtime").and_then(|v| v.as_str());
     let layers: Vec<LayerInfo> = metadata
         .get("layers")
         .and_then(|v| v.as_array())
@@ -178,9 +180,30 @@ pub fn generate_attestation(
                 .filter_map(|layer| {
                     let name = layer.get("name")?.as_str()?.to_string();
                     let kind = layer.get("kind")?.as_str()?.to_string();
+                    // Model layers carry their SHA-256 in `metadata.sha256`
+                    // (embedded at build time); runtime layers fall back to the
+                    // metadata-level `rt_deps_hash`.
                     let sha256 = layer
                         .get("sha256")
                         .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| {
+                            layer
+                                .get("metadata")
+                                .and_then(|m| m.get("sha256"))
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty())
+                        })
+                        .or_else(|| {
+                            if kind == "runtime"
+                                && runtime_name == Some(name.as_str())
+                                && rt_deps_hash.is_some()
+                            {
+                                rt_deps_hash
+                            } else {
+                                None
+                            }
+                        })
                         .map(|s| format!("sha256:{s}"))
                         .unwrap_or_default();
                     Some(LayerInfo { name, kind, sha256 })

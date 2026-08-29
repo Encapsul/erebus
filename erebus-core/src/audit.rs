@@ -113,7 +113,17 @@ pub struct ReportSignature {
 }
 
 /// Generate an SBOM from the metadata JSON of a .erebus binary.
+///
+/// Layer `kind` is preferred over the display name for categorization, since
+/// layer names (e.g. `model.gguf`) don't carry the `model/` prefix the old
+/// name-based heuristic expected. Sizes come from the `size` field (falling
+/// back to the historical `usize` key). Layer hashes are resolved from the
+/// embedded per-layer `sha256` when present; the runtime layer falls back to
+/// the metadata-level `rt_deps_hash`, which hashes the runtime dependency set.
 pub fn generate_sbom(meta: &serde_json::Value) -> Sbom {
+    let rt_deps_hash = meta.get("rt_deps_hash").and_then(|v| v.as_str());
+    let runtime_name = meta.get("runtime").and_then(|v| v.as_str());
+
     let mut components = Vec::new();
 
     if let Some(layers) = meta.get("layers").and_then(|v| v.as_array()) {
@@ -123,21 +133,58 @@ pub fn generate_sbom(meta: &serde_json::Value) -> Sbom {
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
                 .to_string();
-            let size = layer.get("usize").and_then(|v| v.as_u64()).unwrap_or(0);
 
-            let component_type = if name.starts_with("runtime/") {
-                "runtime"
-            } else if name.starts_with("model/") {
-                "model"
-            } else if name.starts_with("extension/") {
-                "extension"
-            } else {
-                "layer"
+            let size = layer
+                .get("size")
+                .and_then(|v| v.as_u64())
+                .or_else(|| layer.get("usize").and_then(|v| v.as_u64()))
+                .unwrap_or(0);
+
+            let component_type = match layer.get("kind").and_then(|v| v.as_str()) {
+                Some("runtime") => "runtime",
+                Some("model") => "model",
+                Some("tool") => "tool",
+                Some("config") => "config",
+                Some("extension") => "extension",
+                // Legacy metadata without a `kind` field: fall back to the name.
+                _ => {
+                    if name.starts_with("runtime/") {
+                        "runtime"
+                    } else if name.starts_with("model/") {
+                        "model"
+                    } else if name.starts_with("extension/") {
+                        "extension"
+                    } else {
+                        "layer"
+                    }
+                }
             };
 
-            let hashes = layer
+            let layer_hash = layer
                 .get("sha256")
                 .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    layer
+                        .get("metadata")
+                        .and_then(|m| m.get("sha256"))
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                })
+                // The runtime layer has no per-layer file to hash; its
+                // dependency set hash (rt_deps_hash) is the honest proxy.
+                .or_else(|| {
+                    if component_type == "runtime"
+                        && runtime_name == Some(name.as_str())
+                        && rt_deps_hash.is_some()
+                    {
+                        rt_deps_hash
+                    } else {
+                        None
+                    }
+                });
+
+            let hashes = layer_hash
                 .map(|s| {
                     vec![CycloneHash {
                         alg: "SHA-256".to_string(),
@@ -271,6 +318,44 @@ mod tests {
         assert_eq!(sbom.components[1].component_type, "model");
         assert_eq!(sbom.components[2].component_type, "extension");
         assert_eq!(sbom.components[3].component_type, "layer");
+    }
+
+    #[test]
+    fn sbom_uses_kind_and_nested_hash_and_size() {
+        let meta = serde_json::json!({
+            "runtime": "python",
+            "rt_deps_hash": "aabbccdd",
+            "layers": [
+                {
+                    "kind": "runtime",
+                    "name": "python",
+                    "entrypoint": ["python3", "app.py"],
+                    "env": [],
+                    "capabilities": []
+                },
+                {
+                    "kind": "model",
+                    "name": "model.gguf",
+                    "path": "models/model.gguf",
+                    "size": 643728768,
+                    "metadata": { "sha256": "deadbeef" }
+                },
+            ]
+        });
+        let sbom = generate_sbom(&meta);
+        assert_eq!(sbom.components.len(), 2);
+        // Model: type + numeric size from `size` key + SHA-256 from `metadata.sha256`.
+        let model = &sbom.components[1];
+        assert_eq!(model.component_type, "model");
+        assert_eq!(model.size, 643728768);
+        assert_eq!(model.hashes.len(), 1);
+        assert_eq!(model.hashes[0].alg, "SHA-256");
+        assert_eq!(model.hashes[0].value, "deadbeef");
+        // Runtime: type from `kind`, size 0, hash falls back to `rt_deps_hash`.
+        let runtime = &sbom.components[0];
+        assert_eq!(runtime.component_type, "runtime");
+        assert_eq!(runtime.hashes.len(), 1);
+        assert_eq!(runtime.hashes[0].value, "aabbccdd");
     }
 
     #[test]
