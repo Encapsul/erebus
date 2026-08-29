@@ -36,11 +36,15 @@ pub fn enter_userns() -> io::Result<()> {
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
 
-    // SAFETY: unshare(2) with CLONE_NEWUSER|CLONE_NEWNS creates a new user
-    // and mount namespace. CLONE_NEWUSER does not require CAP_SYS_ADMIN.
-    // The uid_map/gid_map writes below grant full UID/GID mapping.
+    // Enter the user namespace FIRST. Requesting CLONE_NEWUSER and
+    // CLONE_NEWNS in a single unshare(2) is rejected by the seccomp policy
+    // of many container runtimes, whereas a user namespace followed by a
+    // mount namespace is allowed once uid/gid are mapped. So we split the
+    // two into sequential calls.
+    // SAFETY: unshare(2) with CLONE_NEWUSER creates a new user namespace and
+    // does not require CAP_SYS_ADMIN (ANSSI DENV-STABLE: no nightly).
     unsafe {
-        let rc = libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS);
+        let rc = libc::unshare(libc::CLONE_NEWUSER);
         if rc != 0 {
             return Err(io::Error::last_os_error());
         }
@@ -49,6 +53,21 @@ pub fn enter_userns() -> io::Result<()> {
     write_proc("/proc/self/uid_map", &format!("0 {uid} 1"))?;
     write_proc("/proc/self/setgroups", "deny")?;
     write_proc("/proc/self/gid_map", &format!("0 {gid} 1"))?;
+
+    // Now that we are root inside the new user namespace, create a mount
+    // namespace. This is permitted here even though CLONE_NEWNS alone is
+    // blocked at the outset; the mount ns is created inside a fully mapped
+    // userns.
+    // SAFETY: unshare(2) with CLONE_NEWNS creates a new mount namespace;
+    // allowed now because the caller is mapped to root in the userns.
+    unsafe {
+        let rc = libc::unshare(libc::CLONE_NEWNS);
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+
+    Ok(())
 
     Ok(())
 }

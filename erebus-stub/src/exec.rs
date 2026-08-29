@@ -587,8 +587,6 @@ pub fn exec_app(meta: &Metadata, rootfs: &Path, app_config: &AppConfig) -> io::R
     #[cfg(all(unix, not(target_os = "linux")))]
     let use_pivot = false;
 
-    crate::health_gate::maybe_start_health(meta);
-
     // Sandbox flags only take effect on the pivot_root path (isolation >= 2).
     // Warn on the non-pivot path instead of silently ignoring the request —
     // metadata can be authored by any builder, not just the CLI. (macOS
@@ -615,6 +613,12 @@ pub fn exec_app(meta: &Metadata, rootfs: &Path, app_config: &AppConfig) -> io::R
     if use_pivot {
         enter_pivot_sandbox(rootfs, meta)?;
     }
+
+    // Start the health-check thread AFTER entering the namespaces. A running
+    // native thread makes `unshare(CLONE_NEWUSER)` fail with EINVAL (a
+    // multi-threaded process cannot enter a user namespace), so spawning the
+    // HTTP server earlier silently broke the sandbox.
+    crate::health_gate::maybe_start_health(meta);
 
     #[cfg(target_os = "macos")]
     {
