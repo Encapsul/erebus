@@ -24,12 +24,24 @@
 
 | Property | Value |
 |----------|-------|
-| Type | Deterministic seeded pseudo-random payload (xorshift64) |
-| Size | 100 MB |
+| Type | **Real GGUF weights** (TinyLlama-1.1B-Chat `Q4_K_M`) — see subsection below; plus deterministic seeded pseudo-random payload (xorshift64) as a scale reference |
+| Size | 613 MB (real) / 100 MB (synthetic) |
 | Change between v1→v2 | Nested (0.1% / 1% / 5% / 10% of payload) |
 | Chunk target | 64 KiB content-defined (FastCDC) |
 
-## Results — measured through the engine
+## Results — measured on a REAL model
+
+> The authoritative number for the pitch: a real 613 MB GGUF model, 1%
+> change. Measured by feeding the actual TinyLlama weights (not random
+> bytes) through the SISR engine.
+
+| Change | Full re-download | SISR delta (fetched) | Reused chunks | Fetched chunks | Savings |
+|--------|------------------|------------------------|---------------|----------------|---------|
+| **1%** (6.13 MB) | 613 MB | 6.27 MB | 5022 | 58 | **99.0%** |
+
+> Repro: `cargo run --release --example sisr_bench -- 0 1 examples/real-agent/models/model.gguf`
+
+## Results — synthetic scale reference (100 MB)
 
 | Change | Full re-download | SISR delta (fetched) | Reused chunks | Fetched chunks | Savings |
 |--------|------------------|------------------------|---------------|----------------|---------|
@@ -72,7 +84,10 @@ after the initial build.
 ## Reproduction
 
 ```bash
-# Real engine, 100 MB payload, 1% change
+# Real model (GGUF weights), 1% change
+cargo run --release --example sisr_bench -- 0 1 examples/real-agent/models/model.gguf
+
+# Real engine, 100 MB synthetic payload, 1% change
 bash scripts/bench_sisr_model.sh 100 1
 
 # Different size / change%

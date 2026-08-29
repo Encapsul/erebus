@@ -148,18 +148,25 @@ fn main() -> io::Result<()> {
         .max(1);
     let change_pct: f64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let change_pct = change_pct.clamp(0.0, 100.0);
+    // Optional third arg: a real file (e.g. a GGUF model) to use as payload
+    // instead of seeded synthetic bytes — validates the delta on real data.
+    let payload_file: Option<&str> = args.get(3).map(String::as_str);
 
-    let payload_bytes = payload_mb * 1024 * 1024;
     let work = tempfile::tempdir()?;
     let root = work.path();
 
-    let v1 = seeded_bytes(payload_bytes, 42);
+    let v1: Vec<u8> = match payload_file {
+        Some(path) => std::fs::read(path).map_err(io::Error::other)?,
+        None => seeded_bytes(payload_mb * 1024 * 1024, 42),
+    };
+    // For a real file, the report reflects the actual on-disk size.
+    let payload_mb = v1.len() as usize / (1024 * 1024);
     let cur = build_bundle(root, "app.erebus", &v1)?;
 
     let mut v2 = v1.clone();
-    let changed = (payload_bytes as f64 * change_pct / 100.0) as usize;
+    let changed = (v1.len() as f64 * change_pct / 100.0) as usize;
     if changed > 0 {
-        let start = payload_bytes / 2 - changed / 2;
+        let start = v1.len() / 2 - changed / 2;
         v2[start..start + changed].copy_from_slice(&seeded_bytes(changed, 7));
     }
 
