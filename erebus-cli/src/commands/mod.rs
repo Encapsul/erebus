@@ -12,6 +12,7 @@ pub mod inspect;
 pub mod keygen;
 pub mod layer;
 pub mod lifecycle;
+pub mod mirror;
 pub mod publish;
 pub mod pull;
 pub mod run;

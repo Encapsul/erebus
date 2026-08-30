@@ -698,3 +698,13 @@ fn test_sbom_help() {
         .stdout(predicate::str::contains("--output"))
         .stdout(predicate::str::contains("CycloneDX"));
 }
+
+#[test]
+fn test_mirror_help() {
+    erebus()
+        .args(["mirror", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("export"))
+        .stdout(predicate::str::contains("import"));
+}

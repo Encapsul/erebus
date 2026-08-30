@@ -115,6 +115,13 @@ enum Commands {
     ///   erebus lifecycle agent.erebus --action revoke
     Lifecycle(commands::lifecycle::LifecycleArgs),
 
+    /// Export or import registry data for air-gapped sync
+    ///
+    /// Examples:
+    ///   erebus mirror export --dir /var/lib/erebus-registry -o backup.mirror.enc --password <secret>
+    ///   erebus mirror import --input backup.mirror.enc --dir /var/lib/erebus-registry --password <secret>
+    Mirror(commands::mirror::MirrorArgs),
+
     /// Verify a .erebus file's signature
     Verify(commands::verify::VerifyArgs),
 
@@ -284,6 +291,7 @@ fn main() -> ExitCode {
             }
             commands::lifecycle::run(args)
         }
+        Commands::Mirror(args) => commands::mirror::run(args),
         Commands::Trust(mut args) => {
             if cli.quiet {
                 args.quiet = true;
