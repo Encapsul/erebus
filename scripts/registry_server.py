@@ -1109,7 +1109,7 @@ LANDING = """<!DOCTYPE html><html><head><meta charset="utf-8">
 <div id="msg"></div>
 <div class="tag">Open source · MIT —
 <a href="https://github.com/Tednoob17/erebus">github.com/Tednoob17/erebus</a> ·
-API: <code>/index.json</code> · <code>/packages/&lt;name&gt;</code></div>
+<a href="/ui/dashboard">Dashboard</a> · API: <code>/index.json</code> · <code>/packages/&lt;name&gt;</code></div>
 <script>
 async function refresh(){{
   try{{
@@ -1127,6 +1127,36 @@ function join(e){{
     .catch(()=>msg.textContent='error');
 }}
 refresh(); setInterval(refresh, 30000);
+</script></body></html>"""
+
+DASHBOARD = """<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>erebus dashboard</title>
+<style>
+ body{{font-family:ui-monospace,Menlo,monospace;background:#0b0e14;color:#d7dce6;padding:32px}}
+ h1{{color:#7ee0c3;font-size:22px;margin-bottom:24px}} a{{color:#7ee0c3}}
+ table{{border-collapse:collapse;width:100%;max-width:1200px}}
+ th,td{{text-align:left;padding:10px 12px;border-bottom:1px solid #1d2433}}
+ th{{color:#5b6577;font-weight:600;font-size:12px;text-transform:uppercase}}
+ tr:hover{{background:#10162a}} .tag{{color:#5b6577;font-size:12px}}
+</style></head><body>
+<h1>erebus registry — dashboard</h1>
+<div class="tag"><a href="/">← landing</a> · <a href="/stats">/stats</a> · <a href="/index.json">/index.json</a></div>
+<table>
+<thead><tr><th>Name</th><th>Size</th><th>State</th><th>Integrity</th><th>Format</th><th>Private</th></tr></thead>
+<tbody id="pkgs"></tbody>
+</table>
+<script>
+async function load(){{
+  const idx = await (await fetch('/index.json')).json();
+  const tbody = document.getElementById('pkgs');
+  tbody.innerHTML = '';
+  for (const p of idx.packages) {{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${{p.name}}</td><td>${{(p.size/1024).toFixed(1)}} KB</td><td>${{p.state||'-'}}</td><td>${{p.integrity||'-'}}</td><td>${{p.format||'-'}}</td><td>${{p.private? 'yes' : 'no'}}</td>`;
+    tbody.appendChild(tr);
+  }}
+}}
+load(); setInterval(load, 30000);
 </script></body></html>"""
 
 
@@ -1197,6 +1227,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._admin_restore(self.read_body())
         if path == "/" or path == "/ui":
             body = LANDING.format().encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path == "/ui/dashboard":
+            body = DASHBOARD.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
