@@ -88,6 +88,37 @@ jobs:
             && echo "ed25519-dalek $ver >= 2.1.0 OK" \
             || { echo "ed25519-dalek $ver < 2.1.0 (CVE-2023-48022)"; exit 1; }
 
+  # Run the erebus Linux ARM stub under qemu-user for residual validation.
+  arm-qemu:
+    name: arm qemu ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64
+            triple: aarch64-unknown-linux-musl
+          - target: armhf
+            triple: armv7-unknown-linux-musleabihf
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable (2026-08-26)
+        with:
+          targets: ${{ matrix.triple }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static musl-tools
+
+      - name: Build stub for ${{ matrix.triple }}
+        run: cargo build --release -p erebus-stub --target ${{ matrix.triple }}
+
+      - name: Run QEMU ARM test (${{ matrix.target }})
+        run: bash scripts/test_arm_qemu.sh ${{ matrix.target }}
+
   # Cross-compile the stub + CLI for Windows and macOS on every push.
   # zigbuild (zig C cross-compiler) supplies the mingw toolchain for Windows
   # and the linker for Darwin; macOS needs a downloaded SDK for the Apple
