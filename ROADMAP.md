@@ -131,8 +131,10 @@ Reproducible numbers: [`benchmarks/`](benchmarks/README.md).
   `description`, `license`, `payload_format` extracted from embedded metadata.
 - [x] **Soft-delete with audit trail** — `DELETE /packages/<file>` marks artifacts
   as deleted; metadata retained; filtered from public index; audit event recorded.
-- [ ] **Garbage collection** — bit-rot detection + unreachable blob reclamation.
-- [ ] **Backup/restore manifest** — disaster recovery.
+- [x] **Garbage collection** — `GET /admin/gc` reports corrupt + unreachable;
+  `?execute=1` quarantines to `/quarantine/` for manual review (`5f102d5`).
+- [x] **Backup/restore manifest** — `GET /admin/backup` exports JSON manifest;
+  `POST /admin/restore` restores missing packages with metadata (`97553d5`).
 - [ ] **Pluggable auth: HMAC, Ed25519, OIDC, JWKS** — multi-provider.
 - [ ] **Provider integration** — GitHub/GitLab/Gitea webhooks (token issuance + repo-scoped auth).
 - [ ] **CVE scanning** of model artifacts (GGUF/safetensors).
