@@ -1,0 +1,21 @@
+[Unit]
+Description=erebus registry (Python stdlib server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/erebus-registry
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/usr/bin/python3 /opt/erebus-registry/registry_server.py \
+  --dir /opt/erebus-registry/data \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --quota-gb 21474836480 \
+  --upload-cap 1073741824
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
