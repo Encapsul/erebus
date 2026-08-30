@@ -326,29 +326,53 @@ class Store:
         return None
 
     def authenticate(self, authorization: str) -> str | None:
-        """Bearer <username>:<token> or legacy bare token matched globally."""
+        """Bearer <scheme>:<payload> or legacy Bearer <token>."""
         if not authorization.startswith("Bearer "):
             return None
         raw = authorization[len("Bearer "):].strip()
         if ":" in raw:
-            username, _, token = raw.partition(":")
+            scheme, _, payload = raw.partition(":")
         else:
-            username, token = "", raw
+            scheme, payload = "token", raw
         with self.lock:
             users = self._load(self.users_path, {}).get("users", {})
-        if username:
-            rec = users.get(username)
-            if rec and hmac.compare_digest(
-                rec["token_hash"], hashlib.sha256(token.encode()).hexdigest()
-            ):
-                return username
+        if scheme == "token":
+            if ":" in payload:
+                username, _, token = payload.partition(":")
+            else:
+                username, token = "", payload
+            if username:
+                rec = users.get(username)
+                if rec and hmac.compare_digest(
+                    rec["token_hash"], hashlib.sha256(token.encode()).hexdigest()
+                ):
+                    return username
+                return None
+            for name, rec in users.items():
+                if hmac.compare_digest(
+                    rec["token_hash"], hashlib.sha256(token.encode()).hexdigest()
+                ):
+                    return name
             return None
-        # bare-token mode (legacy): scan — O(n), fine for small registries
-        for name, rec in users.items():
-            if hmac.compare_digest(
-                rec["token_hash"], hashlib.sha256(token.encode()).hexdigest()
-            ):
-                return name
+        if scheme == "hmac":
+            return self._auth_hmac(payload, users)
+        if scheme == "hmac":
+            return self._auth_hmac(payload, users)
+        return None
+
+    def _auth_hmac(self, payload: str, users: dict) -> str | None:
+        try:
+            username, signature = payload.split(":", 1)
+        except ValueError:
+            return None
+        rec = users.get(username)
+        if not rec or "secret" not in rec:
+            return None
+        expected = hmac.new(
+            rec["secret"].encode(), username.encode(), hashlib.sha256
+        ).hexdigest()
+        if hmac.compare_digest(expected, signature):
+            return username
         return None
 
     # ---- tiers / billing --------------------------------------------------
