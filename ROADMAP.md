@@ -142,14 +142,13 @@ All P2 items complete:
 
 ### 🟣 P4 — Enterprise + distribution
 
-- [ ] **Air-gapped mirror** (Buncker-like, encrypted USB sync) under appliance license.
+- [x] **Air-gapped mirror** — `erebus mirror export/import` with AES-256-GCM + HKDF-SHA256; tarball of registry data for encrypted USB sync (`88f243b`).
 - [x] **Signed embedded SBOM** — `erebus sbom <file>` generates CycloneDX SBOM; `--embed` writes it into the binary metadata (rejects signed/SISR) (`796e229`).
 - [ ] **SSO/SAML + SLA**.
 - [ ] **Web UI** — compliance admin dashboard (the webchat is for chat, not a dashboard).
 - [ ] **Kubernetes operator / Helm chart**.
 - [ ] **Multi-node / cross-region replication** — high availability.
 - [x] **Webhooks** — `GET/POST/DELETE /webhooks` manages URLs; `record_audit()` dispatches promote/quarantine/delete events to all registered endpoints (fire-and-forget, 10s timeout) (`9485384`).
-- [ ] **Air-gapped mirror** (Bunker-like, encrypted USB sync) under appliance license.
 
 ### ⚪ Ideas / unexplored (IDEAS.md)
 
