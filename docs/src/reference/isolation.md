@@ -36,7 +36,7 @@ Mechanism (implemented in `stub/src/main.rs`):
 
 Usage:
 ```
-erebus build my-app/ -o my-app.ere --isolation 2
+erebus build my-app/ -o my-app.erebus --isolation 2
 ```
 
 **Implementation details:**
@@ -63,6 +63,6 @@ don't want to ask for → skip directly to level 2.
 
 > Isolation is a **feature**, not the core product. `erebus`'s value
 > proposition is *"one file, it runs"*. We start at level 0 (which proves
-> the full pipeline) and add isolation **without changing the `.ere`
+> the full pipeline) and add isolation **without changing the `.erebus`
 > format**: only the `isolation` metadata field and the launcher's behavior
 > change.

@@ -145,6 +145,81 @@ def artifact_lifecycle(path: str) -> tuple[str, bool]:
     return state, allow
 
 
+def verify_integrity(path: str) -> tuple[bool, str]:
+    """Verify a stored .erebus blob's payload integrity against its footer.
+
+    Reproduces the Rust stub's runtime check (erebus-stub/src/main.rs): the
+    footer embeds `payload_sha256 = SHA-256(payload || meta_bytes)` and a
+    tamper that changes the payload OR the embedded lifecycle metadata breaks
+    the digest. Because the lifecycle state lives inside the blob, a corrupted
+    blob would otherwise "forget" its Trusted/Revoked/Quarantined state and
+    be served as Acquired — a hole in roadmap #8. `verify_integrity` closes it:
+    it is independent of the embedded state and fails closed on any mismatch.
+
+    Returns (ok, detail). `ok=False` means the blob is corrupt (bit-rot or
+    tampering) and must not be served. Non-.erebus files (runtime packs,
+    sidecars) are out of scope and always report ok=True.
+    """
+    if not path.endswith(".erebus"):
+        return True, "not-an-erebus-blob"
+    try:
+        size = os.path.getsize(path)
+        if size < 84:
+            return True, "too-small (pre-lifecycle)"
+        with open(path, "rb") as f:
+            if size >= 92:
+                f.seek(size - 92)
+                core = f.read(92)
+                if core[8:13] == EREBUS_MAGIC and core[13] >= 3:
+                    payload_off = int.from_bytes(core[8:16], "little")
+                    payload_csz = int.from_bytes(core[16:24], "little")
+                    expected = core[32:64]
+                    meta_off = int.from_bytes(core[72:80], "little")
+                    meta_len = int.from_bytes(core[80:88], "little")
+                else:
+                    core = core[8:]
+                    payload_off = int.from_bytes(core[8:16], "little")
+                    payload_csz = int.from_bytes(core[16:24], "little")
+                    expected = core[32:64]
+                    meta_off = int.from_bytes(core[64:72], "little")
+                    meta_len = int.from_bytes(core[72:80], "little")
+            else:
+                f.seek(size - 84)
+                core = f.read(84)
+                if core[0:5] != EREBUS_MAGIC:
+                    return True, "no-footer (legacy)"
+                payload_off = int.from_bytes(core[8:16], "little")
+                payload_csz = int.from_bytes(core[16:24], "little")
+                expected = core[32:64]
+                meta_off = int.from_bytes(core[64:72], "little")
+                meta_len = int.from_bytes(core[72:80], "little")
+            if meta_len <= 0 or meta_len > 64 * 1024 * 1024:
+                return True, "meta-out-of-range (legacy)"
+            f.seek(payload_off)
+            h = hashlib.sha256()
+            remaining = payload_csz
+            while remaining > 0:
+                chunk = f.read(min(CHUNK, remaining))
+                if not chunk:
+                    break
+                h.update(chunk)
+                remaining -= len(chunk)
+            f.seek(meta_off)
+            remaining = meta_len
+            while remaining > 0:
+                chunk = f.read(min(CHUNK, remaining))
+                if not chunk:
+                    break
+                h.update(chunk)
+                remaining -= len(chunk)
+            if remaining != 0 or payload_csz <= 0:
+                return False, "truncated"
+            got = h.digest()
+    except (OSError, ValueError):
+        return False, "unreadable"
+    return got == expected, "corrupt" if got != expected else "ok"
+
+
 class Store:
     """All mutable state, guarded by an in-process RLock + per-file flock."""
 
@@ -173,6 +248,13 @@ class Store:
         self.allow_anon_uploads = allow_anon_uploads
         self.lock = threading.RLock()
         self._hash_cache: dict[str, tuple[float, str]] = {}
+        # Roadmap #13 integrity state: {fname: {"ok": bool, "detail": str,
+        # "ts": iso}}. Maintained by the periodic `scan_integrity_locked` pass
+        # and read by `index()`/`/integrity`, so the public index never
+        # re-hashes every blob on each hit. Corrupt blobs are excluded from
+        # serving regardless of their embedded (possibly rewritten) state.
+        self.integrity_path = os.path.join(root, "integrity.json")
+        self.integrity = self._load(self.integrity_path, {})
         self.users = self._load(self.users_path, {})
 
     # ---- json helpers -----------------------------------------------------
@@ -448,6 +530,34 @@ class Store:
             self._hash_cache[path] = (mtime, digest)
         return digest
 
+    def scan_integrity_locked(self):
+        """Re-verify every stored .erebus blob; update the persisted state.
+
+        Called by the periodic daemon thread and/or the /integrity?scan=1
+        request. Only touches .erebus blobs (runtime packs/sidecars are out of
+        scope and reported ok). Temp `.incoming.*`/`.tmp` uploads are skipped.
+        Never mutates the blob itself — a corrupt artifact is excluded from
+        serving via the integrity state, not rewritten (rewriting would break
+        its signature/footer hash).
+        """
+        snapshot = {}
+        for name in sorted(os.listdir(self.pkg_dir)):
+            if name.startswith(".incoming.") or ".tmp" in name:
+                continue
+            path = os.path.join(self.pkg_dir, name)
+            if not os.path.isfile(path):
+                continue
+            ok, detail = verify_integrity(path)
+            snapshot[name] = {
+                "ok": bool(ok),
+                "detail": detail,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+        with self.lock:
+            self.integrity = snapshot
+            self._save_locked(self.integrity_path, snapshot)
+        return snapshot
+
     def index(self) -> bytes:
         packages = []
         for name in sorted(os.listdir(self.pkg_dir)):
@@ -463,6 +573,7 @@ class Store:
             meta = self.get_meta(name)
             entry["private"] = bool(meta.get("private"))
             entry["state"] = artifact_lifecycle(path)[0]
+            entry["integrity"] = "ok" if self.integrity.get(name, {}).get("ok", True) else "corrupt"
             packages.append(entry)
         return json.dumps({"packages": packages}).encode()
 
@@ -756,6 +867,17 @@ class Handler(BaseHTTPRequestHandler):
         # be served even when requested by name. Revoked/Deleted always fail
         # closed; Quarantined is served only under an allow_untrusted policy.
         if SAFE_FILE.match(fname) and not is_pack and not is_sidecar:
+            # Integrity gate (roadmap #13), checked BEFORE the embedded state:
+            # corruption rewrites the blob's own lifecycle footer, so a bit-
+            # rotted or tampered artifact must be refused regardless of what
+            # state its (possibly rewritten) footer claims. Auto-quarantine:
+            # corrupt => 410, served only when integrity holds AND the state
+            # permits.
+            ok, _detail = verify_integrity(full)
+            if not ok:
+                return self.send_json(
+                    {"error": "artifact integrity check failed (corrupt)"}, 410
+                )
             state, allow = artifact_lifecycle(full)
             if state in ("Revoked", "Deleted"):
                 return self.send_json(

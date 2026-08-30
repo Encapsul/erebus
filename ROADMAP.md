@@ -1,344 +1,406 @@
-# ROADMAP — Plan d'exécution
+# ROADMAP.md — erebus : single product, business & execution plan
 
-> Mis à jour le 2026-08-26. Le produit pivote vers la conformité IA.
+> **Single consolidated document (2026-08-30).** Merges former `MISSION_LOG.md`,
+> `HANDOFF.md`, `ROADMAP-CONSOLIDATED.md`, `BUSINESS.md` and `PITCH_DECK.md`.
+> Source of truth: **ROADMAP.md** — real code state, what shipped, what's left,
+> the business model and the pitch.
 >
-> **Tagline :** *« Sign. Track. Prove. — Ship AI agents with verifiable attestation. »*
-
-## 🎯 Vision long terme
-
-**Erebus = le "git log" pour l'IA dans le monde physique.**
-
-Chaque exécution d'agent erebus génère une attestation signée prouvant
-ce qui a exécuté, où, quand, et que ce n'a pas été altéré. Les entreprises
-réglementées ont besoin de cette traçabilité pour se conformer à
-l'EU AI Act, SOC 2 et aux marchés publics.
-
-**Le vrai produit n'est pas le packaging — c'est la chaîne de traçabilité signée.**
-Le packaging est la démo. La preuve est le business.
-
-### Le vrai moat (pas SISR)
-
-SISR est commoditisé (XetHub sur HF, Ollama layers, Git LFS). Notre moat
-est la **chaîne d'attestation d'exécution** : chaque `.erebus` + `.erebus.attest`
-forme une preuve cryptographique vérifiable offline. Plus le registre grossit,
-plus l'historique de conformité est riche → lock-in naturel.
-
-### ICP cible
-
-| Segment | Budget | Motion | Cycle |
-|---|---|---|---|
-| ~~Devs OSS / hobbyistes~~ | Free | Bottom-up | — |
-| **Enterprise regulated** | $15–50k/an | Sales + design partners | 3–6 mois |
-| **Flottes industrielles/edge** | $50/nœud/an | Ops management | 1–3 mois |
-| **Pro (solos/équipes agiles)** | $29/mois | PLG | Immédiat |
+> Tagline: *« Sign. Track. Prove. — Ship AI agents with verifiable attestation. »*
 
 ---
 
-## 📦 Ce qui est déjà livré (v0.5.0)
+## 1. Vision
 
-Les items #1–#9 du roadmap initial sont **terminés et validés** :
+**Erebus = the "git log" for AI in the physical world.**
+
+Every erebus agent execution emits a signed attestation proving what ran, on
+which machine, at what date, and that nothing was altered. Regulated
+enterprises (EU AI Act, SOC 2, ISO 27001, public procurement, UNECE WP.29)
+**need this proof** and have **no tool** that produces it today.
+
+> **The real product is not packaging — it's the signed traceability chain.**
+> Packaging is the demo. The proof is the business.
+
+### The moat (not SISR)
+
+SISR is commoditized (XetHub on HF, Ollama layers, Git LFS). Our moat is the
+**execution-attestation chain**: each `.erebus` + `.erebus.attest` forms a
+cryptographically verifiable offline proof. The bigger the registry grows, the
+richer the compliance history → natural lock-in.
+
+### Product comparison
+
+| | erebus | ollama | llamafile | Docker |
+|---|---|---|---|---|
+| Distribution | one `.erebus` × 4 OS/arch | app store + models | single binary | images + daemons |
+| Registry | self-hostable | proprietary cloud | none | image registry |
+| Delta model updates (SISR) | ✅ content-defined | ❌ re-download | ❌ | ❌ (layers) |
+| Signed attestation | ✅ Ed25519 chain | ❌ | ❌ | ❌ |
+| Offline-first | ✅ | ✅ | ✅ | ❌ |
+| Packaging | ✅ | ✅ | ✅ | ✅ |
+
+**Target** : not a "Docker killer" — Docker stays for orchestration. The angle
+is execution traceability, where nothing exists today.
+
+---
+
+## 2. Real code state (v0.5.0)
+
+Rust workspace, 3 crates (`erebus-core`, `erebus-stub`, `erebus-cli`) + a
+Python stdlib server (`scripts/registry_server.py`). Zero `unsafe` in core/CLI;
+only the stub uses it (with `SAFETY` comments).
+
+**Tests: 444 workspace green** (`cargo test --workspace --release`).
+**Quality:** `cargo fmt`, clippy `-D warnings` per crate, `cargo audit` RC=0.
+**Toolchain:** stable only (never nightly/beta), musl for the stub.
+
+### Shipped and validated
 
 | Feature | Proof |
 |---|---|
-| Universal binary `--universal` | 4 native slices dans un fichier de 59 MB |
+| Universal binary `--universal` | 4 native slices in one 59 MB file, validated linux-x64 / arm64 (qemu) / win-x64 (Wine) |
 | Windows PE stub port | MapViewOfFile, CreateProcessW, ProcessPrng shim |
-| `erebus serve` | Multi-format engine resolution, TinyLlama E2E |
-| Registry + `pull`/`publish` | stdlib VPS server, SHA-256 verified |
-| Agentfile.yaml | Même schéma que `.erebus.toml` |
-| GPU auto-detect + `--ngl` | `core/gpu.rs`, env `ERE_GPU`/`ERE_VRAM_MB`/`ERE_NGL` |
-| Chat UI | TUI ratatui + browser UI |
-| Security passes | zeroization, ANSSI, chaos harnesses SURVIVED |
-| Auth + quotas registry | scrypt, bearer tokens, quota mensuel |
-| Compteur SISR public | `/stats` + landing page |
+| `erebus serve` | Multi-format engine resolution (`inference.rs`): GGUF → llama-server, safetensors/ONNX/TRT-LLM/MLX → vLLM; TinyLlama E2E |
+| Registry + `pull`/`publish` | stdlib server, SHA-256 verify, bearer tokens, quotas, orgs/RBAC, audit log, Stripe billing |
+| `Agentfile.yaml` | Same schema as `.erebus.toml`; CLI > file > detection |
+| GPU auto-detect + `--ngl` | `gpu.rs`, env `ERE_GPU`/`ERE_VRAM_MB`/`ERE_NGL`, pins never overridden |
+| Chat UI | ratatui TUI + browser UI (std-only proxy) |
+| SISR delta updates | FastCDC content-defined chunking, Ed25519-signed manifests, Merkle, fail-cold verify at boot |
+| Rollback + health gate | `.bak` snapshot, fork+waitpid supervisor, anti-loop quarantine |
+| `erebus attest` | `.erebus.attest` (signed JSON, machine hash never in plaintext) |
+| `erebus audit` | compliance report: SBOM → **CycloneDX**, attestation → **in-toto** |
+| `erebus lifecycle` | policy-gated state machine: acquired → quarantined → trusted → revoked → deleted; only `trusted` served |
+| Fail-closed registry auth | scrypt, default-deny, mutations blocked without token |
+| MCP server registry | `/mcp`, `/mcp/<name>`, `/mcp/<name>/install` |
+| SISR benchmarks | 100 MB payload, 1% change → 1.28 MB delta (**98.7%** measured through the real engine) |
+| Security | zeroization, ANSSI, 2 chaos harnesses **SURVIVED** (30 corruptions + 10 SIGKILLs) |
 
-Voir [HANDOFF.md](HANDOFF.md) et [benchmarks/](benchmarks/README.md) pour les preuves.
+Reproducible numbers: [`benchmarks/`](benchmarks/README.md).
 
----
+### Known constraints / gotchas
 
-## 🏗️ Phase 1 : Nettoyage identitaire (docs)
+- **VPS disk chronically tight** (~1–2 GB). Purge `target/{debug,win-gnu}`,
+  `~/.cache/erebus`, old test bundles before heavy builds.
+- **qemu-user**: `unshare` → EINVAL; test ARM with `--isolation none` inside docker.
+- **Windows slice**: via git-bash/WSL for universal files; Wine <7 lacks WMI.
+- **macOS slice**: cross-compiled + inspected, **never run** on real Apple Silicon (to validate).
+- **`serve`**: encrypted and squashfs bundles unsupported (clear error).
 
-**Objectif :** une seule identité produit. Zéro contradiction.
+### Execution / operations
 
-### 1.1 Fixer l'ICP unique
-
-- [ ] `docs/src/concepts/positioning.md` : Réécrire l'ICP autour de
-  « opérateur d'IA qui déploie des agents sur des flottes et doit prouver
-  à un auditeur ce qui a exécuté ». Garder llamafile/Docker comme
-  comparaison mais cadrer sur traçabilité signée.
-- [ ] `docs/src/concepts/problem.md` : Réécrire — le problème n'est pas
-  « it works on my machine » mais « comment prouver à un auditeur que
-  cet agent IA a tourné correctement sur cette machine ».
-- [ ] `docs/src/comparison.md` : Supprimer « AI-powered dependency detection »
-  (plus implémenté), supprimer « Phase 2 » pour les signatures (déjà faites).
-  Réécrire autour de la traçabilité.
-- [ ] `docs/src/introduction.md` : Supprimer l'aveu de contenu obsolète.
-
-### 1.2 Uniformiser .erebus
-
-- [ ] `docs/src/concepts/problem.md` : `.ere` → `.erebus`
-- [ ] `docs/src/reference/format.md` : `.ere` → `.erebus`
-- [ ] `docs/src/concepts/sisr-overview.md` : `.ere` → `.erebus`
-- [ ] `docs/src/concepts/architecture.md` : `.ere` → `.erebus`
-- [ ] `docs/src/SUMMARY.md` : `.ere` → `.erebus` dans les titres
-- [ ] `CHANGELOG.md` : Renommer « x.bin » → « erebus »
-- [ ] `MISSION_LOG.md` : Renommer « x.bin » → « erebus »
-
-### 1.3 Fixer l'acronyme SISR
-
-- [ ] `README.md:137` : « Self-Incremental Self-Repair » →
-  « Self-Incremental Sovereign Reconstruction »
-
-### 1.4 Supprimer les runtimes morts
-
-- [ ] `docs/src/SUMMARY.md` : Supprimer les guides Node.js, Java, Ruby,
-  .NET, Deno, PHP, Perl (garder Python + Binary)
-- [ ] `docs/src/concepts/positioning.md` : Supprimer Node, Go de la liste
-- [ ] `docs/src/concepts/problem.md` : Supprimer Node.js, Java, Ruby
-
-### 1.5 Nouveau pitch BUSINESS.md
-
-- [x] Réécrire `BUSINESS.md` slide YC et ICP :
-  « Nous fournissons la preuve cryptographique de ce qui a exécuté dans
-  chaque agent IA, sur chaque machine, à chaque instant. Les entreprises
-  réglementées ont besoin de cette traçabilité pour se conformer à
-  l'EU AI Act, SOC 2 et aux marchés publics. Notre format binaire
-  génère cette preuve en arrière-plan — gratuitement en open source,
-  payant en hébergé avec conformité et audit trail. »
-
-### 1.6 Nettoyage MISSION_LOG.md
-
-- [ ] Ajouter en haut : « Ce document couvre les missions techniques initiales.
-  Le produit a depuis pivoté vers la conformité IA — voir BUSINESS.md. »
+- Commands: `erebus build/run/serve/chat/pull/publish/swap/inspect/layer/
+  keygen/sign/verify/trust/attest/audit/lifecycle/dashboard/doctor/scan/env/
+  clean/selftest/upgrade/migrate/completion/man`.
+- Chaos: `scripts/chaos_monkey.sh 30` + `scripts/chaos_registry_serve.sh` (must print **SURVIVED**).
 
 ---
 
-## 🔐 Phase 2 : `erebus attest` — preuve d'exécution signée
+## 3. What's left to do
 
-**Objectif :** générer un artefact signé prouvant ce qui a exécuté.
+### 🔴 P0 — Immediate fixes / uncommitted debt
 
-### Architecture
+- [ ] **Commit the `scripts/registry_server.py` diff**: adds `verify_integrity()`
+  (SHA-256 check of blobs `[payload‖meta]`, independent of the embedded state,
+  fail-closed). Closes a hole: a corrupted blob must not "forget" its
+  Trusted/Revoked state and be served as Acquired.
+- [ ] **Docs Phase 1: standardize `.ere` → `.erebus`** across ~30 files
+  (`docs/src/guides/*`, `docs/src/concepts/*`, `docs/src/reference/*`,
+  `docs/src/architecture/*`, `docs/src/spec/*`, `docs/src/migration/*`,
+  `docs/src/cli/erebus-build.md`, `docs/src/security.md`, `docs/src/CHANGELOG.md`).
+  `.erebus` today appears in only 8 files.
+- [ ] **Residual validation**: run the darwin-aarch64 slice on real Apple
+  Silicon; automated QEMU CI for ARM slices.
+- [ ] **Ops**: watch ratatui upstream; recurring VPS disk cleanup.
 
-```
-erebus attest <file.erebus> [-o <output.json>] [--key <key>]
+### 🟠 P1 — Close the monetization loop (Pro/Team tiers)
 
-→ Lit le binaire
-→ Extrait : hash_payload, metadata (runtime, entrypoint, layers)
-→ Récupère : machine_id_hash (jamais hostname en clair), OS, arch, timestamp
-→ Signe avec Ed25519
-→ Écrit un fichier .erebus.attest (JSON signé, DÉTACHÉ du binaire)
-```
+- [ ] **Deploy the public registry behind nginx TLS** (completes Tier 1: auth,
+  quotas, SISR counter, landing — already in code).
+- [ ] **Stripe in prod** — Checkout + webhooks (Pro $29, Team $99) already wired
+  in the server, put into production and end-to-end tested.
+- [ ] **Downloadable audit log** (exists in code: `read_audit` / `record_audit`)
+  — expose client-side download.
 
-### Structure du document d'attestation
+### 🟡 P2 — Registry functional gaps (competitor audit)
 
-```json
-{
-  "spec_version": "1.0",
-  "attestation_type": "erebus-execution",
-  "artifact": {
-    "bundle_hash": "sha256:<hash binaire complet>",
-    "payload_hash": "sha256:<payload_sha256 du footer>",
-    "metadata_hash": "sha256:<hash metadata JSON>",
-    "format_version": 3,
-    "flags": ["signed", "sisr"]
-  },
-  "provenance": {
-    "builder": "erebus-cli v0.5.0",
-    "build_created": "2026-08-24T10:00:00Z",
-    "author": "declared in metadata or null",
-    "license": "declared in metadata or null",
-    "layers": [
-      {"name": "runtime/python3", "kind": "runtime", "sha256": "..."},
-      {"name": "model/llama-3.1-8b", "kind": "model", "sha256": "..."}
-    ]
-  },
-  "execution": {
-    "attested_at": "2026-09-15T14:32:00Z",
-    "machine_id_hash": "sha256:<SHA-256(hostname + os + arch)>",
-    "os": "linux",
-    "arch": "x86_64"
-  },
-  "signature": {
-    "algorithm": "ed25519",
-    "key_fingerprint": "sha256:<fingerprint clé publique>",
-    "signature_hex": "<64 bytes hex>"
-  }
-}
-```
+- [ ] **GGUF guard** — per-tensor manifest for GGUF models (tensor-level integrity).
+- [ ] **Periodic integrity verification** — systemd timer re-checking hashes,
+  auto-quarantine on mismatch.
+- [ ] **Rich model metadata** — format, size, source, `scan_results` per artifact.
+- [ ] **Soft-delete with audit trail** — retain metadata after delete.
+- [ ] **Garbage collection** — bit-rot detection + unreachable blob reclamation.
+- [ ] **Backup/restore manifest** — disaster recovery.
+- [ ] **Pluggable auth: HMAC, Ed25519, OIDC, JWKS** — multi-provider.
+- [ ] **Provider integration** — GitHub/GitLab/Gitea webhooks (token issuance + repo-scoped auth).
+- [ ] **CVE scanning** of model artifacts (GGUF/safetensors).
 
-### Fichiers
+### 🔵 P3 — Multi-protocol frontends (Shardline-like)
 
-- [x] `erebus-core/src/attest.rs` : **Nouveau module.** Types `Attestation`,
-  `ArtifactInfo`, `ProvenanceInfo`, `ExecutionInfo`, `SignatureInfo`.
-  Fonctions `generate_attestation()`, `serialize_attestation()`,
-  `verify_attestation()`. Zéro unsafe.
-- [x] `erebus-core/src/lib.rs` : Ajouter `pub mod attest;`
-- [x] `erebus-cli/src/commands/attest.rs` : **Nouvelle commande.**
-- [x] `erebus-cli/src/commands/mod.rs` : Ajouter `pub mod attest;`
-- [x] `erebus-cli/src/main.rs` : Ajouter `Attest` au enum `Subcommand`
+- [ ] **HuggingFace Hub API compat** — drop-in for `huggingface-cli`.
+- [ ] **OCI Distribution frontend** — `docker push/pull`-compatible.
+- [ ] **Git LFS frontend** — model versioning in Git.
+- [ ] **S3-compatible frontend** — S3 API for lakehouse clients.
+- [ ] **Bazel HTTP remote cache frontend** — CI build cache.
 
-### Tests
+### 🟣 P4 — Enterprise + distribution
 
-- [x] Unit core : roundtrip generate → serialize → parse → verify
-- [x] Unit core : signature corrompue → erreur
-- [x] Integration CLI : build → sign → attest → verify-attest
-- [x] Proptest : document valide après serialization
+- [ ] **Air-gapped mirror** (Buncker-like, encrypted USB sync) under appliance license.
+- [ ] **Signed embedded SBOM** per bundle.
+- [ ] **SSO/SAML + SLA**.
+- [ ] **Web UI** — compliance admin dashboard (the webchat is for chat, not a dashboard).
+- [ ] **Kubernetes operator / Helm chart**.
+- [ ] **Multi-node / cross-region replication** — high availability.
+- [ ] **Webhooks** (on promote, quarantine, delete) — event-driven.
+
+### ⚪ Ideas / unexplored (IDEAS.md)
+
+- First-principles: safety requires human audit + sandbox (seccomp/landlock).
+- Confirm a filmed real demo `build → sign → attest → run` for the launch comment.
 
 ---
 
-## 📋 Phase 3 : `erebus audit` — rapport de conformité
+## 4. Business model
 
-**Objectif :** agréger attestations + SBOM + chaos tests en un document signé.
+> Decided 2026-08-26. **The client AND server code stay MIT forever**: we monetize
+> the **hosted service**, never the software.
 
-### Architecture
+**Founding insight (revised):** AI packaging is a feature, not a business. The
+real product is the **cryptographic proof** of what executed, on which machine,
+at what date, unaltered. Generated in the background free in open source,
+paid in compliance and audit trail.
 
-```
-erebus audit <file.erebus> [--attest-dir <dir>] [-o <output.json>]
+### The tiers
 
-→ Lit le binaire
-→ Génère un SBOM (couches + hashes + licences)
-→ Lit les attestations existantes
-→ Agrège les résultats
-→ Produit un document "audit report" structuré
-→ Signe avec Ed25519
-```
-
-### Structure du rapport
-
-```json
-{
-  "spec_version": "1.0",
-  "report_type": "erebus-audit",
-  "artifact": { "..." : "..." },
-  "sbom": {
-    "format": "erebus-sbom/v1",
-    "components": [
-      {"type": "runtime", "name": "python3", "hash": "sha256:...", "license": "PSF-2.0"},
-      {"type": "model", "name": "llama-3.1-8b", "hash": "sha256:...", "license": "Llama-3.1"}
-    ]
-  },
-  "attestation_chain": {
-    "count": 5,
-    "first": "2026-09-01T00:00:00Z",
-    "last": "2026-09-15T14:32:00Z",
-    "chain_hash": "sha256:..."
-  },
-  "integrity": {
-    "payload_sha256": "sha256:...",
-    "signed": true,
-    "sisr_enabled": true
-  },
-  "resilience": {
-    "chaos_test_available": true,
-    "verdict": "SURVIVED"
-  },
-  "signature": { "..." : "..." }
-}
-```
-
-### Fichiers
-
-- [x] `erebus-core/src/audit.rs` : **Nouveau module.** Types `AuditReport`,
-  `SbomEntry`, `AttestationChain`. Fonctions `generate_sbom()`,
-  `aggregate_attestations()`, `generate_audit_report()`.
-- [x] `erebus-core/src/lib.rs` : Ajouter `pub mod audit;`
-- [x] `erebus-cli/src/commands/audit.rs` : **Nouvelle commande.**
-- [x] `erebus-cli/src/commands/mod.rs` : Ajouter `pub mod audit;`
-- [x] `erebus-cli/src/main.rs` : Ajouter `Audit` au enum `Subcommand`
-
----
-
-## 🌐 Phase 4 : Registry MCP servers
-
-**Objectif :** premier registry public de MCP servers. Virale. Gratuit.
-
-### Architecture
-
-Extension du serveur existant (`scripts/registry_server.py`). Pas de
-nouveau serveur. Les MCP servers sont des `.erebus` avec métadonnées MCP
-dans `meta/<name>.mcp.json`.
-
-### Nouveaux endpoints
-
-| Endpoint | Méthode | Description |
+| Tier | Price | Includes |
 |---|---|---|
-| `GET /mcp` | GET | Liste tous les MCP servers |
-| `GET /mcp/<name>` | GET | Détails (description, tools, transport) |
-| `POST /mcp` | POST | Upload un MCP server |
-| `GET /mcp/<name>/install` | GET | Script d'installation 1 ligne |
+| **Free** | €0 | Public packages, 10 GB transfer/month |
+| **Pro** | $29/mo | Unlimited private packages, 1 TB SISR CDN, signed SBOM, attestations |
+| **Team** | $99/mo | All Pro + RBAC, audit log, compliance dashboard, webhooks, 5 TB |
+| **Enterprise** | $24k/yr | Air-gapped mirror, SSO/SAML, SLA, automated compliance reports |
+| **Enterprise+** | $50/node/yr | 50+ nodes, per-node attestation, full history |
 
-### Métadonnées MCP
+### The real ICP
 
-```json
-{
-  "name": "my-mcp-server",
-  "version": "1.0.0",
-  "description": "MCP server for GitHub integration",
-  "tools": ["create_issue", "list_repos"],
-  "transport": "stdio",
-  "runtime": "python",
-  "tags": ["github", "dev-tools"]
-}
+```
+🛡️ Defense / admin           air-gapped by regulation (AANSSI, public procurement)
+🏭 Industrial edge            retail kiosks, factories, vehicles — "500 machines, proof for the auditor"
+📦 AI startups subject to     EU AI Act high-risk — mandatory lifecycle documentation
 ```
 
-### Fichiers
+**Excluded**: healthcare (Lattice Health / Parachute / Wedge have the GTM lead),
+OSS / hobbyist devs (they don't pay). Cross-industry + air-gapped + signed
+attestation chain = our differentiator.
 
-- [ ] `scripts/registry_server.py` : Ajouter routes `/mcp`, parsing MCP,
-  champ `mcp` dans le package index
-- [ ] `scripts/registry_server.py` : Étendre landing page avec section MCP
+### The forbidden list
+
+- ❌ Host inference — capital intensive, hyper-competitive zone
+- ❌ Paywall the open-source client — kills trust and adoption
+- ❌ Marketplace with rev-share now — wait for supply liquidity
+- ❌ Sell to hobbyist devs — they don't pay for a registry
+
+### The one-line YC slide
+
+> *« We provide the cryptographic proof of what ran inside every AI agent, on
+> every machine, at every moment. Regulated enterprises need this traceability
+> to comply with the EU AI Act, SOC 2 and public procurement. Our binary format
+> generates this proof in the background — free in open source, paid when
+> hosted with compliance and audit trail. »*
+
+### The business math
+
+- **COGS**: SISR = ~50 MB transfer for an 8 GB model → CPU cost ~$0.001
+- **Gross margin**: >95% on Pro/Team (no GPU to host)
+- **Enterprise ACV**: $24k/yr × 10 clients = $240k ARR → seed viable
+- **Expansion**: $50/node/yr for fleets → $25k/yr for 500 nodes
+- **Lock-in**: attestation history is the accumulated data (no GPU capex)
+
+### African context / Google Africa AI Lab
+
+- 8 GB on 4G ≈ $5–10 of data; erebus delta ≈ $0.05. Offline-first = works
+  through outages. Data sovereignty (weights never leave the device).
+- **Lab deliverable**: `erebus build ./agent --gemini-model gemini-1.5-flash
+  --gemma-fallback gemma-2b` → binary preferring Gemini API, local Gemma
+  fallback offline. Attestation covers both paths.
+- Flagship use case: Lagos fintech, anti-fraud agent on 500 PoS terminals, 50 MB
+  delta per terminal, signed receipt per transaction, auditor verifies offline.
 
 ---
 
-## 📊 Phase 5 : Benchmark SISR public
+## 5. Condensed pitch (*Sign. Track. Prove.*)
 
-**Objectif :** prouver le delta SISR sur un vrai modèle 8GB.
+**The problem**: `docker run` / `python app.py` → **zero proof** of what
+executed. Updates = re-downloading 8 GB. No audit trail for EU AI Act / SOC 2 /
+African regulators.
 
-### Métriques
+**The solution**: a self-contained binary + attestation chain. `erebus build
+./my-agent → my-agent.erebus (18 MB)`, SISR delta (8 GB → ~50 MB), Ed25519 +
+SHA-256 attestation + metadata, executes with seccomp/landlock sandbox, emits a
+signed `.erebus.attest`.
 
-| Mesure | Détail |
+**Why Africa, why now**: expensive bandwidth, unstable connectivity, data
+sovereignty, regulatory compliance, edge ARM64/x86/RISC-V.
+
+**Traction**: 3 Rust crates 0 unsafe core/CLI, 400+ tests, CSO audit 0 critical,
+universal 4-slices, 98.7% SISR benchmark, auth+quotas+MCP registry.
+
+**Live**: `cargo install erebus` → `erebus build ./agent --embed-gemma-2b -o agent.erebus`
+
+**Final vision**: every AI agent execution leaves a cryptographic receipt. A
+fleet operator queries: "show me all anti-fraud-model executions in Accra last
+week". An auditor verifies offline. A regulator sees: zero tampering, offline
+execution, data never left the device.
+
+---
+
+## 6. Archives — technical decisions (from MISSION_LOG, kept for reference)
+
+These choices were RECORDED during the SISR initiative (missions 1–10,
+completed 03/08/2026). They are **not set in stone** — revisit if a use case
+demands it.
+
+### SISR / auto-update
+- **Stub network transport = HTTPS** (`ureq` + rustls). Trust in the Ed25519
+  signature, not the transport; HTTPS anyway (ANSSI-friendly choice). The local
+  `ERE_SISR_MANIFEST` path stays supported.
+- **`--key` with `--enable-sisr` signs the SISR manifest**, not the binary
+  (otherwise `sign_file` rebuilds and destroys `[manifest][ext]`). Binary
+  signature + SISR simultaneously are unsupported in a single build.
+- **Update URL**: `{base}/manifest` + `{base}/chunks/<sha256>`; resolution
+  arg > env `ERE_UPDATE_URL` > meta `update_url`.
+- **Rollback snapshot `.ere.bak`** co-located (atomic rename); **health gate =
+  fork+waitpid supervisor**; **failure counter not reset**; **quarantine** at
+  `attempts >= ERE_HEALTH_MAX_ATTEMPTS` (default 3).
+- **`/proc/self/exe`** can point to the pre-update inode after a rename → re-open
+  the canonical path returned by `apply_update`.
+- **Chunks content-addressed (SHA-256 enforced)**; source file mode copied to
+  the `.tmp` before rename (else the exec bit is lost).
+
+### Format / invariants
+- **Layout**: `[stub][payload][metadata][footer]`; v2 plain · v3 signed ·
+  v4 encrypted · v5 squashfs. `FLAG_SISR`, `SISR_FOOTER_EXT_SIZE=110`.
+- **v1→v2 invariant**: a v1 binary is read/extracted/executed by the v2 runtime
+  unchanged with no warning; `upgrade_binary` copies the segments
+  byte-for-byte, never decompresses (hashes preserved).
+- **SISR disabled ⇒ binary strictly identical** to the legacy format (tested).
+- **Do not modify `format.rs` without bumping the version.**
+
+### Security / conventions
+- Zero `unsafe` in `erebus-core`/`erebus-cli`; stub only with `SAFETY` comments.
+  No `panic!`/`unwrap` without context in library code; checked arithmetic; no
+  memory leaks; keys zeroized on drop.
+- **`--encrypt` is obfuscation only** (the AES-256-GCM key lives in the metadata
+  by design). Use signing for authenticity.
+- Never print private keys in CLI logs; warn when perms ≠ 0600 (no hard failure,
+  to avoid breaking existing flows).
+
+### Measured perf (i5-7300U @1.6 GHz, no SHA-NI)
+- FastCDC scan ~390 MB/s; SHA-256 ~50 MB/s.
+- 100 MiB target 64 KiB: 5.3 s (19 MiB/s), 812 chunks, 29 KiB manifest.
+- Real SISR: 100 MB payload, 1% change → 1.28 MB delta (98.7%).
+
+### Environment constraints
+- `export PATH="$HOME/.cargo/bin:$PATH"` before `cargo`/`mdbook`.
+- Verify before closing: `cargo fmt --check` → clippy per crate → `cargo test
+  --workspace` → `mdbook build docs/`.
+
+---
+
+## 7. Security posture
+
+> Condensed from the former `SECURITY.md`. Full threat model:
+> [`docs/src/security.md`](docs/src/security.md).
+
+**Reporting a vulnerability** : do not open a public issue. Email the
+maintainer or open a
+[confidential advisory](https://github.com/Tednoob17/erebus/security/advisories).
+Response within 48h.
+
+**Design principle** : *nothing touches disk before integrity is verified.* The
+launcher reads the footer, validates SHA-256, and only then extracts. Verified
+signatures precede integrity — no data is ever processed from an untrusted
+source.
+
+| Protection | Status | Details |
+|---|---|---|
+| SHA-256 integrity | ✅ | Payload hash verified before extraction |
+| Atomic cache extraction | ✅ | `rename()` avoids TOCTOU races |
+| `flock()` concurrency | ✅ | Advisory lock prevents duplicate extraction |
+| Ed25519 signatures | ✅ | Footer v3, `keygen`/`sign`/`verify` |
+| User namespaces | ✅ | `pivot_root` isolation without root |
+| Seccomp filter | ✅ | Denylist blocks ~14 dangerous syscalls |
+| AES-256-GCM encryption | ✅ | Optional payload encryption (v4) |
+
+Scope: `erebus-core/`, `erebus-cli/`, `stub/`, and the format spec in
+`docs/src/reference/format.md`. `examples/` are demo-only, not security-critical.
+
+---
+
+## 8. Changelog (condensed)
+
+> Full history in the former `CHANGELOG.md` and git log. Highlights:
+
+- **0.5.0** — SISR self-update engine (signed deltas, Merkle, health gate +
+  automatic rollback + version quarantine); transparent v1→v2 migration;
+  cross-compilation targets; Landlock sandbox; multi-platform release pipeline.
+- **0.4.0** — PHP extension auto-download; shared-lib bundling; hardlined
+  launcher (no panics on malicious input); isolation fails closed; key
+  zeroization.
+- **0.3.x** — cron, OpenTelemetry, tree-shaking, minify, health-port, persist,
+  include, supervisor mode; execvp single-service path.
+- **0.3.0** — **100% Rust CLI** (zero Python at runtime): build/inspect/scan/
+  sign/verify/keygen/trust/doctor/env/clean/completion/man; `.ere.toml`; man
+  pages; shell completions; burned env-file bug.
+- **≤ 0.2.x** — foundations: multi-arch releases, doctor/env, signing.
+
+---
+
+## 9. Contributing
+
+> Condensed from the former `CONTRIBUTING.md`. Build/test/preflight wiring lives
+> in the `Makefile`; the verification loop and ANSSI rules are in
+> [`AGENTS.md`](AGENTS.md); style in [`CODE_STYLE.md`](CODE_STYLE.md) and
+> [`RULES.md`](RULES.md).
+
+- **Branching** : `main` (stable, tagged) ← integration via PRs; feature/fix
+  branches off `dev`. Merge via squash/rebase, no merge commits.
+- **Commits** : [Conventional Commits](https://www.conventionalcommits.org/)
+  (`feat` `fix` `chore` `docs` `refactor` `test` `ci` `perf`), imperative mood.
+- **PRs** : target `dev`, CI must pass (lint, clippy, tests), one maintainer
+  review, format changes must update `erebus-core/src/format.rs`.
+- **Open asks** : squashfs + mmap direct read, LRU cache eviction, cold/warm
+  start < 100 ms, distribution/discovery.
+- **Questions** : GitHub Discussions, tag `@Tednoob17`.
+
+---
+
+## 10. Deprecated files — migration
+
+The following documents have been **merged into this ROADMAP.md** and deleted
+(see commit):
+
+| Former file | Content destination |
 |---|---|
-| Modèle | Llama 3.1 8B Q4_K_M (~4.5GB) ou Qwen 2.5 14B (~8GB) |
-| Taille bundle complet | Mesurer |
-| Taille delta (1% changement) | Mesurer avec SISR |
-| Économie % | Calculer |
-| vs HF Xet | Comparer si possible |
-| vs Ollama pull | Comparer |
-| Cold start / warm | Mesurer |
+| `MISSION_LOG.md` | §2, §6 (technical decisions), §3 |
+| `HANDOFF.md` | §2 (state, gotchas, verification loop) |
+| `ROADMAP-CONSOLIDATED.md` | §3 (competitor-audited gaps) |
+| `BUSINESS.md` | §4 (business model) |
+| `PITCH_DECK.md` | §1, §4, §5 (pitch) |
+| `IDEAS.md` | §3 (unexplored levers) |
+| `SECURITY.md` | §7 (security posture) |
+| `CHANGELOG.md` | §8 (changelog, condensed) |
+| `CONTRIBUTING.md` | §9 (contributing); AGENTS.md |
+| `docs/ROADMAP.md` | this file (root `ROADMAP.md`) |
+| `docs/AGENTS.md`, `docs/CLAUDE.md`, `docs/CODE_STYLE.md`, `docs/RULES.md` | root `AGENTS.md`/`CLAUDE.md`/`CODE_STYLE.md`/`RULES.md` (duplicates) |
+| `research/*.md` (untracked) | key findings into §2 and §3; originals preserved in git/gstack |
 
-### Fichiers
+References updated in `AGENTS.md`, `README.md` and `research/*.md` → now point
+to `ROADMAP.md` (or the surviving root file).
 
-- [ ] `benchmarks/sisr-model.md` : Benchmark complet avec repro
-- [ ] `scripts/bench_sisr_model.sh` : Script automatisé
+**Kept in place** (not deprecated) : `CLAUDE.md`, `AGENTS.md` (agent configs,
+root); `README.md` (public repo entry point); `CODE_STYLE.md`, `RULES.md`
+(engineering conventions referenced by `AGENTS.md`); `docs/src/` (technical
+mdbook documentation, incl. `docs/src/security.md`); `benchmarks/` (measured
+evidence); `.opencode/`, `.github/actions/`, `node_modules`.
 
----
-
-## 🔄 Business — étapes restantes
-
-### Tier 1 : Registry monétisable
-
-- [x] Auth + quotas (scrypt, bearer tokens, quota mensuel)
-- [x] Compteur SISR public + landing page
-- [ ] Déployer registry publique derrière nginx TLS
-
-### Tier 2 : Facturation
-
-- [ ] Stripe Checkout + webhooks (Pro $29, Team $99)
-- [ ] Organisations : membres, RBAC
-- [ ] Audit log téléchargeable
-
-### Tier 3 : Enterprise
-
-- [ ] Mirror air-gapped sous licence appliance
-- [ ] SBOM signé embarqué par bundle
-- [ ] SSO/SAML + SLA
-
----
-
-## 🔬 Validation résiduelle
-
-- [ ] Slice darwin-aarch64 exécutée sur vrai Apple Silicon
-- [ ] CI QEMU automatique pour les slices ARM
-
-## 🔧 Ops / dette
-
-- [ ] Surveiller ratatui upstream
-- [ ] Nettoyage disque récurrent du VPS
+> **Recoverability** : a timestamped backup of every deleted file exists in
+> `/tmp/opencode/erebus-docs-backup/` and in git history.

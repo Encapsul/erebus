@@ -1,6 +1,6 @@
-# Updating a deployed `.ere` (SISR)
+# Updating a deployed `.erebus` (SISR)
 
-A `.ere` built with `--enable-sisr` can update itself **in place** from a
+A `.erebus` built with `--enable-sisr` can update itself **in place** from a
 signed delta: it downloads only the chunks that changed, verifies every byte,
 and atomically swaps in the new binary. No toolchain, no `erebus` CLI, no
 extraction on the target machine — the update runs inside the binary itself.
@@ -8,21 +8,21 @@ extraction on the target machine — the update runs inside the binary itself.
 ```
 DEV MACHINE                        TARGET MACHINE
 
-erebus build ./app -o app.ere \
-  --enable-sisr --key …           ./app.ere --erebus-update
+erebus build ./app -o app.erebus \
+  --enable-sisr --key …           ./app.erebus --erebus-update
   --update-url https://…            │  fetch manifest (HTTPS)
    │                                │  verify signature + Merkle root
    └─ publish to update server ───► │  download changed chunks
-        app.ere.manifest          │  SHA-256-verify every chunk
+        app.erebus.manifest          │  SHA-256-verify every chunk
         chunks/<sha256>            │  atomic in-place swap
                                    ▼
-                               app.ere is now the new version
+                               app.erebus is now the new version
 ```
 
 ## 1. Build an updatable binary
 
 ```bash
-erebus build ./my_app -o my_app.ere \
+erebus build ./my_app -o my_app.erebus \
     --enable-sisr \
     --key $XDG_DATA_HOME/erebus/keys/<fingerprint>.key \
     --update-url https://updates.example.com/my_app
@@ -32,8 +32,8 @@ Two artifacts are produced:
 
 | Artifact | Purpose |
 |---|---|
-| `my_app.ere` | Self-extracting binary; self-updates against the channel |
-| `my_app.ere.manifest` | Signed `XBMR` manifest, published to the server |
+| `my_app.erebus` | Self-extracting binary; self-updates against the channel |
+| `my_app.erebus.manifest` | Signed `XBMR` manifest, published to the server |
 
 ## 2. Publish a release
 
@@ -43,7 +43,7 @@ before use:
 
 ```
 https://updates.example.com/my_app/
-  manifest                     ← the .ere.manifest (XBMR, signed)
+  manifest                     ← the .erebus.manifest (XBMR, signed)
   chunks/
     <64-hex-sha256>            ← one file per chunk
     <64-hex-sha256>
@@ -61,13 +61,13 @@ in sync for the *newest* release.
 
 ```bash
 # Uses the URL embedded at build time
-./my_app.ere --erebus-update
+./my_app.erebus --erebus-update
 
 # Or point at a specific channel
-./my_app.ere --erebus-update https://updates.example.com/my_app
+./my_app.erebus --erebus-update https://updates.example.com/my_app
 
 # Or override per-run via the environment
-EREBUS_UPDATE_URL=https://updates.example.com/my_app ./my_app.ere --erebus-update
+EREBUS_UPDATE_URL=https://updates.example.com/my_app ./my_app.erebus --erebus-update
 ```
 
 Progress and statistics are printed on stderr (stdout is reserved for the app):
@@ -79,7 +79,7 @@ Progress and statistics are printed on stderr (stdout is reserved for the app):
 [erebus]   fetched chunk 2/247 (65536 bytes)
 …
 [erebus] update applied: 203 chunks reused (12.7 MiB), 44 chunks fetched (2.8 MiB), total 247
-[erebus] updated binary: /home/alice/app.ere
+[erebus] updated binary: /home/alice/app.erebus
 ```
 
 The `reused` number is the bandwidth you saved: those chunks were already
@@ -100,7 +100,7 @@ forwarded to the application.
 Nothing is trusted from the network:
 
 1. The manifest is verified with Ed25519 against the trusted keys in
-   `~/.ere/trusted-keys/` (same keys the binary signature uses) **before**
+   `~/.erebus/trusted-keys/` (same keys the binary signature uses) **before**
    a single byte is written.
 2. The Merkle root must match the manifest's own chunk table.
 3. Every chunk — reused or downloaded — must SHA-256 to its manifest entry;

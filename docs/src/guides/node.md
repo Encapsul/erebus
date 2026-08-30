@@ -40,13 +40,13 @@ server.listen(port, () => {
 Build it:
 
 ```bash
-erebus build ./examples/hello-node -o hello-node.ere
+erebus build ./examples/hello-node -o hello-node.erebus
 ```
 
 Run it:
 
 ```bash
-./hello-node.ere
+./hello-node.erebus
 # Server listening on http://127.0.0.1:8080
 ```
 
@@ -59,7 +59,7 @@ detects it and sets `NODE_PATH` inside the extracted rootfs.
 ```bash
 cd my-node-app
 npm install express
-erebus build . -o my-app.ere
+erebus build . -o my-app.erebus
 ```
 
 The build output will confirm:

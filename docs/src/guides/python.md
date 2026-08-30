@@ -14,7 +14,7 @@ my_app/
 ## Build
 
 ```bash
-erebus build ./my_app -o my_app.ere
+erebus build ./my_app -o my_app.erebus
 ```
 
 The builder:
@@ -23,7 +23,7 @@ The builder:
 2. embeds the build machine's `python3` interpreter;
 3. embeds the **stdlib** (`/usr/lib/pythonX.Y`);
 4. resolves `.so` dependencies via the ELF analyzer (libc, etc.);
-5. compresses and assembles the `.ere`.
+5. compresses and assembles the `.erebus`.
 
 ## Environment variables
 
@@ -36,7 +36,7 @@ PORT = int(os.environ.get("PORT", "8080"))
 ```
 
 ```bash
-PORT=9000 ./my_app.ere
+PORT=9000 ./my_app.erebus
 ```
 
 ## Third-party dependencies (site-packages)
@@ -67,8 +67,8 @@ The example `examples/bottle-web` demonstrates this: it serves HTTP with
 `bottle`, a web framework **not** in the stdlib.
 
 ```bash
-erebus build ./examples/bottle-web -o bottle-web.ere
-./bottle-web.ere   # → Hello from bottle, packaged by erebus
+erebus build ./examples/bottle-web -o bottle-web.erebus
+./bottle-web.erebus   # → Hello from bottle, packaged by erebus
 ```
 
 ## Requirements.txt → pip install at build time
@@ -78,7 +78,7 @@ automatically creates a temporary venv, pip-installs the dependencies, and
 embeds them:
 
 ```bash
-erebus build ./my_app -o my_app.ere
+erebus build ./my_app -o my_app.erebus
 # [erebus] pip install: ./my_app/requirements.txt → /app/site-packages
 ```
 

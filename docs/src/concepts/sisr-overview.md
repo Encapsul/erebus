@@ -14,7 +14,7 @@ can update itself.
 |---|---|---|
 | Build | `erebus build ./app -o app.erebus` | `erebus build ./app -o app.erebus --self-update` |
 | Contents | launcher + payload (SquashFS) | launcher + payload + **embedded SISR engine** |
-| Update | rebuild + redistribute | `./app.ere update` — self-rebuilds from signed deltas |
+| Update | rebuild + redistribute | `./app.erebus update` — self-rebuilds from signed deltas |
 | Toolchain on target | none | **still none** (engine is embedded) |
 | Behavior | static container | static container by default, updatable on demand |
 | Trust | signature at launch | signature at launch **+** signed chain for every delta |
@@ -29,7 +29,7 @@ explicitly (invariant I-2 of the [SISR spec](../architecture/sisr-spec.md)).
 A classic `.erebus` is immutable. Shipping a fix means:
 
 ```
-[dev machine] erebus build  →  [v1.1 .ere]  →  redistribute  →  [target]
+[dev machine] erebus build  →  [v1.1 .erebus]  →  redistribute  →  [target]
 ```
 
 For a handful of servers that's acceptable. For fleets behind slow links, or
@@ -44,7 +44,7 @@ target machine itself:
 ## The reconstruction flow
 
 ```
-[ Binary v1.0 ] ──( ./app.ere update )──▶ [ Interrogate remote manifest ]
+[ Binary v1.0 ] ──( ./app.erebus update )──▶ [ Interrogate remote manifest ]
                                                 │
                                                 ▼
                                        [ Download deltas / chunks ]

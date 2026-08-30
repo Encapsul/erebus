@@ -30,9 +30,9 @@ make stub
 ## 2. Build & run a Python app
 
 ```bash
-erebus build ./examples/hello-web -o hello-web.ere
+erebus build ./examples/hello-web -o hello-web.erebus
 
-./hello-web.ere
+./hello-web.erebus
 # Server listening on http://127.0.0.1:8080
 ```
 
@@ -41,18 +41,18 @@ Open http://127.0.0.1:8080 in your browser.
 ## 3. Build & run a Node.js app
 
 ```bash
-erebus build ./examples/hello-node -o hello-node.ere
+erebus build ./examples/hello-node -o hello-node.erebus
 
-./hello-node.ere
+./hello-node.erebus
 # Server listening on http://127.0.0.1:8080
 ```
 
 See the [Node.js guide](./node.md) for details on dependencies and `node_modules`.
 
-## 4. Inspect a .ere
+## 4. Inspect a .erebus
 
 ```bash
-erebus inspect hello-web.ere
+erebus inspect hello-web.erebus
 ```
 
 ```
@@ -71,20 +71,20 @@ integrity sha256: 4232327e...
 # Generate a keypair
 erebus keygen --key-dir $XDG_DATA_HOME/erebus/keys
 
-# Sign a .ere
-erebus sign hello-web.ere --key $XDG_DATA_HOME/erebus/keys/<fingerprint>.key
+# Sign a .erebus
+erebus sign hello-web.erebus --key $XDG_DATA_HOME/erebus/keys/<fingerprint>.key
 
 # Copy public key to trusted directory
 cp $XDG_DATA_HOME/erebus/keys/<fingerprint>.pub $XDG_DATA_HOME/erebus/trusted-keys/
 
 # Verify
-erebus verify hello-web.ere
+erebus verify hello-web.erebus
 ```
 
 ## Debug
 
 ```bash
-EREBUS_VERBOSE=1 ./hello-web.ere
+EREBUS_VERBOSE=1 ./hello-web.erebus
 # Shows cold/warm start, extraction, and cache status
 ```
 

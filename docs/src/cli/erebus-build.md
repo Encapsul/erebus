@@ -1,13 +1,13 @@
 # `erebus build`
 
-Package an app directory into a single self-extracting `.ere` executable.
+Package an app directory into a single self-extracting `.erebus` executable.
 
 ```bash
 erebus build [OPTIONS] [APP]
 ```
 
-`APP` defaults to `.`. The output is `app.ere` unless `-o` is given (a
-trailing slash appends `app.ere` to the directory).
+`APP` defaults to `.`. The output is `app.erebus` unless `-o` is given (a
+trailing slash appends `app.erebus` to the directory).
 
 ## Runtime selection
 
@@ -20,7 +20,7 @@ interpreter with `--embed-interpreter` (for example `python3`, `node`,
 
 | Flag | Description |
 |---|---|
-| `-o, --output <PATH>` | Output file (default `app.ere`) |
+| `-o, --output <PATH>` | Output file (default `app.erebus`) |
 | `-k, --key <PATH>` | Ed25519 signing key (32 raw bytes) |
 | `--isolation <MODE>` | Isolation level: `sandbox` (0) .. hard (default `sandbox`) |
 | `--seccomp` | Install a seccomp BPF denylist at runtime |
@@ -55,21 +55,21 @@ interpreter with `--embed-interpreter` (for example `python3`, `node`,
 
 ```bash
 # Updatable binary: SISR section + signed manifest + embedded update channel
-erebus build ./my_app -o my_app.ere \
+erebus build ./my_app -o my_app.erebus \
     --enable-sisr \
-    --key ~/.ere/keys/<fingerprint>.key \
+    --key ~/.erebus/keys/<fingerprint>.key \
     --update-url https://updates.example.com/my_app
 ```
 
 This produces two artifacts:
 
-- `my_app.ere` — the self-extracting binary (payload is content-addressed;
+- `my_app.erebus` — the self-extracting binary (payload is content-addressed;
   unchanged chunks can be reused in place during an update);
-- `my_app.ere.manifest` — the signed `XBMR` remote manifest that the launcher
+- `my_app.erebus.manifest` — the signed `XBMR` remote manifest that the launcher
   fetches and verifies before applying an update.
 
 Publish both, plus the chunk files, to the update channel so target machines
-can run `./my_app.ere --erebus-update` (see [User-updates](../guides/user-updates.md)).
+can run `./my_app.erebus --erebus-update` (see [User-updates](../guides/user-updates.md)).
 
 ### Signing semantics
 

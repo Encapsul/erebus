@@ -1,6 +1,6 @@
 # The Builder
 
-The builder analyzes an application and produces the `.ere`. It's written in
+The builder analyzes an application and produces the `.erebus`. It's written in
 **Rust** as part of `erebus-core` — zero Python dependency at runtime.
 
 - **Code**: `erebus-core/src/` (assembly, compress, detect, pkgmgr, tar, etc.)
@@ -69,7 +69,7 @@ Final assembly, then `chmod +x`:
 ^0          ^payload_offset                              ^meta_offset      ^EOF-92
 ```
 
-See [`.ere` Format](./format.md#layers-v2) for the layer table details.
+See [`.erebus` Format](./format.md#layers-v2) for the layer table details.
 
 ## Typical output
 
@@ -90,7 +90,7 @@ $ erebus build ./examples/bottle-web
   app layer: site-packages from .../bottle-web/site-packages
   runtime layer: 54.0MB -> 11.9MB (zstd, cached)
   app layer: 0.2MB -> 0.0MB (zstd)
-[erebus] wrote ./bottle-web.ere (7.1MB) in 25.1s
+[erebus] wrote ./bottle-web.erebus (7.1MB) in 25.1s
 ```
 
 Rebuild after code change (runtime layer reused):
@@ -98,7 +98,7 @@ Rebuild after code change (runtime layer reused):
 ```
   runtime layer: reused from build cache (no recompression) ✓
   app layer: 0.2MB -> 0.0MB (zstd)
-[erebus] wrote ./bottle-web.ere (7.1MB) in 1.2s
+[erebus] wrote ./bottle-web.erebus (7.1MB) in 1.2s
 ```
 
 The resolved libraries (5) include the dynamic linker (`ld-linux`) and are

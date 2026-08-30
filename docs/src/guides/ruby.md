@@ -19,10 +19,10 @@ the presence of a `Gemfile` or a single `.rb` file.
 
 ```bash
 # Bundler project
-erebus build ./my-ruby-app -o my-ruby-app.ere
+erebus build ./my-ruby-app -o my-ruby-app.erebus
 
 # Single file
-erebus build ./my-script -o my-script.ere
+erebus build ./my-script -o my-script.erebus
 ```
 
 The builder:
@@ -31,7 +31,7 @@ The builder:
 2. for Bundler projects, reads `GEM_PATH` from `.bundle/config` or `vendor/bundle/`;
 3. embeds the `ruby` interpreter and its shared libraries;
 4. packages gems into the app layer;
-5. compresses and assembles the `.ere`.
+5. compresses and assembles the `.erebus`.
 
 ## Entrypoint detection
 
@@ -51,7 +51,7 @@ If none found, defaults to `main.rb`.
 ```bash
 cd my-ruby-app
 bundle install --deployment    # installs to vendor/bundle
-erebus build . -o my-app.ere
+erebus build . -o my-app.erebus
 ```
 
 The builder reads `BUNDLE_PATH` from `.bundle/config` and embeds the gem
@@ -65,14 +65,14 @@ Rails projects are detected by the presence of `config/ru`. The builder uses
 ```bash
 cd my-rails-app
 bundle install --deployment
-erebus build . -o my-rails-app.ere
+erebus build . -o my-rails-app.erebus
 ```
 
 ## Environment variables
 
 ```bash
-RAILS_ENV=production ./my-rails-app.ere
-PORT=3000 ./my-rails-app.ere
+RAILS_ENV=production ./my-rails-app.erebus
+PORT=3000 ./my-rails-app.erebus
 ```
 
 ## Known limitations

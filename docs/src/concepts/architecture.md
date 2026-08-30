@@ -45,7 +45,7 @@ The diagram flows top to bottom:
      resolution), runtime detection, and hidden dependency detection
      (subprocess, `dlopen`) — see the *AI* annotation on the right.
    - **Packager**: builds the rootfs, compresses with zstd, assembles the
-     final `.ere`.
+     final `.erebus`.
    - The **AI** annotation (top right) marks the intended role of AI:
      *analyze source code, detect subprocess and dlopen calls invisible to
      static analysis*. This is the project's differentiator — see
@@ -129,7 +129,7 @@ The reconstruction flow replaces the "redistribute a new binary" step with a
 **self-rebuild on the target**:
 
 ```
-[ Binary v1.0 ] ──( ./app.ere update )──▶ [ Interrogate remote manifest ]
+[ Binary v1.0 ] ──( ./app.erebus update )──▶ [ Interrogate remote manifest ]
                                                 │
                                                 ▼
                                        [ Download deltas / chunks ]

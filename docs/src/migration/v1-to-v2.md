@@ -10,12 +10,12 @@ ways to migrate them.
 
 ## Backward compatibility guarantee
 
-**A v1 `.ere` is read, extracted, and executed by the v2 runtime exactly as
+**A v1 `.erebus` is read, extracted, and executed by the v2 runtime exactly as
 before — no modification, no warning.** SISR is additive: the launcher gates
 on a single flag in the footer, never on the file predating it.
 
 ```
-                        [ .ere file to load ]
+                        [ .erebus file to load ]
                                    │
                        Contains SISR header?
                             /            \
@@ -39,7 +39,7 @@ Deployment scripts written against v1 remain 100 % valid against v2.
 
 ## What an upgrade actually changes
 
-`erebus upgrade-binary <input_v1.ere> <output_v2.ere>` performs an **in-place
+`erebus upgrade-binary <input_v1.erebus> <output_v2.erebus>` performs an **in-place
 format promotion**:
 
 ```
@@ -54,7 +54,7 @@ after:  [stub][payload][metadata][manifest][SisrFooterExt][footer]
 - `payload_offset`, `meta_offset`, `payload_csize`, `meta_size` are unchanged,
   so a legacy runtime that reads backwards from EOF keeps decoding the
   upgraded file.
-- A signed delta manifest (`<output>.ere.manifest`) is written next to the
+- A signed delta manifest (`<output>.erebus.manifest`) is written next to the
   binary, matching a fresh SISR build.
 
 `upgrade-binary` refuses to touch a file that already has SISR, and refuses
@@ -68,7 +68,7 @@ must be inserted — rebuild those with `erebus build --enable-sisr`).
 ```bash
 erebus build ./app --enable-sisr \
   --update-url https://updates.example.com/app \
-  --key ~/.ere/keys/update.key
+  --key ~/.erebus/keys/update.key
 ```
 
 Best when you can regenerate the app image: you get the current launcher, a
@@ -77,8 +77,8 @@ signed manifest, and an embedded update URL in one step.
 ### Option B — promote an existing v1 binary
 
 ```bash
-erebus upgrade-binary ./app-old.ere ./app-new.ere \
-  --key ~/.ere/keys/update.key
+erebus upgrade-binary ./app-old.erebus ./app-new.erebus \
+  --key ~/.erebus/keys/update.key
 ```
 
 Use this to migrate already-deployed binaries without rebuilding the payload.
@@ -87,7 +87,7 @@ launcher as well, rebuild (Option A). The promoted binary can be updated
 immediately:
 
 ```bash
-./app-new.ere --erebus-update https://updates.example.com/app
+./app-new.erebus --erebus-update https://updates.example.com/app
 ```
 
 ## Deprecation governance
@@ -95,15 +95,15 @@ immediately:
 - **v1 (SISR-less)** remains a supported, first-class input for the runtime
   and for `upgrade-binary`. No deprecation warnings are emitted.
 - **v2 (SISR)** is the recommended build output going forward.
-- The `.ere` footer format (magic constants, field offsets) is frozen; new
+- The `.erebus` footer format (magic constants, field offsets) is frozen; new
   capabilities ship as flags and format-version bumps that are always
   backwards-readable, never repurposed fields.
 
 ## Verifying a migration
 
 ```bash
-erebus inspect ./app-new.ere          # flags show SISR
-erebus upgrade-binary ./app-new.ere ./again.ere
+erebus inspect ./app-new.erebus          # flags show SISR
+erebus upgrade-binary ./app-new.erebus ./again.erebus
 #   → error: input is already SISR-enabled  (expected)
 ```
 

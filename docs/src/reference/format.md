@@ -194,11 +194,11 @@ layer is rebuilt.
 ```bash
 # First build: ~25s (compressing runtime layer, ~54 MB)
 $ erebus build ./my_app
-[erebus] wrote my_app.ere (7.1MB) in 25.1s
+[erebus] wrote my_app.erebus (7.1MB) in 25.1s
 
 # Rebuild after code change: ~1s (runtime layer reused)
 $ erebus build ./my_app
-[erebus] wrote my_app.ere (7.1MB) in 1.2s
+[erebus] wrote my_app.erebus (7.1MB) in 1.2s
 ```
 
 Two apps sharing the same runtime share the same runtime layer in the build

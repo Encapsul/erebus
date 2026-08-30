@@ -12,7 +12,7 @@ erebus detects PHP applications by looking for `composer.json` in the project ro
 
 ```bash
 # Laravel projects with artisan
-erebus build my-laravel-app -o my-laravel-app.ere
+erebus build my-laravel-app -o my-laravel-app.erebus
 ```
 
 erebus detects Laravel by the presence of the `artisan` file and uses it as the entry point.
@@ -21,7 +21,7 @@ erebus detects Laravel by the presence of the `artisan` file and uses it as the 
 
 ```bash
 # Symfony projects with symfony.lock
-erebus build my-symfony-app -o my-symfony-app.ere
+erebus build my-symfony-app -o my-symfony-app.erebus
 ```
 
 erebus detects Symfony by `symfony.lock` or `config/bundles.php` and uses `bin/console` as the entry point.
@@ -30,14 +30,14 @@ erebus detects Symfony by `symfony.lock` or `config/bundles.php` and uses `bin/c
 
 ```bash
 # WordPress with wp-config.php
-erebus build my-wordpress-site -o my-wordpress-site.ere
+erebus build my-wordpress-site -o my-wordpress-site.erebus
 ```
 
 ### Generic PHP Apps
 
 ```bash
 # Apps with public/index.php or index.php
-erebus build my-php-app -o my-php-app.ere
+erebus build my-php-app -o my-php-app.erebus
 ```
 
 ## Requirements
@@ -64,11 +64,11 @@ cat > index.php << 'EOF'
 echo "Hello from PHP " . PHP_VERSION . "\n";
 EOF
 
-# Build the .ere
-erebus build . -o my-php-app.ere
+# Build the .erebus
+erebus build . -o my-php-app.erebus
 
 # Run it
-./my-php-app.ere
+./my-php-app.erebus
 ```
 
 ## Notes

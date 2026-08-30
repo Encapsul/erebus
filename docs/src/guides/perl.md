@@ -12,21 +12,21 @@ erebus detects Perl applications by looking for `Makefile.PL` or `cpanfile` in t
 
 ```bash
 # Perl apps with app.pl (PSGI)
-erebus build my-perl-app -o my-perl-app.ere
+erebus build my-perl-app -o my-perl-app.erebus
 ```
 
 ### CGI Scripts
 
 ```bash
 # Traditional CGI scripts
-erebus build my-cgi-app -o my-cgi-app.ere
+erebus build my-cgi-app -o my-cgi-app.erebus
 ```
 
 ### CLI Tools
 
 ```bash
 # Perl CLI tools with bin/app
-erebus build my-perl-tool -o my-perl-tool.ere
+erebus build my-perl-tool -o my-perl-tool.erebus
 ```
 
 ## Requirements
@@ -56,11 +56,11 @@ use My::App;
 My::App->new->start;
 EOF
 
-# Build the .ere
-erebus build . -o my-perl-app.ere
+# Build the .erebus
+erebus build . -o my-perl-app.erebus
 
 # Run it
-./my-perl-app.ere
+./my-perl-app.erebus
 ```
 
 ## Notes
