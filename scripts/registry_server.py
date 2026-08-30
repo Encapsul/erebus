@@ -1147,6 +1147,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_index()
         if path == "/admin/gc":
             return self._admin_gc()
+        if path == "/admin/scan":
+            return self._admin_scan()
         if path == "/admin/backup":
             return self._admin_backup()
         if path == "/admin/restore" and self.command == "POST":
@@ -1586,6 +1588,44 @@ class Handler(BaseHTTPRequestHandler):
                 self.store.record_audit(member_user, f"{provider}_webhook_token", repo)
                 return self.send_json({"issued": True, "user": member_user, "repo": repo, "token": token})
         return self.send_json({"received": True})
+
+    # ---- cve scanning -------------------------------------------------------
+    def _scan_cve(self, path: str) -> list[dict]:
+        """Scan a model artifact for known CVEs.
+
+        Uses a local CVE database if available, otherwise returns empty list.
+        The database is a JSON file mapping file hashes to CVE entries.
+        """
+        cve_db_path = os.path.join(self.root, "cve_db.json")
+        if not os.path.isfile(cve_db_path):
+            return []
+        try:
+            with open(cve_db_path, "r") as f:
+                cve_db = json.load(f)
+        except (OSError, ValueError):
+            return []
+        file_hash = self.store.sha256_cached(path)
+        return cve_db.get(file_hash, [])
+
+    def _admin_scan(self):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        results = []
+        for name in sorted(os.listdir(self.store.pkg_dir)):
+            if not name.endswith(".erebus") and not name.endswith(".gguf"):
+                continue
+            path = os.path.join(self.store.pkg_dir, name)
+            if not os.path.isfile(path):
+                continue
+            cves = self._scan_cve(path)
+            if cves:
+                results.append({
+                    "file": name,
+                    "sha256": self.store.sha256_cached(path),
+                    "cves": cves,
+                })
+        return self.send_json({"scanned": len(results), "vulnerable": len([r for r in results if r["cves"]]), "results": results})
 
     # ---- orgs ----------------------------------------------------------------
     def _org_create(self, raw: bytes | None):
