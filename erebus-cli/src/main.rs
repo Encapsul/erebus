@@ -79,6 +79,16 @@ enum Commands {
     /// signed JSON document suitable for regulators and auditors.
     Audit(commands::audit::AuditArgs),
 
+    /// Generate or embed a Software Bill of Materials (SBOM)
+    ///
+    /// Produces a `CycloneDX` SBOM from the .erebus metadata, or embeds it
+    /// in the binary for supply-chain transparency.
+    ///
+    /// Examples:
+    ///   erebus sbom myapp.erebus
+    ///   erebus sbom myapp.erebus --embed --key ~/.erebus/keys/*.key
+    Sbom(commands::sbom::SbomArgs),
+
     /// Download the registry's monthly audit trail (JSONL)
     ///
     /// Examples:
@@ -259,6 +269,7 @@ fn main() -> ExitCode {
             }
             commands::audit::run(args)
         }
+        Commands::Sbom(args) => commands::sbom::run(args),
         Commands::AuditLog(args) => commands::audit_log::run(args),
         Commands::Billing(args) => commands::billing::run(args),
         Commands::Verify(mut args) => {

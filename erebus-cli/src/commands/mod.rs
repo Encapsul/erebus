@@ -16,6 +16,7 @@ pub mod publish;
 pub mod pull;
 pub mod run;
 pub mod scan;
+pub mod sbom;
 pub mod selftest;
 pub mod serve;
 pub mod sign;

@@ -687,3 +687,14 @@ fn test_audit_log_help() {
         .stdout(predicate::str::contains("--month"))
         .stdout(predicate::str::contains("--token"));
 }
+
+#[test]
+fn test_sbom_help() {
+    erebus()
+        .args(["sbom", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--embed"))
+        .stdout(predicate::str::contains("--output"))
+        .stdout(predicate::str::contains("CycloneDX"));
+}
