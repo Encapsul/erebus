@@ -99,18 +99,21 @@ Reproducible numbers: [`benchmarks/`](benchmarks/README.md).
 
 ### 🔴 P0 — Immediate fixes / uncommitted debt
 
-- [ ] **Commit the `scripts/registry_server.py` diff**: adds `verify_integrity()`
+- [x] **Commit the `scripts/registry_server.py` diff**: adds `verify_integrity()`
   (SHA-256 check of blobs `[payload‖meta]`, independent of the embedded state,
   fail-closed). Closes a hole: a corrupted blob must not "forget" its
-  Trusted/Revoked state and be served as Acquired.
-- [ ] **Docs Phase 1: standardize `.ere` → `.erebus`** across ~30 files
+  Trusted/Revoked state and be served as Acquired. → `d1ec174`.
+- [x] **Docs Phase 1: standardize `.ere` → `.erebus`** across ~30 files
   (`docs/src/guides/*`, `docs/src/concepts/*`, `docs/src/reference/*`,
   `docs/src/architecture/*`, `docs/src/spec/*`, `docs/src/migration/*`,
   `docs/src/cli/erebus-build.md`, `docs/src/security.md`, `docs/src/CHANGELOG.md`).
-  `.erebus` today appears in only 8 files.
-- [ ] **Residual validation**: run the darwin-aarch64 slice on real Apple
-  Silicon; automated QEMU CI for ARM slices.
-- [ ] **Ops**: watch ratatui upstream; recurring VPS disk cleanup.
+  → `39a6d7d`. No remaining `.ere` references in tracked files.
+- [x] **Residual validation**: automated QEMU CI for ARM slices (aarch64 + armhf)
+  added (`0c40bd6`). darwin-aarch64 on real Apple Silicon requires hardware
+  (not done — needs physical Mac or cloud macOS runner).
+- [x] **Ops**: VPS disk cleanup done (96%→87%, 13GB freed). Recurring cleanup
+  cron + `scripts/test_arm_qemu.sh` added (`ac58b47`). Watching ratatui
+  upstream is ongoing.
 
 ### 🟠 P1 — Close the monetization loop (Pro/Team tiers)
 
