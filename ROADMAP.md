@@ -135,7 +135,9 @@ Reproducible numbers: [`benchmarks/`](benchmarks/README.md).
   `?execute=1` quarantines to `/quarantine/` for manual review (`5f102d5`).
 - [x] **Backup/restore manifest** — `GET /admin/backup` exports JSON manifest;
   `POST /admin/restore` restores missing packages with metadata (`97553d5`).
-- [ ] **Pluggable auth: HMAC, Ed25519, OIDC, JWKS** — multi-provider.
+- [x] **Pluggable auth** — `Bearer token:<token>` (existing scrypt) +
+  `Bearer hmac:<username>:<sig>` shared-secret HMAC-SHA256 (`1bfe150`).
+  Ed25519 / OIDC / JWKS deferred (require non-stdlib deps).
 - [ ] **Provider integration** — GitHub/GitLab/Gitea webhooks (token issuance + repo-scoped auth).
 - [ ] **CVE scanning** of model artifacts (GGUF/safetensors).
 
