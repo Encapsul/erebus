@@ -40,7 +40,13 @@ cp scripts/nginx-registry.conf /etc/nginx/sites-available/erebus-registry
 ln -sf /etc/nginx/sites-available/erebus-registry /etc/nginx/sites-enabled/
 nginx -t && systemctl reload nginx
 
-# 5. Enable + start
+# 5. Install periodic integrity timer
+cp scripts/registry-integrity.service /etc/systemd/system/erebus-registry-integrity.service
+cp scripts/registry-integrity.timer /etc/systemd/system/erebus-registry-integrity.timer
+systemctl daemon-reload
+systemctl enable --now erebus-registry-integrity.timer
+
+# 6. Enable + start
 systemctl daemon-reload
 systemctl enable --now erebus-registry.service
 

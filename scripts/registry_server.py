@@ -1547,6 +1547,8 @@ def main() -> None:
                     help="OPT-IN fail-open: permit anonymous uploads before the "
                          "first user registers. Off by default — the registry is "
                          "fail-closed, so mutations require auth unless this is set")
+    ap.add_argument("--verify", action="store_true",
+                    help="Run a one-shot integrity scan of all stored blobs and exit")
     ap.add_argument("--tls-cert",
                     help="path to TLS certificate file (PEM)")
     ap.add_argument("--tls-key",
@@ -1610,6 +1612,21 @@ def main() -> None:
         scheme = "http"
     else:
         scheme = "http"
+
+    if args.verify:
+        store = Handler.store
+        print("Running integrity scan...", flush=True)
+        snapshot = store.scan_integrity_locked()
+        ok_count = sum(1 for v in snapshot.values() if v.get("ok"))
+        bad_count = len(snapshot) - ok_count
+        print(f"Scanned {len(snapshot)} blobs: {ok_count} ok, {bad_count} corrupt", flush=True)
+        if bad_count > 0:
+            print("Corrupt blobs:", flush=True)
+            for name, info in snapshot.items():
+                if not info.get("ok"):
+                    print(f"  {name}: {info.get('detail')}", flush=True)
+            raise SystemExit(1)
+        raise SystemExit(0)
 
     bootstrap = Handler.store.bootstrap_open_uploads()
     billing_state = ("on" if Handler.billing.get("secret_key")

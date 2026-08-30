@@ -1,0 +1,9 @@
+[Unit]
+Description=erebus registry integrity check
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/erebus-registry
+ExecStart=/usr/bin/python3 /opt/erebus-registry/registry_server.py \
+  --dir /opt/erebus-registry/data \
+  --verify
