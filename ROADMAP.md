@@ -146,11 +146,11 @@ Reproducible numbers: [`benchmarks/`](benchmarks/README.md).
 
 ### 🔵 P3 — Multi-protocol frontends (Shardline-like)
 
-- [ ] **HuggingFace Hub API compat** — drop-in for `huggingface-cli`.
-- [ ] **OCI Distribution frontend** — `docker push/pull`-compatible.
-- [ ] **Git LFS frontend** — model versioning in Git.
-- [ ] **S3-compatible frontend** — S3 API for lakehouse clients.
-- [ ] **Bazel HTTP remote cache frontend** — CI build cache.
+- [x] **HuggingFace Hub API compat** — `scripts/frontends/hf_frontend.py`, chaos survived.
+- [x] **OCI Distribution frontend** — `scripts/frontends/oci_frontend.py`, chaos survived.
+- [x] **Git LFS frontend** — `scripts/frontends/lfs_frontend.py`, chaos survived.
+- [x] **S3-compatible frontend** — `scripts/frontends/s3_frontend.py`, chaos survived.
+- [x] **Bazel HTTP remote cache frontend** — `scripts/frontends/bazel_frontend.py`, chaos survived.
 
 ### 🟣 P4 — Enterprise + distribution
 
