@@ -88,11 +88,68 @@ def atomic_write(path: str, data: bytes):
     os.replace(tmp, path)
 
 
+# .erebus footer layout (see erebus-core/src/format.rs):
+#   v3+: full 92-byte footer = 8-byte sig_offset prefix + 84-byte core
+#   v2:  84-byte core only
+# Core (84 bytes): MAGIC[0:5] ver[5] arch[6] flags[7]
+#   payload_offset[8:16] payload_csize[16:24] payload_usize[24:32]
+#   payload_sha256[32:64] meta_offset[64:72] meta_size[72:80] footer_magic[80:84]
+EREBUS_MAGIC = b"ERE\x01\x00"
+
+
+def artifact_lifecycle(path: str) -> tuple[str, bool]:
+    """Read the embedded lifecycle state of a stored .erebus blob.
+
+    Returns (state_name, allow_untrusted). The state is embedded in the
+    artifact's own metadata JSON (set by `erebus lifecycle`), and this is the
+    registry's fail-safe enforcement point: a Revoked/Deleted artifact must
+    never be served even if a client asks by name.
+
+    Any file that predates lifecycle metadata, or whose footer cannot be
+    parsed, is treated as the default `Acquired` state with an untrusted-
+     deny policy — i.e. servable. This matches the Rust stub's treatment of a
+    missing `artifact_state` as `Acquired`, so legacy/public artifacts keep
+    working while deny-listed ones fail closed.
+    """
+    try:
+        size = os.path.getsize(path)
+        if size < 84:
+            return "Acquired", False
+        with open(path, "rb") as f:
+            if size >= 92:
+                f.seek(size - 92)
+                core = f.read(92)
+                # v3+: MAGIC lives at index 8 (after the sig_offset prefix).
+                if core[8:13] == EREBUS_MAGIC and core[13] >= 3:
+                    meta_off = int.from_bytes(core[72:80], "little")
+                    meta_len = int.from_bytes(core[80:88], "little")
+                else:
+                    core = core[8:]
+                    meta_off = int.from_bytes(core[64:72], "little")
+                    meta_len = int.from_bytes(core[72:80], "little")
+            else:
+                f.seek(size - 84)
+                core = f.read(84)
+                if core[0:5] != EREBUS_MAGIC:
+                    return "Acquired", False
+                meta_off = int.from_bytes(core[64:72], "little")
+                meta_len = int.from_bytes(core[72:80], "little")
+            if meta_len <= 0 or meta_len > 64 * 1024 * 1024:
+                return "Acquired", False
+            f.seek(meta_off)
+            meta = json.loads(f.read(meta_len).decode("utf-8", "replace"))
+    except (OSError, ValueError, TypeError):
+        return "Acquired", False
+    state = str(meta.get("artifact_state") or "Acquired")
+    allow = bool((meta.get("artifact_policy") or {}).get("allow_untrusted", False))
+    return state, allow
+
+
 class Store:
     """All mutable state, guarded by an in-process RLock + per-file flock."""
 
     def __init__(self, root: str, quota_bytes: int, upload_cap: int,
-                 require_auth: bool = False):
+                 require_auth: bool = False, allow_anon_uploads: bool = False):
         self.root = root
         self.pkg_dir = os.path.join(root, "packages")
         self.meta_dir = os.path.join(root, "meta")
@@ -109,6 +166,11 @@ class Store:
         self.quota_bytes = quota_bytes
         self.upload_cap = upload_cap
         self.require_auth = require_auth
+        # Fail-closed (default-deny): anonymous uploads are NEVER implicit.
+        # They only happen when the operator explicitly opts in with
+        # --allow-anon-uploads (development/bootstrap). Mutation endpoints
+        # require a valid token in every other case.
+        self.allow_anon_uploads = allow_anon_uploads
         self.lock = threading.RLock()
         self._hash_cache: dict[str, tuple[float, str]] = {}
         self.users = self._load(self.users_path, {})
@@ -128,9 +190,11 @@ class Store:
     # ---- users ------------------------------------------------------------
     def bootstrap_open_uploads(self) -> bool:
         with self.lock:
+            # Fail-closed (default-deny): anonymous uploads require an
+            # explicit opt-in flag. `require_auth` forces closure regardless.
             if self.require_auth:
                 return False
-            return len(self.users) == 0
+            return self.allow_anon_uploads
 
     @staticmethod
     def _hash_password(password: str, salt: bytes) -> str:
@@ -393,6 +457,7 @@ class Store:
             }
             meta = self.get_meta(name)
             entry["private"] = bool(meta.get("private"))
+            entry["state"] = artifact_lifecycle(path)[0]
             packages.append(entry)
         return json.dumps({"packages": packages}).encode()
 
@@ -682,6 +747,19 @@ class Handler(BaseHTTPRequestHandler):
         is_pack = bool(SAFE_PACK.match(fname))
         if not (SAFE_FILE.match(fname) or is_pack or is_sidecar) or not os.path.isfile(full):
             return self.send_json({"error": "package not found"}, 404)
+        # Policy-gated promotion (roadmap #8): a deny-listed artifact must not
+        # be served even when requested by name. Revoked/Deleted always fail
+        # closed; Quarantined is served only under an allow_untrusted policy.
+        if SAFE_FILE.match(fname) and not is_pack and not is_sidecar:
+            state, allow = artifact_lifecycle(full)
+            if state in ("Revoked", "Deleted"):
+                return self.send_json(
+                    {"error": f"artifact is {state} and unavailable for download"}, 410
+                )
+            if state == "Quarantined" and not allow:
+                return self.send_json(
+                    {"error": "artifact is quarantined and not allowed for download"}, 410
+                )
         meta = self.store.get_meta(fname)
         size = os.path.getsize(full)
         rng = self.headers.get("Range")
@@ -1227,8 +1305,12 @@ def main() -> None:
     ap.add_argument("--upload-cap-gb", type=float, default=70.0,
                     help="hard cap on any single upload")
     ap.add_argument("--require-auth", action="store_true",
-                    help="disable bootstrap mode — all uploads require auth even "
-                         "before the first user registers")
+                    help="force strict auth: all uploads require a token, "
+                         "even with --allow-anon-uploads")
+    ap.add_argument("--allow-anon-uploads", action="store_true",
+                    help="OPT-IN fail-open: permit anonymous uploads before the "
+                         "first user registers. Off by default — the registry is "
+                         "fail-closed, so mutations require auth unless this is set")
     ap.add_argument("--tls-cert",
                     help="path to TLS certificate file (PEM)")
     ap.add_argument("--tls-key",
@@ -1259,6 +1341,7 @@ def main() -> None:
     Handler.store = Store(
         args.dir, int(args.quota_gb * 1e9), int(args.upload_cap_gb * 1e9),
         require_auth=args.require_auth,
+        allow_anon_uploads=args.allow_anon_uploads,
     )
     Handler.billing = {
         "secret_key": args.stripe_secret_key,
@@ -1298,7 +1381,7 @@ def main() -> None:
     print(
         f"erebus registry v2 on {scheme}://{args.host}:{args.port} dir={args.dir} "
         f"quota={args.quota_gb}GB/month cap={args.upload_cap_gb}GB/upload "
-        f"auth={'required (bootstrap disabled)' if args.require_auth else 'OPEN — bootstrap mode' if bootstrap else 'require auth'} "
+        f"auth={'required (strict, --require-auth)' if args.require_auth else 'OPEN — anonymous uploads (opt-in --allow-anon-uploads)' if bootstrap else 'required (fail-closed by default)'} "
         f"billing={billing_state}",
         flush=True,
     )

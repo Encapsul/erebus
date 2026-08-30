@@ -48,6 +48,7 @@ EOF
 chmod +x "$WORK/fake-engine"
 mkdir -p "$WORK/reg/packages"
 setsid python3 "$HERE/registry_server.py" --dir "$WORK/reg" --host 127.0.0.1 --port $REG_PORT \
+  --allow-anon-uploads \
   > "$WORK/reg.log" 2>&1 < /dev/null &
 sleep 1.5
 curl -sf "http://127.0.0.1:$REG_PORT/health" >/dev/null; check "registry /health" $?
