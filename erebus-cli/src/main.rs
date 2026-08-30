@@ -86,6 +86,13 @@ enum Commands {
     ///   erebus audit-log --registry <https://registry.erebus.io> --month 2026-08 --org acme -o audit.jsonl
     AuditLog(commands::audit_log::AuditLogArgs),
 
+    /// Manage billing: check tier or start a Stripe Checkout
+    ///
+    /// Examples:
+    ///   erebus billing status --registry <https://registry.erebus.io> --token <token>
+    ///   erebus billing checkout --registry <https://registry.erebus.io> --plan pro --token <token>
+    Billing(commands::billing::BillingArgs),
+
     /// Manage artifact lifecycle state (quarantine / promote / revoke)
     ///
     /// Enforces the closed trust state machine: acquired -> quarantined ->
@@ -253,6 +260,7 @@ fn main() -> ExitCode {
             commands::audit::run(args)
         }
         Commands::AuditLog(args) => commands::audit_log::run(args),
+        Commands::Billing(args) => commands::billing::run(args),
         Commands::Verify(mut args) => {
             if cli.quiet {
                 args.quiet = true;

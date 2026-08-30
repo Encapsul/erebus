@@ -644,3 +644,46 @@ fn test_lifecycle_rejects_signed_file() {
         .assert()
         .failure();
 }
+
+#[test]
+fn test_billing_help() {
+    erebus()
+        .args(["billing", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("billing"))
+        .stdout(predicate::str::contains("status"))
+        .stdout(predicate::str::contains("checkout"));
+}
+
+#[test]
+fn test_billing_status_help() {
+    erebus()
+        .args(["billing", "status", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--registry"))
+        .stdout(predicate::str::contains("--token"));
+}
+
+#[test]
+fn test_billing_checkout_help() {
+    erebus()
+        .args(["billing", "checkout", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--plan"))
+        .stdout(predicate::str::contains("--registry"))
+        .stdout(predicate::str::contains("--token"));
+}
+
+#[test]
+fn test_audit_log_help() {
+    erebus()
+        .args(["audit-log", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--registry"))
+        .stdout(predicate::str::contains("--month"))
+        .stdout(predicate::str::contains("--token"));
+}
