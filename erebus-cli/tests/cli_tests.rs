@@ -247,6 +247,8 @@ fn test_inspect_reports_encrypted_v4() {
             crypto: Some(crypto_value),
             layers: None,
             entrypoint_layer: None,
+            artifact_state: None,
+            artifact_policy: None,
         },
         &BunFeatures::default(),
     )
@@ -366,4 +368,279 @@ fn test_attest_roundtrip() {
     assert!(parsed["execution"]["machine_id_hash"].is_string());
     assert!(parsed["signature"]["signature_hex"].is_string());
     assert!(parsed["signature"]["key_fingerprint"].is_string());
+}
+
+#[test]
+fn test_lifecycle_promote_transitions_acquired_to_trusted() {
+    use erebus_core::assembly::{assemble_erebus, AssemblyInput};
+    use erebus_core::format::Footer;
+    use erebus_core::metadata::ArtifactState;
+
+    let dir = tempdir().unwrap();
+    let rootfs = dir.path().join("rootfs");
+    std::fs::create_dir_all(rootfs.join("app")).unwrap();
+    std::fs::write(rootfs.join("app/main.py"), b"print('hello')").unwrap();
+
+    let payload = erebus_core::tar::create_tar_zstd_with_level(&rootfs, 3).unwrap();
+    let meta = serde_json::json!({
+        "name": "lifecycle-test",
+        "author": "test-user",
+        "license": "MIT",
+        "artifact_state": "Acquired",
+    });
+    let bin_path = dir.path().join("test.erebus");
+    assemble_erebus(
+        &bin_path,
+        &AssemblyInput {
+            stub_bytes: b"STUB",
+            payload: &payload,
+            meta_bytes: serde_json::to_vec(&meta).unwrap().as_slice(),
+            encrypt: false,
+            squashfs: false,
+            target_arch: None,
+            sisr: None,
+        },
+    )
+    .unwrap();
+
+    // Promote: Acquired -> Trusted
+    erebus()
+        .args([
+            "lifecycle",
+            bin_path.to_str().unwrap(),
+            "--action",
+            "promote",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Trusted"));
+
+    // Re-read state from the rewritten binary
+    let mut f = std::fs::File::open(&bin_path).unwrap();
+    let footer = Footer::read_from(&mut f).unwrap();
+    let meta = erebus_core::format::read_at(&mut f, footer.meta_offset, footer.meta_size as usize)
+        .unwrap();
+    let meta: serde_json::Value = serde_json::from_slice(&meta).unwrap();
+    let state: ArtifactState = serde_json::from_value(meta["artifact_state"].clone()).unwrap();
+    assert_eq!(state, ArtifactState::Trusted);
+}
+
+#[test]
+fn test_lifecycle_quarantine_then_promote() {
+    use erebus_core::assembly::{assemble_erebus, AssemblyInput};
+    use erebus_core::format::Footer;
+    use erebus_core::metadata::ArtifactState;
+
+    let dir = tempdir().unwrap();
+    let rootfs = dir.path().join("rootfs");
+    std::fs::create_dir_all(rootfs.join("app")).unwrap();
+    std::fs::write(rootfs.join("app/main.py"), b"print('hi')").unwrap();
+
+    let payload = erebus_core::tar::create_tar_zstd_with_level(&rootfs, 3).unwrap();
+    let meta = serde_json::json!({
+        "name": "lifecycle-test",
+        "author": "test-user",
+        "license": "MIT",
+        "artifact_state": "Acquired",
+    });
+    let bin_path = dir.path().join("test.erebus");
+    assemble_erebus(
+        &bin_path,
+        &AssemblyInput {
+            stub_bytes: b"STUB",
+            payload: &payload,
+            meta_bytes: serde_json::to_vec(&meta).unwrap().as_slice(),
+            encrypt: false,
+            squashfs: false,
+            target_arch: None,
+            sisr: None,
+        },
+    )
+    .unwrap();
+
+    fn read_state(p: &std::path::Path) -> ArtifactState {
+        let mut f = std::fs::File::open(p).unwrap();
+        let footer = Footer::read_from(&mut f).unwrap();
+        let meta =
+            erebus_core::format::read_at(&mut f, footer.meta_offset, footer.meta_size as usize)
+                .unwrap();
+        let meta: serde_json::Value = serde_json::from_slice(&meta).unwrap();
+        serde_json::from_value(meta["artifact_state"].clone()).unwrap()
+    }
+
+    // Acquired -> Quarantined
+    erebus()
+        .args([
+            "lifecycle",
+            bin_path.to_str().unwrap(),
+            "--action",
+            "quarantine",
+        ])
+        .assert()
+        .success();
+    assert_eq!(read_state(&bin_path), ArtifactState::Quarantined);
+
+    // Quarantined -> Trusted (valid transition)
+    erebus()
+        .args([
+            "lifecycle",
+            bin_path.to_str().unwrap(),
+            "--action",
+            "promote",
+        ])
+        .assert()
+        .success();
+    assert_eq!(read_state(&bin_path), ArtifactState::Trusted);
+
+    // Trusted -> Revoked (valid transition)
+    erebus()
+        .args([
+            "lifecycle",
+            bin_path.to_str().unwrap(),
+            "--action",
+            "revoke",
+        ])
+        .assert()
+        .success();
+    assert_eq!(read_state(&bin_path), ArtifactState::Revoked);
+}
+
+#[test]
+fn test_lifecycle_quarantine_clears_allow_untrusted() {
+    use erebus_core::assembly::{assemble_erebus, AssemblyInput};
+    use erebus_core::format::Footer;
+
+    let dir = tempdir().unwrap();
+    let rootfs = dir.path().join("rootfs");
+    std::fs::create_dir_all(rootfs.join("app")).unwrap();
+    std::fs::write(rootfs.join("app/main.py"), b"print('hi')").unwrap();
+
+    let payload = erebus_core::tar::create_tar_zstd_with_level(&rootfs, 3).unwrap();
+    // A freshly-built artifact carries allow_untrusted=true (the build default
+    // for an untrusted dev bundle). Quarantining it MUST clear that flag so
+    // neither the stub nor the registry serves it.
+    let meta = serde_json::json!({
+        "name": "lifecycle-test",
+        "author": "test-user",
+        "license": "MIT",
+        "artifact_state": "Acquired",
+        "artifact_policy": {
+            "allow_untrusted": true,
+            "require_signature": false,
+            "max_retries": 3,
+        },
+    });
+    let bin_path = dir.path().join("test.erebus");
+    assemble_erebus(
+        &bin_path,
+        &AssemblyInput {
+            stub_bytes: b"STUB",
+            payload: &payload,
+            meta_bytes: serde_json::to_vec(&meta).unwrap().as_slice(),
+            encrypt: false,
+            squashfs: false,
+            target_arch: None,
+            sisr: None,
+        },
+    )
+    .unwrap();
+
+    fn read_policy(p: &std::path::Path) -> serde_json::Value {
+        let mut f = std::fs::File::open(p).unwrap();
+        let footer = Footer::read_from(&mut f).unwrap();
+        let meta =
+            erebus_core::format::read_at(&mut f, footer.meta_offset, footer.meta_size as usize)
+                .unwrap();
+        let meta: serde_json::Value = serde_json::from_slice(&meta).unwrap();
+        meta["artifact_policy"].clone()
+    }
+
+    erebus()
+        .args([
+            "lifecycle",
+            bin_path.to_str().unwrap(),
+            "--action",
+            "quarantine",
+        ])
+        .assert()
+        .success();
+
+    let policy = read_policy(&bin_path);
+    assert_eq!(
+        policy["allow_untrusted"].as_bool(),
+        Some(false),
+        "quarantine must clear allow_untrusted; got {policy}"
+    );
+}
+
+#[test]
+fn test_lifecycle_rejects_signed_file() {
+    use erebus_core::assembly::{assemble_erebus, AssemblyInput};
+    use erebus_core::format::Footer;
+
+    let dir = tempdir().unwrap();
+    let rootfs = dir.path().join("rootfs");
+    std::fs::create_dir_all(rootfs.join("app")).unwrap();
+    std::fs::write(rootfs.join("app/main.py"), b"print('hi')").unwrap();
+
+    let payload = erebus_core::tar::create_tar_zstd_with_level(&rootfs, 3).unwrap();
+    let meta = serde_json::json!({
+        "name": "lifecycle-signed",
+        "author": "test-user",
+        "license": "MIT",
+        "artifact_state": "Acquired",
+    });
+    let bin_path = dir.path().join("signed.erebus");
+    assemble_erebus(
+        &bin_path,
+        &AssemblyInput {
+            stub_bytes: b"STUB",
+            payload: &payload,
+            meta_bytes: serde_json::to_vec(&meta).unwrap().as_slice(),
+            encrypt: false,
+            squashfs: false,
+            target_arch: None,
+            sisr: None,
+        },
+    )
+    .unwrap();
+
+    // Generate a key and sign the binary so it carries a signature block.
+    let key_dir = dir.path().join("keys");
+    erebus()
+        .args(["keygen", "--key-dir", key_dir.to_str().unwrap()])
+        .assert()
+        .success();
+    let key_file = std::fs::read_dir(&key_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .find(|e| e.path().extension().map_or(false, |ext| ext == "key"))
+        .expect("key file not found");
+    erebus()
+        .args([
+            "sign",
+            bin_path.to_str().unwrap(),
+            "--key",
+            key_file.path().to_str().unwrap(),
+            "--quiet",
+        ])
+        .assert()
+        .success();
+
+    // Confirm it's signed.
+    let mut f = std::fs::File::open(&bin_path).unwrap();
+    let footer = Footer::read_from(&mut f).unwrap();
+    assert!(footer.is_signed());
+
+    // Lifecycle rewrite must fail closed on a signed file.
+    erebus()
+        .args([
+            "lifecycle",
+            bin_path.to_str().unwrap(),
+            "--action",
+            "promote",
+        ])
+        .assert()
+        .failure();
 }

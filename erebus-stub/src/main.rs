@@ -157,6 +157,14 @@ pub struct Metadata {
     /// Name of the layer containing the main entrypoint.
     #[serde(default)]
     entrypoint_layer: Option<String>,
+    /// Lifecycle trust state. Governs whether the stub will extract/execute.
+    /// `Revoked`/`Deleted` fail closed; `Quarantined` requires an
+    /// `allow_untrusted` policy to run.
+    #[serde(default)]
+    artifact_state: Option<erebus_core::metadata::ArtifactState>,
+    /// Lifecycle policy (e.g. `allow_untrusted`, `require_signature`).
+    #[serde(default)]
+    artifact_policy: Option<erebus_core::metadata::ArtifactPolicy>,
 }
 
 impl Metadata {
@@ -200,6 +208,54 @@ impl Metadata {
             }
         }
         &[]
+    }
+
+    /**
+     * `lifecycle_check` - fail-closed lifecycle gate before execution
+     *
+     * Description: decides whether an artifact in its current lifecycle state
+     * may be extracted and executed. A `None` `artifact_state` (legacy binary,
+     * or one built without a state) is treated as `Acquired` and allowed. A
+     * `Revoked`/`Deleted` state always refuses to run. A `Quarantined` state
+     * runs only when the policy explicitly allows untrusted artifacts.
+     *
+     * Return: `Ok(())` when execution may proceed, or an `InvalidData` error
+     * describing why the artifact is denied.
+     *
+     * # Errors
+     *
+     * Returns an `InvalidData` error when the artifact lies in a state that
+     * must not run (`Revoked`, `Deleted`, or `Quarantined` without an
+     * `allow_untrusted` policy).
+     */
+    pub fn lifecycle_check(&self) -> std::io::Result<()> {
+        let state = self
+            .artifact_state
+            .as_ref()
+            .unwrap_or(&erebus_core::metadata::ArtifactState::Acquired);
+        let allow_untrusted = self
+            .artifact_policy
+            .as_ref()
+            .map(|p| p.allow_untrusted)
+            .unwrap_or(false);
+
+        if matches!(
+            state,
+            erebus_core::metadata::ArtifactState::Revoked
+                | erebus_core::metadata::ArtifactState::Deleted
+        ) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("artifact is {state} and cannot run"),
+            ));
+        }
+        if state == &erebus_core::metadata::ArtifactState::Quarantined && !allow_untrusted {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "artifact is quarantined and the policy does not allow untrusted artifacts",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -365,6 +421,11 @@ fn run() -> io::Result<()> {
             format!("unsupported runtime '{runtime}' in metadata — supported: python, binary"),
         ));
     }
+
+    // Fail-closed lifecycle gate: a Revoked/Deleted artifact must never be
+    // extracted or executed. Checked alongside runtime validation so a
+    // deny-listed artifact is refused before any extraction/update work.
+    meta.lifecycle_check()?;
 
     // Intercept erebus-reserved runtime flags (`--erebus-update`, `--erebus-version`)
     // before they could reach the host app. Handled modes are terminal: the
@@ -1600,6 +1661,8 @@ mod tests {
                 erebus_core::layer::SerializableLayer::Model(model),
             ],
             entrypoint_layer: Some("python3".into()),
+            artifact_state: None,
+            artifact_policy: None,
         };
         let manifest = LayerManifest::from_metadata(&meta);
         assert_eq!(manifest.version, 1);
@@ -1617,6 +1680,85 @@ mod tests {
         let json = serde_json::to_string(&manifest).unwrap();
         let parsed: LayerManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, manifest);
+    }
+
+    fn sample_meta(
+        state: Option<erebus_core::metadata::ArtifactState>,
+        policy: Option<erebus_core::metadata::ArtifactPolicy>,
+    ) -> Metadata {
+        Metadata {
+            name: "test-app".into(),
+            version: None,
+            runtime: "python3".into(),
+            entrypoint: vec![],
+            env: std::collections::BTreeMap::new(),
+            cwd: None,
+            isolation: 0,
+            seccomp: false,
+            landlock: false,
+            gui: false,
+            services: vec![],
+            crypto: None,
+            payload_format: "zstd+tar".into(),
+            health_check: None,
+            update_url: None,
+            layers: vec![],
+            entrypoint_layer: None,
+            artifact_state: state,
+            artifact_policy: policy,
+        }
+    }
+
+    #[test]
+    fn lifecycle_gate_fails_closed_for_revoked_and_deleted() {
+        use erebus_core::metadata::{ArtifactPolicy, ArtifactState};
+        for state in [ArtifactState::Revoked, ArtifactState::Deleted] {
+            let meta = sample_meta(Some(state.clone()), Some(ArtifactPolicy::default()));
+            assert!(
+                meta.lifecycle_check().is_err(),
+                "{state} artifact must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn lifecycle_gate_allows_acquired_and_trusted() {
+        use erebus_core::metadata::{ArtifactPolicy, ArtifactState};
+        for state in [ArtifactState::Acquired, ArtifactState::Trusted] {
+            let meta = sample_meta(Some(state.clone()), Some(ArtifactPolicy::default()));
+            assert!(
+                meta.lifecycle_check().is_ok(),
+                "{state} artifact must be permitted"
+            );
+        }
+    }
+
+    #[test]
+    fn lifecycle_gate_missing_state_defaults_to_acquired() {
+        let meta = sample_meta(None, None);
+        assert!(meta.lifecycle_check().is_ok());
+    }
+
+    #[test]
+    fn lifecycle_gate_quarantined_runs_only_with_allow_untrusted() {
+        use erebus_core::metadata::{ArtifactPolicy, ArtifactState};
+        let deny = sample_meta(
+            Some(ArtifactState::Quarantined),
+            Some(ArtifactPolicy {
+                allow_untrusted: false,
+                ..Default::default()
+            }),
+        );
+        assert!(deny.lifecycle_check().is_err());
+
+        let allow = sample_meta(
+            Some(ArtifactState::Quarantined),
+            Some(ArtifactPolicy {
+                allow_untrusted: true,
+                ..Default::default()
+            }),
+        );
+        assert!(allow.lifecycle_check().is_ok());
     }
 
     #[test]
@@ -1640,6 +1782,8 @@ mod tests {
             update_url: None,
             layers: vec![],
             entrypoint_layer: None,
+            artifact_state: None,
+            artifact_policy: None,
         };
         write_layer_manifest(tmp.path(), &meta).unwrap();
         assert!(tmp.path().join(".erebus-layers.json").is_file());

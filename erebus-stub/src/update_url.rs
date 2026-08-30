@@ -101,6 +101,8 @@ mod tests {
                 update_url: None,
                 layers: Vec::new(),
                 entrypoint_layer: None,
+                artifact_state: None,
+                artifact_policy: None,
             }
         };
         let base = resolve_update_url(&args, 0, &meta).unwrap();
@@ -132,6 +134,8 @@ mod tests {
                 update_url: None,
                 layers: Vec::new(),
                 entrypoint_layer: None,
+                artifact_state: None,
+                artifact_policy: None,
             }
         };
         let base = resolve_update_url(&args, 0, &meta).unwrap();
@@ -161,6 +165,8 @@ mod tests {
                 update_url: None,
                 layers: Vec::new(),
                 entrypoint_layer: None,
+                artifact_state: None,
+                artifact_policy: None,
             }
         };
         let base = resolve_update_url(&args, 0, &meta).unwrap();
@@ -190,6 +196,8 @@ mod tests {
                 update_url: None,
                 layers: Vec::new(),
                 entrypoint_layer: None,
+                artifact_state: None,
+                artifact_policy: None,
             }
         };
         let err = resolve_update_url(&args, 0, &meta).unwrap_err();
@@ -218,6 +226,8 @@ mod tests {
                 health_check: None,
                 update_url: Some("https://meta.example/app".into()),
                 entrypoint_layer: None,
+                artifact_state: None,
+                artifact_policy: None,
                 layers: Vec::new(),
             }
         };

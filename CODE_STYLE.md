@@ -124,6 +124,43 @@ Every `.rs` file starts with `//!` doc comments describing the module's
 purpose and its role in the system. This is already the pattern in
 `main.rs` and `format.rs`.
 
+### Function doc comments (REQUIRED)
+
+Every function — public or private, in Rust and Python — carries a
+Unix-style doc comment block in the following form:
+
+```rust
+/**
+ * function_name - short description of what the function does
+ * @arg1: description of the first parameter
+ * @arg2: description of the second parameter
+ *
+ * Description: longer explanation covering the WHY and non-obvious
+ * behaviour (edge cases, invariants, security properties).
+ *
+ * Return: description of the return value, including the error/Result
+ * contract where applicable.
+ */
+```
+
+Notes:
+
+- One block per function, immediately above its definition.
+- `@param`: one line per parameter, matching the signature names exactly.
+- **Identifiers in the doc must be wrapped in backticks** (`` `name` ``) —
+  clippy's `doc_markdown` lint (on in all crates) rejects a bare
+  `camelCase`/`snake_case` word, e.g. write the summary line as
+  `` * `write_metadata` - rewrite metadata `` not `* write_metadata - ...`.
+- `Description` fills the role of `<what>/<why>` — re-state the contract,
+  not the code.
+- `Return` documents the success value and the error/side-effect contract
+  (e.g. "Ok(state) on success, LifecycleError if the transition is invalid").
+- Rust: prefer the block form `/** ... */` so rustdoc renders it and clippy's
+  `missing_errors_doc` (where enabled) stays satisfied. Keep `# Errors` for
+  public `Result`-returning APIs when the crate enforces it.
+- This block is **mandatory and checked on every change**: a function without
+  its doc comment fails review.
+
 ---
 
 ## Python (cli/)

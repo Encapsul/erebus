@@ -9,6 +9,7 @@ pub mod env;
 pub mod inspect;
 pub mod keygen;
 pub mod layer;
+pub mod lifecycle;
 pub mod publish;
 pub mod pull;
 pub mod run;

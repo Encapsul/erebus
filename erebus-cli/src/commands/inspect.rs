@@ -81,6 +81,9 @@ pub fn run(args: InspectArgs) -> Result<()> {
         eprintln!("Arch:        {arch_name}");
         eprintln!("Signed:      {}", footer.is_signed());
         eprintln!("Encrypted:   {}", footer.flags & FLAG_ENCRYPTED != 0);
+        if let Some(st) = meta.get("artifact_state").and_then(|v| v.as_str()) {
+            eprintln!("State:       {st}");
+        }
         eprintln!(
             "Payload:     {} -> {}",
             format_size(footer.payload_csize),

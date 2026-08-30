@@ -715,6 +715,12 @@ pub(crate) fn build_single_target(
             rt_deps_hash: Some(new_rt_hash.clone()),
             update_url: args.update_url.clone(),
             crypto: crypto_meta,
+            artifact_state: Some(erebus_core::metadata::ArtifactState::Acquired),
+            artifact_policy: Some(erebus_core::metadata::ArtifactPolicy {
+                allow_untrusted: true,
+                require_signature: false,
+                max_retries: 3,
+            }),
             layers: {
                 let mut layers = Vec::new();
 

@@ -120,6 +120,13 @@ pub fn build_meta_json(
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     }
 
+    if let Some(state) = &options.artifact_state {
+        meta["artifact_state"] = serde_json::to_value(state).unwrap();
+    }
+    if let Some(policy) = &options.artifact_policy {
+        meta["artifact_policy"] = serde_json::to_value(policy).unwrap();
+    }
+
     if !bun_features.cross_compile_targets.is_empty() {
         meta["cross_compile_targets"] = serde_json::Value::Array(
             bun_features
@@ -189,13 +196,14 @@ pub struct MetaOptions {
     /// Name of the entrypoint layer. Defaults to the runtime name when `layers`
     /// is `None`.
     pub entrypoint_layer: Option<String>,
+    /// Current artifact lifecycle state. Defaults to `ArtifactState::Acquired`.
+    pub artifact_state: Option<crate::metadata::ArtifactState>,
+    /// Policy governing artifact access and promotion. Defaults to
+    /// `ArtifactPolicy::default()` (`allow_untrusted true`, `require_signature false`).
+    pub artifact_policy: Option<crate::metadata::ArtifactPolicy>,
 }
 
-/// Input to [`assemble_erebus`]: bundles every byte-slice and build flag that
-/// shapes the output layout so the assembly entry point is a single,
-/// self-documenting argument. The SISR section is optional (pre-built
-/// artifacts); an [`SisrBuildConfig`] is only needed by the CLI, which
-/// builds artifacts itself before calling here (see `build_sisr_config`).
+/// Input to [`assemble_erebus`]:
 pub struct AssemblyInput<'a> {
     pub stub_bytes: &'a [u8],
     pub payload: &'a [u8],
@@ -558,6 +566,8 @@ mod tests {
             crypto: None,
             layers: None,
             entrypoint_layer: None,
+            artifact_state: None,
+            artifact_policy: None,
         };
         let bun_features = BunFeatures::default();
         let json = build_meta_json(

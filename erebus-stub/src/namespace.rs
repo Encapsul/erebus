@@ -68,8 +68,6 @@ pub fn enter_userns() -> io::Result<()> {
     }
 
     Ok(())
-
-    Ok(())
 }
 
 /// Write a procfs file (`uid_map`/`gid_map`). Linux-only.

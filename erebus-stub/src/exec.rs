@@ -1402,6 +1402,8 @@ mod tests {
             health_check: None,
             update_url: None,
             entrypoint_layer: None,
+            artifact_state: None,
+            artifact_policy: None,
             layers: Vec::new(),
         };
 
@@ -1540,6 +1542,8 @@ mod tests {
             health_check: None,
             update_url: None,
             entrypoint_layer: None,
+            artifact_state: None,
+            artifact_policy: None,
             layers: Vec::new(),
         };
         let err = resolve_entrypoint(&meta, tmp.path(), false).unwrap_err();

@@ -79,6 +79,18 @@ enum Commands {
     /// signed JSON document suitable for regulators and auditors.
     Audit(commands::audit::AuditArgs),
 
+    /// Manage artifact lifecycle state (quarantine / promote / revoke)
+    ///
+    /// Enforces the closed trust state machine: acquired -> quarantined ->
+    /// trusted -> revoked -> deleted. Only Trusted (or Acquired, if policy
+    /// allows) artifacts may be served.
+    ///
+    /// Examples:
+    ///   erebus lifecycle agent.erebus --action quarantine
+    ///   erebus lifecycle agent.erebus --action promote
+    ///   erebus lifecycle agent.erebus --action revoke
+    Lifecycle(commands::lifecycle::LifecycleArgs),
+
     /// Verify a .erebus file's signature
     Verify(commands::verify::VerifyArgs),
 
@@ -238,6 +250,12 @@ fn main() -> ExitCode {
                 args.quiet = true;
             }
             commands::verify::run(args)
+        }
+        Commands::Lifecycle(mut args) => {
+            if cli.quiet {
+                args.quiet = true;
+            }
+            commands::lifecycle::run(args)
         }
         Commands::Trust(mut args) => {
             if cli.quiet {
