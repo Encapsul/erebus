@@ -125,10 +125,12 @@ Reproducible numbers: [`benchmarks/`](benchmarks/README.md).
 ### 🟡 P2 — Registry functional gaps (competitor audit)
 
 - [ ] **GGUF guard** — per-tensor manifest for GGUF models (tensor-level integrity).
-- [ ] **Periodic integrity verification** — systemd timer re-checking hashes,
-  auto-quarantine on mismatch.
-- [ ] **Rich model metadata** — format, size, source, `scan_results` per artifact.
-- [ ] **Soft-delete with audit trail** — retain metadata after delete.
+- [x] **Periodic integrity verification** — `registry_server.py --verify` oneshot +
+  `registry-integrity.{service,timer}` for systemd periodic checks (`7fab20a`).
+- [x] **Rich model metadata** — `/index.json` now includes `format`, `author`,
+  `description`, `license`, `payload_format` extracted from embedded metadata.
+- [x] **Soft-delete with audit trail** — `DELETE /packages/<file>` marks artifacts
+  as deleted; metadata retained; filtered from public index; audit event recorded.
 - [ ] **Garbage collection** — bit-rot detection + unreachable blob reclamation.
 - [ ] **Backup/restore manifest** — disaster recovery.
 - [ ] **Pluggable auth: HMAC, Ed25519, OIDC, JWKS** — multi-provider.
