@@ -1390,6 +1390,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._mcp_upload()
         if path == "/billing/webhook":
             return self._billing_webhook()
+        if path == "/webhooks/github":
+            body = self.read_body(65536)
+            return self._provider_webhook("github", body)
+        if path == "/webhooks/gitlab":
+            body = self.read_body(65536)
+            return self._provider_webhook("gitlab", body)
+        if path == "/webhooks/gitea":
+            body = self.read_body(65536)
+            return self._provider_webhook("gitea", body)
         if path == "/billing/checkout":
             body = self.read_body(2048)
             return self._billing_checkout(body)
@@ -1515,6 +1524,67 @@ class Handler(BaseHTTPRequestHandler):
         elif etype == "customer.subscription.deleted":
             self.store.set_tier(user, "free")
             return self.send_json({"applied": f"{user}->free"})
+        return self.send_json({"received": True})
+
+    def _provider_webhook(self, provider: str, raw: bytes | None):
+        if raw is None:
+            return self.send_json({"error": "empty body"}, 400)
+        cfg = self.billing
+        secret = cfg.get(f"{provider}_webhook_secret")
+        if not secret:
+            return self.send_json({"error": f"{provider} webhook not configured"}, 503)
+        declared = int(self.headers.get("Content-Length", 0) or 0)
+        if declared <= 0 or declared > 1 << 20:
+            return self.send_json({"error": "bad body size"}, 400)
+        if provider == "github":
+            sig = self.headers.get("X-Hub-Signature-256", "")
+            expected = "sha256=" + hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(expected, sig):
+                self.store.record_audit("__github__", "webhook_bad_signature")
+                return self.send_json({"error": "invalid signature"}, 400)
+        elif provider == "gitlab":
+            token = self.headers.get("X-Gitlab-Token", "")
+            if not hmac.compare_digest(secret, token):
+                self.store.record_audit("__gitlab__", "webhook_bad_token")
+                return self.send_json({"error": "invalid token"}, 400)
+        elif provider == "gitea":
+            sig = self.headers.get("X-Gitea-Signature", "")
+            expected = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(expected, sig):
+                self.store.record_audit("__gitea__", "webhook_bad_signature")
+                return self.send_json({"error": "invalid signature"}, 400)
+        else:
+            return self.send_json({"error": "unknown provider"}, 400)
+        try:
+            event = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError:
+            return self.send_json({"error": "invalid json"}, 400)
+        etype = event.get("action", "")
+        if etype in ("member", "added", "invited"):
+            sender = event.get("sender", {}) or {}
+            member_user = event.get("member", {}).get("username", "") or event.get("user", {}).get("username", "")
+            repo = event.get("repository", {}).get("full_name", "") or event.get("project", {}).get("path_with_namespace", "")
+            if member_user and repo:
+                token = secrets.token_hex(32)
+                with self.lock:
+                    users = self._load(self.users_path, {}).get("users", {})
+                    rec = users.get(member_user)
+                    if rec is None:
+                        users[member_user] = {
+                            "token_hash": hashlib.sha256(token.encode()).hexdigest(),
+                            "tier": "free",
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                            f"{provider}_repos": [repo],
+                        }
+                    else:
+                        repos = rec.get(f"{provider}_repos", [])
+                        if repo not in repos:
+                            repos.append(repo)
+                            rec[f"{provider}_repos"] = repos
+                            rec["token_hash"] = hashlib.sha256(token.encode()).hexdigest()
+                    atomic_write(self.users_path, json.dumps({"users": users}).encode())
+                self.store.record_audit(member_user, f"{provider}_webhook_token", repo)
+                return self.send_json({"issued": True, "user": member_user, "repo": repo, "token": token})
         return self.send_json({"received": True})
 
     # ---- orgs ----------------------------------------------------------------
