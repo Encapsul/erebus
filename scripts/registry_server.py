@@ -951,6 +951,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_index()
         if path == "/admin/gc":
             return self._admin_gc()
+        if path == "/admin/backup":
+            return self._admin_backup()
+        if path == "/admin/restore" and self.command == "POST":
+            return self._admin_restore(self.read_body())
         if path == "/" or path == "/ui":
             body = LANDING.format().encode()
             self.send_response(200)
@@ -992,6 +996,53 @@ class Handler(BaseHTTPRequestHandler):
         dry_run = not any("execute=1" in q for q in self.path.split("?")[1].split("&") if "?" in self.path)
         report = self.store.garbage_collect_locked(dry_run=dry_run)
         self.send_json(report)
+
+    def _admin_backup(self):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        manifest = {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "packages": [],
+        }
+        for name in sorted(os.listdir(self.store.pkg_dir)):
+            if not name.endswith(".erebus"):
+                continue
+            path = os.path.join(self.store.pkg_dir, name)
+            if not os.path.isfile(path):
+                continue
+            meta = self.store.get_meta(name)
+            entry = {
+                "file": name,
+                "sha256": self.store.sha256_cached(path),
+                "size": os.path.getsize(path),
+                "meta": meta,
+                "integrity": self.store.integrity.get(name, {}),
+            }
+            manifest["packages"].append(entry)
+        self.send_json(manifest)
+
+    def _admin_restore(self, raw: bytes | None):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        payload = self._read_json(raw)
+        if payload is None:
+            return self.send_json({"error": "invalid json"}, 400)
+        packages = payload.get("packages", [])
+        restored = []
+        for entry in packages:
+            fname = entry.get("file")
+            if not fname or not fname.endswith(".erebus"):
+                continue
+            src = os.path.join(self.store.pkg_dir, fname)
+            if os.path.isfile(src):
+                continue
+            meta = entry.get("meta", {})
+            self.store.set_meta(fname, meta.get("owner"), bool(meta.get("private")), bool(meta.get("deleted")), meta.get("deleted_at"))
+            restored.append(fname)
+        self.store.record_audit(user, "backup_restore", f"{len(restored)} packages")
+        return self.send_json({"restored": restored})
 
     def _send_index(self):
         body = self.store.index()
