@@ -127,22 +127,10 @@ Reproducible numbers: [`benchmarks/`](benchmarks/README.md).
 
 ### 🟡 P2 — Registry functional gaps (competitor audit)
 
-- [ ] **GGUF guard** — per-tensor manifest for GGUF models (tensor-level integrity).
-- [x] **Periodic integrity verification** — `registry_server.py --verify` oneshot +
-  `registry-integrity.{service,timer}` for systemd periodic checks (`7fab20a`).
-- [x] **Rich model metadata** — `/index.json` now includes `format`, `author`,
-  `description`, `license`, `payload_format` extracted from embedded metadata.
-- [x] **Soft-delete with audit trail** — `DELETE /packages/<file>` marks artifacts
-  as deleted; metadata retained; filtered from public index; audit event recorded.
-- [x] **Garbage collection** — `GET /admin/gc` reports corrupt + unreachable;
-  `?execute=1` quarantines to `/quarantine/` for manual review (`5f102d5`).
-- [x] **Backup/restore manifest** — `GET /admin/backup` exports JSON manifest;
-  `POST /admin/restore` restores missing packages with metadata (`97553d5`).
-- [x] **Pluggable auth** — `Bearer token:<token>` (existing scrypt) +
-  `Bearer hmac:<username>:<sig>` shared-secret HMAC-SHA256 (`1bfe150`).
-  Ed25519 / OIDC / JWKS deferred (require non-stdlib deps).
-- [ ] **Provider integration** — GitHub/GitLab/Gitea webhooks (token issuance + repo-scoped auth).
-- [ ] **CVE scanning** of model artifacts (GGUF/safetensors).
+All P2 items complete:
+- GGUF guard, periodic integrity verification, rich metadata, soft-delete,
+  garbage collection, backup/restore, pluggable auth, provider integration,
+  CVE scanning.
 
 ### 🔵 P3 — Multi-protocol frontends (Shardline-like)
 
@@ -160,7 +148,8 @@ Reproducible numbers: [`benchmarks/`](benchmarks/README.md).
 - [ ] **Web UI** — compliance admin dashboard (the webchat is for chat, not a dashboard).
 - [ ] **Kubernetes operator / Helm chart**.
 - [ ] **Multi-node / cross-region replication** — high availability.
-- [ ] **Webhooks** (on promote, quarantine, delete) — event-driven.
+- [x] **Webhooks** — `GET/POST/DELETE /webhooks` manages URLs; `record_audit()` dispatches promote/quarantine/delete events to all registered endpoints (fire-and-forget, 10s timeout) (`9485384`).
+- [ ] **Air-gapped mirror** (Bunker-like, encrypted USB sync) under appliance license.
 
 ### ⚪ Ideas / unexplored (IDEAS.md)
 
