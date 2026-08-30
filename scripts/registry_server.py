@@ -506,15 +506,96 @@ class Store:
         return out
 
     # ---- packages ---------------------------------------------------------
-    def set_meta(self, fname: str, owner: str | None, private: bool):
+    def set_meta(self, fname: str, owner: str | None, private: bool, deleted: bool = False, deleted_at: str | None = None):
         with self.lock:
             atomic_write(
                 os.path.join(self.meta_dir, fname + ".json"),
-                json.dumps({"owner": owner, "private": private}).encode(),
+                json.dumps({"owner": owner, "private": private, "deleted": deleted, "deleted_at": deleted_at}).encode(),
             )
+
+    def soft_delete(self, fname: str, user: str) -> None:
+        with self.lock:
+            meta = self.get_meta(fname)
+            meta["deleted"] = True
+            meta["deleted_at"] = datetime.now(timezone.utc).isoformat()
+            meta["deleted_by"] = user
+            atomic_write(
+                os.path.join(self.meta_dir, fname + ".json"),
+                json.dumps(meta).encode(),
+            )
+            self.store.record_audit(user, "artifact_deleted", fname)
+
 
     def get_meta(self, fname: str) -> dict:
         return self._load(os.path.join(self.meta_dir, fname + ".json"), {})
+
+    def read_erebus_meta(self, path: str) -> dict:
+        if not path.endswith(".erebus"):
+            return {}
+        try:
+            size = os.path.getsize(path)
+            if size < 84:
+                return {}
+            with open(path, "rb") as f:
+                if size >= 92:
+                    f.seek(size - 92)
+                    core = f.read(92)
+                    if core[8:13] == EREBUS_MAGIC and core[13] >= 3:
+                        meta_off = int.from_bytes(core[72:80], "little")
+                        meta_len = int.from_bytes(core[80:88], "little")
+                    else:
+                        core = core[8:]
+                        meta_off = int.from_bytes(core[64:72], "little")
+                        meta_len = int.from_bytes(core[72:80], "little")
+                else:
+                    f.seek(size - 84)
+                    core = f.read(84)
+                    if core[0:5] != EREBUS_MAGIC:
+                        return {}
+                    meta_off = int.from_bytes(core[64:72], "little")
+                    meta_len = int.from_bytes(core[72:80], "little")
+                if meta_len <= 0 or meta_len > 64 * 1024 * 1024:
+                    return {}
+                f.seek(meta_off)
+                meta_bytes = f.read(meta_len)
+                return json.loads(meta_bytes)
+        except (OSError, ValueError):
+            return {}
+
+    def artifact_format(self, path: str) -> str:
+        if not path.endswith(".erebus"):
+            return "unknown"
+        try:
+            size = os.path.getsize(path)
+            if size < 84:
+                return "legacy"
+            with open(path, "rb") as f:
+                if size >= 92:
+                    f.seek(size - 92)
+                    core = f.read(92)
+                    if core[8:13] == EREBUS_MAGIC and core[13] >= 3:
+                        payload_csz = int.from_bytes(core[16:24], "little")
+                        flags = core[15]
+                    else:
+                        core = core[8:]
+                        payload_csz = int.from_bytes(core[16:24], "little")
+                        flags = core[14]
+                else:
+                    f.seek(size - 84)
+                    core = f.read(84)
+                    if core[0:5] != EREBUS_MAGIC:
+                        return "legacy"
+                    payload_csz = int.from_bytes(core[16:24], "little")
+                    flags = core[14]
+                if flags & 0x01:
+                    return "encrypted-v4"
+                if flags & 0x02:
+                    return "signed-v3"
+                if flags & 0x04:
+                    return "sisr-v2"
+                return "plain-v2"
+        except (OSError, ValueError):
+            return "unknown"
 
     def sha256_cached(self, path: str) -> str:
         mtime = os.path.getmtime(path)
@@ -564,16 +645,28 @@ class Store:
             path = os.path.join(self.pkg_dir, name)
             if not os.path.isfile(path) or not name.endswith(".erebus"):
                 continue
+            erebus_meta = self.read_erebus_meta(path)
+            sidecar_meta = self.get_meta(name)
             entry = {
                 "name": name[: -len(".erebus")],
                 "file": name,
                 "sha256": self.sha256_cached(path),
                 "size": os.path.getsize(path),
+                "format": self.artifact_format(path),
+                "state": artifact_lifecycle(path)[0],
+                "integrity": "ok" if self.integrity.get(name, {}).get("ok", True) else "corrupt",
             }
-            meta = self.get_meta(name)
-            entry["private"] = bool(meta.get("private"))
-            entry["state"] = artifact_lifecycle(path)[0]
-            entry["integrity"] = "ok" if self.integrity.get(name, {}).get("ok", True) else "corrupt"
+            if erebus_meta.get("author"):
+                entry["author"] = erebus_meta["author"]
+            if erebus_meta.get("description"):
+                entry["description"] = erebus_meta["description"]
+            if erebus_meta.get("license"):
+                entry["license"] = erebus_meta["license"]
+            if erebus_meta.get("payload_format"):
+                entry["payload_format"] = erebus_meta["payload_format"]
+            entry["private"] = bool(sidecar_meta.get("private"))
+            if sidecar_meta.get("deleted"):
+                continue
             packages.append(entry)
         return json.dumps({"packages": packages}).encode()
 
@@ -856,6 +949,19 @@ class Handler(BaseHTTPRequestHandler):
     def _authorized_user(self) -> str | None:
         return self.store.authenticate(self.headers.get("Authorization", ""))
 
+    def _package_delete(self, fname: str):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        path = os.path.join(self.store.pkg_dir, fname)
+        if not os.path.isfile(path):
+            return self.send_json({"error": "package not found"}, 404)
+        meta = self.store.get_meta(fname)
+        if meta.get("owner") and meta["owner"] != user:
+            return self.send_json({"error": "forbidden"}, 403)
+        self.store.soft_delete(fname, user)
+        self.send_json({"ok": True, "file": fname})
+
     def _serve_package(self, fname: str):
         fname = os.path.basename(fname)
         full = os.path.join(self.store.pkg_dir, fname)
@@ -1004,6 +1110,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._org_member_remove(
                 urllib.parse.unquote(m.group(1)), urllib.parse.unquote(m.group(2))
             )
+        m = re.match(r"^/packages/([^/]+)$", path)
+        if m:
+            return self._package_delete(urllib.parse.unquote(m.group(1)))
         self.send_json({"error": "not found"}, 404)
 
     def _auth(self, payload: dict, login: bool):
