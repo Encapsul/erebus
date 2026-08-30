@@ -393,6 +393,7 @@ class Store:
         self.root = root
         self.pkg_dir = os.path.join(root, "packages")
         self.meta_dir = os.path.join(root, "meta")
+        self.webhooks_path = os.path.join(root, "webhooks.json")
         self.usage_dir = os.path.join(root, "usage")
         self.mcp_dir = os.path.join(root, "mcp")
         for d in (self.pkg_dir, self.meta_dir, self.usage_dir, self.mcp_dir):
@@ -673,6 +674,23 @@ class Store:
                 f.write(data)
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        self._dispatch_webhook(line)
+
+    def _dispatch_webhook(self, event: dict):
+        """Send event to configured webhook URLs."""
+        webhooks = self._load(self.webhooks_path, [])
+        if not webhooks:
+            return
+        payload = json.dumps(event).encode()
+        for url in webhooks:
+            try:
+                req = urllib.request.Request(url, data=payload, headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "erebus-registry-webhook/0.5",
+                }, method="POST")
+                urllib.request.urlopen(req, timeout=10)
+            except (OSError, urllib.error.URLError):
+                pass  # fire-and-forget
 
     def read_audit(self, month: str, actor: str | None = None,
                    org: str | None = None) -> list[dict]:
@@ -683,6 +701,23 @@ class Store:
                 raw = f.read()
         except OSError:
             return out
+
+    def add_webhook(self, url: str) -> None:
+        with self.lock:
+            webhooks = self._load(self.webhooks_path, [])
+            if url not in webhooks:
+                webhooks.append(url)
+                atomic_write(self.webhooks_path, json.dumps(webhooks).encode())
+
+    def remove_webhook(self, url: str) -> None:
+        with self.lock:
+            webhooks = self._load(self.webhooks_path, [])
+            webhooks = [w for w in webhooks if w != url]
+            atomic_write(self.webhooks_path, json.dumps(webhooks).encode())
+
+    def list_webhooks(self) -> list[str]:
+        with self.lock:
+            return self._load(self.webhooks_path, [])
         for line in raw.splitlines():
             try:
                 rec = json.loads(line)
@@ -1149,6 +1184,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._admin_gc()
         if path == "/admin/scan":
             return self._admin_scan()
+        if path == "/webhooks" and self.command == "GET":
+            return self._webhook_list()
+        if path == "/webhooks" and self.command == "POST":
+            body = self.read_body(2048)
+            return self._webhook_add(body)
+        if path.startswith("/webhooks/") and self.command == "DELETE":
+            return self._webhook_remove(urllib.parse.unquote(path[len("/webhooks/"):]))
         if path == "/admin/backup":
             return self._admin_backup()
         if path == "/admin/restore" and self.command == "POST":
@@ -1426,6 +1468,9 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"^/packages/([^/]+)$", path)
         if m:
             return self._package_delete(urllib.parse.unquote(m.group(1)))
+        m = re.match(r"^/webhooks/(.+)$", path)
+        if m:
+            return self._webhook_remove(urllib.parse.unquote(m.group(1)))
         self.send_json({"error": "not found"}, 404)
 
     def _auth(self, payload: dict, login: bool):
@@ -1626,6 +1671,35 @@ class Handler(BaseHTTPRequestHandler):
                     "cves": cves,
                 })
         return self.send_json({"scanned": len(results), "vulnerable": len([r for r in results if r["cves"]]), "results": results})
+
+    # ---- webhooks ------------------------------------------------------------
+    def _webhook_list(self):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        return self.send_json({"webhooks": self.store.list_webhooks()})
+
+    def _webhook_add(self, raw: bytes | None):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        payload = self._read_json(raw)
+        if payload is None:
+            return self.send_json({"error": "invalid json"}, 400)
+        url = str(payload.get("url", "")).strip()
+        if not url.startswith("http://") and not url.startswith("https://"):
+            return self.send_json({"error": "url must start with http(s)"}, 400)
+        self.store.add_webhook(url)
+        self.store.record_audit(user, "webhook_add", url)
+        return self.send_json({"added": url})
+
+    def _webhook_remove(self, url: str):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        self.store.remove_webhook(url)
+        self.store.record_audit(user, "webhook_remove", url)
+        return self.send_json({"removed": url})
 
     # ---- orgs ----------------------------------------------------------------
     def _org_create(self, raw: bytes | None):
