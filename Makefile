@@ -81,17 +81,17 @@ install:
 		printf "   You can remove the x.bin repo when done.\n"; \
 	fi
 
-# Build the hello-web example .ere (requires stub + cli).
+# Build the hello-web example .erebus (requires stub + cli).
 example: stub cli
-	$(CLI) build examples/hello-web -o hello-web.ere
+	$(CLI) build examples/hello-web -o hello-web.erebus
 
-# Run the hello-web .ere.
+# Run the hello-web .erebus.
 run:
-	./hello-web.ere
+	./hello-web.erebus
 
-# Inspect the hello-web .ere.
+# Inspect the hello-web .erebus.
 inspect:
-	$(CLI) inspect hello-web.ere
+	$(CLI) inspect hello-web.erebus
 
 # Build mdbook documentation.
 docs:
@@ -112,7 +112,7 @@ clean:
 	cargo clean
 	cd stub && cargo clean
 	rm -rf docs/book
-	rm -f *.ere
+	rm -f *.erebus
 	rm -rf ~/.cache/erebus $(DIST_DIR)
 
 # ═══════════════════════════════════════════════════════════════════
@@ -192,7 +192,7 @@ help:
 	@echo "  make install     Build + install CLI to /usr/local/bin or ~/.local/bin"
 	@echo "  make stub        Build musl stub for host"
 	@echo "  make cli         Build CLI"
-	@echo "  make example     Build hello-web.ere"
+	@echo "  make example     Build hello-web.erebus"
 	@echo "  make dist        Build all release artifacts (multi-arch)"
 	@echo "  make release     Build dist + create GitHub release (VERSION required)"
 	@echo "  make lint        Run clippy on all crates"

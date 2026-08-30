@@ -17,7 +17,7 @@ echo "=== Running tests ==="
 cargo test --workspace
 
 echo "=== Smoke test ==="
-/tmp/erebus-stub-target/release/erebus build examples/hello-web -o /tmp/hello-web.ere
-/tmp/hello-web.ere
+/tmp/erebus-stub-target/release/erebus build examples/hello-web -o /tmp/hello-web.erebus
+/tmp/hello-web.erebus
 
 echo "=== All checks passed ==="

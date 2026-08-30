@@ -170,7 +170,7 @@ def hf_upload(base: str, token: str | None, repo_id: str, branch: str,
     if not token:
         return 401, hf_error(401, "unauthorized")
     normalized = hf_normalize_repo(repo_id)
-    expected_name = f"{normalized}.ere"
+    expected_name = f"{normalized}.erebus"
     boundary = None
     if content_type.startswith("multipart/form-data"):
         boundary = content_type.split("boundary=")[-1]

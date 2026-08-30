@@ -267,7 +267,7 @@ demands it.
   signature + SISR simultaneously are unsupported in a single build.
 - **Update URL**: `{base}/manifest` + `{base}/chunks/<sha256>`; resolution
   arg > env `ERE_UPDATE_URL` > meta `update_url`.
-- **Rollback snapshot `.ere.bak`** co-located (atomic rename); **health gate =
+- **Rollback snapshot `.erebus.bak`** co-located (atomic rename); **health gate =
   fork+waitpid supervisor**; **failure counter not reset**; **quarantine** at
   `attempts >= ERE_HEALTH_MAX_ATTEMPTS` (default 3).
 - **`/proc/self/exe`** can point to the pre-update inode after a rename → re-open
@@ -348,7 +348,7 @@ Scope: `erebus-core/`, `erebus-cli/`, `stub/`, and the format spec in
 - **0.3.x** — cron, OpenTelemetry, tree-shaking, minify, health-port, persist,
   include, supervisor mode; execvp single-service path.
 - **0.3.0** — **100% Rust CLI** (zero Python at runtime): build/inspect/scan/
-  sign/verify/keygen/trust/doctor/env/clean/completion/man; `.ere.toml`; man
+  sign/verify/keygen/trust/doctor/env/clean/completion/man; `.erebus.toml`; man
   pages; shell completions; burned env-file bug.
 - **≤ 0.2.x** — foundations: multi-arch releases, doctor/env, signing.
 

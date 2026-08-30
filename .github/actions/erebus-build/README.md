@@ -1,6 +1,6 @@
 # erebus Build Action
 
-Package any app into a single self-extracting `.ere` binary directly in your CI/CD pipeline.
+Package any app into a single self-extracting `.erebus` binary directly in your CI/CD pipeline.
 
 ## Quick Start
 
@@ -12,7 +12,7 @@ Package any app into a single self-extracting `.ere` binary directly in your CI/
 - uses: actions/upload-artifact@v4
   with:
     name: my-app
-    path: app.ere
+    path: app.erebus
 ```
 
 ## Usage Examples
@@ -29,12 +29,12 @@ jobs:
       - uses: Tednoob17/erebus/.github/actions/erebus-build@main
         with:
           app-path: '.'
-          output: 'my-python-app.ere'
+          output: 'my-python-app.erebus'
 
       - uses: actions/upload-artifact@v4
         with:
           name: my-python-app
-          path: my-python-app.ere
+          path: my-python-app.erebus
 ```
 
 ### Node.js app with signing
@@ -52,12 +52,12 @@ jobs:
           runtime: 'node'
           sign: 'true'
           key: ${{ secrets.EREBUS_SIGNING_KEY }}
-          output: 'my-node-app.ere'
+          output: 'my-node-app.erebus'
 
       - uses: actions/upload-artifact@v4
         with:
           name: my-node-app
-          path: my-node-app.ere
+          path: my-node-app.erebus
 ```
 
 ### Multi-platform build
@@ -80,12 +80,12 @@ jobs:
         with:
           app-path: '.'
           target: ${{ matrix.target }}
-          output: 'app-${{ matrix.target }}.ere'
+          output: 'app-${{ matrix.target }}.erebus'
 
       - uses: actions/upload-artifact@v4
         with:
           name: app-${{ matrix.target }}
-          path: app-${{ matrix.target }}.ere
+          path: app-${{ matrix.target }}.erebus
 ```
 
 ### With extra files
@@ -98,7 +98,7 @@ jobs:
       config/
       data/
       migrations/
-    output: 'full-app.ere'
+    output: 'full-app.erebus'
 ```
 
 ### Specific version
@@ -121,7 +121,7 @@ jobs:
 | `sign` | Sign the binary | `false` |
 | `encrypt` | Encrypt the payload (requires key) | `false` |
 | `include` | Extra files/dirs to include (newline-separated) | — |
-| `output` | Output binary path | `app.ere` |
+| `output` | Output binary path | `app.erebus` |
 | `erebus-version` | erebus version to install | `latest` |
 | `erebus-repo` | GitHub repo to download erebus from | `Tednoob17/erebus` |
 | `build-args` | Extra arguments to pass to erebus build | — |
@@ -130,7 +130,7 @@ jobs:
 
 | Output | Description |
 |--------|-------------|
-| `binary-path` | Path to the built .ere binary |
+| `binary-path` | Path to the built .erebus binary |
 | `runtime` | Detected runtime |
 | `size` | Binary size in bytes |
 

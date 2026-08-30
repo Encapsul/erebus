@@ -31,7 +31,7 @@ Before finishing any code change, run:
 2. `cargo clippy --all-targets -- -D warnings`
 3. `cargo test --workspace`
 4. `cd cli && ruff check erebus/ && black --check erebus/ && python3 -m pytest tests/ -q`
-5. `erebus build examples/hello-web -o /tmp/test.ere && erebus inspect /tmp/test.ere`
+5. `erebus build examples/hello-web -o /tmp/test.erebus && erebus inspect /tmp/test.erebus`
 
 ## Claude Code Architecture (Command → Agent → Skill)
 
@@ -40,7 +40,7 @@ This project uses the **Command → Agent → Skill** orchestration pattern from
 ### Commands (Entry Points)
 | Command | Purpose |
 |---------|---------|
-| `/erebus-build` | Build a .ere binary |
+| `/erebus-build` | Build a .erebus binary |
 | `/erebus-verify` | Verify integrity |
 | `/erebus-new-runtime` | Add new runtime |
 | `/erebus-new-command` | Add new CLI command |
