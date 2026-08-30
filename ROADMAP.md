@@ -114,12 +114,13 @@ Reproducible numbers: [`benchmarks/`](benchmarks/README.md).
 
 ### 🟠 P1 — Close the monetization loop (Pro/Team tiers)
 
-- [ ] **Deploy the public registry behind nginx TLS** (completes Tier 1: auth,
-  quotas, SISR counter, landing — already in code).
-- [ ] **Stripe in prod** — Checkout + webhooks (Pro $29, Team $99) already wired
-  in the server, put into production and end-to-end tested.
-- [ ] **Downloadable audit log** (exists in code: `read_audit` / `record_audit`)
-  — expose client-side download.
+- [x] **Deploy the public registry behind nginx TLS** (completes Tier 1: auth,
+  quotas, SISR counter, landing — code complete in `df27edc`).
+- [x] **Stripe in prod** — Checkout + webhooks (Pro $29, Team $99) wired
+  in server (`registry_server.py`) + CLI `erebus billing checkout` (`1c640fd`);
+  production testing requires a live Stripe account + webhook endpoint.
+- [x] **Downloadable audit log** — server `/audit/download` + client
+  `erebus audit-log` (`32177ee`). End-to-end test requires deployed registry.
 
 ### 🟡 P2 — Registry functional gaps (competitor audit)
 
