@@ -28,7 +28,7 @@ mkdir -p "$WORK/app"
 printf 'print("biz")\n' > "$WORK/app/app.py"
 "$ERE" build "$WORK/app" --isolation none -o "$WORK/tiny.erebus" >/dev/null 2>&1
 setsid python3 "$HERE/registry_server.py" --dir "$WORK/reg" --host 127.0.0.1 \
-  --port "$PORT" --quota-gb 0.075 > "$WORK/reg.log" 2>&1 < /dev/null &
+  --port "$PORT" --quota-gb 0.077 > "$WORK/reg.log" 2>&1 < /dev/null &
 UP=1
 for i in $(seq 1 30); do
   curl -sf --max-time 2 "$R/health" >/dev/null && UP=0 && break
@@ -76,9 +76,12 @@ cmp -s "$WORK/tiny.erebus" "$WORK/p1.erebus"; check "pull with bare token byte-i
 expect_code 401 -H "Authorization: Bearer alice:deadbeef$ALICE_TOKEN" "$R/packages/tiny.erebus"
 check "corrupted bearer token → 401" $?
 
-echo "── [3/7] quota exhaustion (quota ≈ 79 MB, alice already served 19 MB)"
-# Alice pulls her OWN private package: allowed and metered. With ~61 MB
-# quota and a 19 MB bundle, pulls #1 and #2 fit, #3 crosses the line.
+echo "── [3/7] quota exhaustion (quota = 77 MB, tiny bundle ≈ 18.3 MB)"
+# Alice pulls her own private package: allowed and metered, and the [2/7]
+# authenticated bootstrap pull already counts once. So by [3/7] she has
+# served S. With quota Q in [3S+S/2, 4S+S/2) (≈ [67, 86] MB for S≈18.3 MB,
+# here Q=77 MB), pulls #1 and #2 fit, the half-size range fits (growing the
+# savings counter), and pull #3 crosses the line.
 expect_code 200 -H "$AUTH" "$R/packages/tiny.erebus"
 check "pull #1 within quota → 200" $?
 expect_code 200 -H "$AUTH" "$R/packages/tiny.erebus"

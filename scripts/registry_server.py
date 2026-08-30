@@ -292,7 +292,12 @@ class Store:
         return True
 
     def quota_for(self, username: str) -> int:
-        return TIER_QUOTAS[self.user_tier(username)]
+        tier = self.user_tier(username)
+        # `--quota-gb` overrides the free-tier ceiling (operator-set and
+        # used by chaos/quotas tests). Paid tiers always use their table.
+        if tier == "free":
+            return self.quota_bytes
+        return TIER_QUOTAS[tier]
 
     # ---- orgs / RBAC ------------------------------------------------------
     def create_org(self, name: str, owner: str) -> tuple[bool, str]:
