@@ -79,6 +79,13 @@ enum Commands {
     /// signed JSON document suitable for regulators and auditors.
     Audit(commands::audit::AuditArgs),
 
+    /// Download the registry's monthly audit trail (JSONL)
+    ///
+    /// Examples:
+    ///   erebus audit-log --registry <https://registry.erebus.io> --month 2026-08
+    ///   erebus audit-log --registry <https://registry.erebus.io> --month 2026-08 --org acme -o audit.jsonl
+    AuditLog(commands::audit_log::AuditLogArgs),
+
     /// Manage artifact lifecycle state (quarantine / promote / revoke)
     ///
     /// Enforces the closed trust state machine: acquired -> quarantined ->
@@ -245,6 +252,7 @@ fn main() -> ExitCode {
             }
             commands::audit::run(args)
         }
+        Commands::AuditLog(args) => commands::audit_log::run(args),
         Commands::Verify(mut args) => {
             if cli.quiet {
                 args.quiet = true;

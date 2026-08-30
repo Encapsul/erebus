@@ -1,5 +1,6 @@
 pub mod attest;
 pub mod audit;
+pub mod audit_log;
 pub mod build;
 pub mod chat;
 pub mod clean;
