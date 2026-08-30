@@ -38,6 +38,7 @@ import argparse
 import fcntl
 import hashlib
 import hmac
+import io
 import json
 import os
 import re
@@ -145,6 +146,168 @@ def artifact_lifecycle(path: str) -> tuple[str, bool]:
     return state, allow
 
 
+def _gguf_read_string(f: io.BufferedReader) -> str:
+    length = int.from_bytes(f.read(4), "little")
+    if length > 4096:
+        raise ValueError("string too long")
+    return f.read(length).decode("utf-8", "replace")
+
+
+def _gguf_read_uint64(f: io.BufferedReader) -> int:
+    data = f.read(8)
+    if len(data) < 8:
+        raise ValueError("truncated uint64")
+    return int.from_bytes(data, "little")
+
+
+def _gguf_read_uint32(f: io.BufferedReader) -> int:
+    data = f.read(4)
+    if len(data) < 4:
+        raise ValueError("truncated uint32")
+    return int.from_bytes(data, "little")
+
+
+def parse_gguf(path: str) -> dict | None:
+    """Parse a GGUF file and return a per-tensor manifest.
+
+    Returns None if the file is not a valid GGUF file.
+    The manifest contains:
+      - tensors: list of {name, n_dims, dims, type, offset, size, sha256}
+      - metadata: dict of metadata key-value pairs
+    """
+    try:
+        with open(path, "rb") as f:
+            magic = f.read(4)
+            if magic != b"GGUF":
+                return None
+            version = _gguf_read_uint32(f)
+            if version not in (1, 2, 3):
+                return None
+            tensor_count = _gguf_read_uint64(f)
+            metadata_count = _gguf_read_uint64(f)
+            metadata = {}
+            for _ in range(metadata_count):
+                key = _gguf_read_string(f)
+                # Skip value based on type (simplified: just skip)
+                value_type = _gguf_read_uint32(f)
+                if value_type == 0:  # uint8
+                    f.read(1)
+                elif value_type == 1:  # int8
+                    f.read(1)
+                elif value_type == 2:  # uint16
+                    f.read(2)
+                elif value_type == 3:  # int16
+                    f.read(2)
+                elif value_type == 4:  # uint32
+                    f.read(4)
+                elif value_type == 5:  # int32
+                    f.read(4)
+                elif value_type == 6:  # float32
+                    f.read(4)
+                elif value_type == 7:  # bool
+                    f.read(1)
+                elif value_type == 8:  # string
+                    str_len = _gguf_read_uint32(f)
+                    f.read(str_len)
+                elif value_type == 9:  # array
+                    array_type = _gguf_read_uint32(f)
+                    array_len = _gguf_read_uint64(f)
+                    if array_type == 8:  # string array
+                        for _ in range(array_len):
+                            str_len = _gguf_read_uint32(f)
+                            f.read(str_len)
+                    else:
+                        # Skip array elements based on type size
+                        sizes = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1}
+                        elem_size = sizes.get(array_type, 1)
+                        f.read(array_len * elem_size)
+                else:
+                    # Unknown type, skip
+                    pass
+                metadata[key] = None  # We don't parse values fully for now
+            tensor_infos = []
+            for _ in range(tensor_count):
+                name = _gguf_read_string(f)
+                n_dims = _gguf_read_uint32(f)
+                dims = [_gguf_read_uint32(f) for _ in range(n_dims)]
+                tensor_type = _gguf_read_uint32(f)
+                offset = _gguf_read_uint64(f)
+                tensor_infos.append({
+                    "name": name,
+                    "n_dims": n_dims,
+                    "dims": dims,
+                    "type": tensor_type,
+                    "offset": offset,
+                })
+            tensor_infos.sort(key=lambda t: t["offset"])
+            for i, info in enumerate(tensor_infos):
+                start = info["offset"]
+                end = tensor_infos[i + 1]["offset"] if i + 1 < len(tensor_infos) else os.path.getsize(path)
+                size = end - start
+                f.seek(start)
+                h = hashlib.sha256()
+                remaining = size
+                while remaining > 0:
+                    chunk = f.read(min(CHUNK, remaining))
+                    if not chunk:
+                        break
+                    h.update(chunk)
+                    remaining -= len(chunk)
+                info["size"] = size
+                info["sha256"] = h.hexdigest()
+            return {
+                "version": version,
+                "tensor_count": tensor_count,
+                "tensors": tensor_infos,
+                "metadata_keys": list(metadata.keys()),
+            }
+    except (OSError, ValueError):
+        return None
+
+
+def verify_gguf_integrity(path: str) -> tuple[bool, str]:
+    """Verify a GGUF file using its stored per-tensor manifest.
+
+    The manifest is stored as a sidecar file with .gguf.manifest.json extension.
+    Returns (ok, detail).
+    """
+    manifest_path = path + ".manifest.json"
+    if not os.path.isfile(manifest_path):
+        return True, "no-manifest (unverified)"
+    try:
+        with open(manifest_path, "r") as f:
+            manifest = json.load(f)
+    except (OSError, ValueError):
+        return False, "unreadable-manifest"
+    return verify_gguf(path, manifest)
+
+
+def verify_gguf(path: str, manifest: dict) -> tuple[bool, str]:
+    """Verify a GGUF file against a stored manifest.
+
+    Returns (ok, detail). `ok=False` means the GGUF file has been tampered with
+    or corrupted.
+    """
+    current = parse_gguf(path)
+    if current is None:
+        return False, "invalid gguf"
+    if current["tensor_count"] != manifest.get("tensor_count", 0):
+        return False, "tensor count mismatch"
+    current_tensors = {t["name"]: t for t in current["tensors"]}
+    manifest_tensors = {t["name"]: t for t in manifest.get("tensors", [])}
+    for name, mt in manifest_tensors.items():
+        ct = current_tensors.get(name)
+        if ct is None:
+            return False, f"tensor {name} missing"
+        if ct["sha256"] != mt["sha256"]:
+            return False, f"tensor {name} checksum mismatch"
+        if ct["offset"] != mt["offset"]:
+            return False, f"tensor {name} offset changed"
+        if ct["size"] != mt["size"]:
+            return False, f"tensor {name} size changed"
+    return True, "ok"
+
+
 def verify_integrity(path: str) -> tuple[bool, str]:
     """Verify a stored .erebus blob's payload integrity against its footer.
 
@@ -160,6 +323,8 @@ def verify_integrity(path: str) -> tuple[bool, str]:
     tampering) and must not be served. Non-.erebus files (runtime packs,
     sidecars) are out of scope and always report ok=True.
     """
+    if path.endswith(".gguf"):
+        return verify_gguf_integrity(path)
     if not path.endswith(".erebus"):
         return True, "not-an-erebus-blob"
     try:
@@ -653,6 +818,13 @@ class Store:
             if not os.path.isfile(path):
                 continue
             ok, detail = verify_integrity(path)
+            if ok and path.endswith(".gguf"):
+                manifest_path = path + ".manifest.json"
+                if os.path.isfile(manifest_path):
+                    gguf_ok, gguf_detail = verify_gguf_integrity(path)
+                    if not gguf_ok:
+                        ok = False
+                        detail = f"gguf:{gguf_detail}"
             snapshot[name] = {
                 "ok": bool(ok),
                 "detail": detail,
@@ -1583,6 +1755,12 @@ class Handler(BaseHTTPRequestHandler):
             )
         final = os.path.join(self.store.pkg_dir, fname)
         os.replace(tmp, final)
+        # Generate GGUF per-tensor manifest if applicable
+        if fname.endswith(".gguf"):
+            manifest = parse_gguf(final)
+            if manifest:
+                manifest_path = final + ".manifest.json"
+                atomic_write(manifest_path, json.dumps(manifest).encode())
         # Body framing was handled manually (streamed); never let this
         # keep-alive connection be reused with unconsumed trailing bytes.
         self.close_connection = True
