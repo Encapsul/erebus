@@ -143,7 +143,7 @@ All P2 items complete:
 ### 🟣 P4 — Enterprise + distribution
 
 - [ ] **Air-gapped mirror** (Buncker-like, encrypted USB sync) under appliance license.
-- [ ] **Signed embedded SBOM** per bundle.
+- [x] **Signed embedded SBOM** — `erebus sbom <file>` generates CycloneDX SBOM; `--embed` writes it into the binary metadata (rejects signed/SISR) (`796e229`).
 - [ ] **SSO/SAML + SLA**.
 - [ ] **Web UI** — compliance admin dashboard (the webchat is for chat, not a dashboard).
 - [ ] **Kubernetes operator / Helm chart**.
