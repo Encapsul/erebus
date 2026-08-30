@@ -74,8 +74,9 @@ def erebus_request(base: str, method: str, path: str, token: str | None,
         with urllib.request.urlopen(req, timeout=300) as resp:
             return resp.status, resp.read(), dict(resp.headers)
     except urllib.error.HTTPError as e:
-        body = e.read()
-        return e.code, body, dict(e.headers)
+        return e.code, e.read(), dict(e.headers)
+    except urllib.error.URLError:
+        return 503, b"", {}
 
 
 def oci_manifest_from_package(name: str, pkg: dict, token: str | None, base: str) -> dict:

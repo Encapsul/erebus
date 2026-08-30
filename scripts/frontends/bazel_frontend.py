@@ -39,7 +39,7 @@ def parse_bearer(headers: dict) -> str | None:
 
 
 def erebus_request(base: str, method: str, path: str, token: str | None,
-                   data: bytes | None = None, content_type: str = "") -> tuple[int, bytes]:
+                   data: bytes | None = None, content_type: str = "") -> tuple[int, bytes, dict]:
     url = urllib.parse.urljoin(base, path)
     headers = {"User-Agent": "erebus-bazel-frontend/0.5"}
     if token:
@@ -49,9 +49,11 @@ def erebus_request(base: str, method: str, path: str, token: str | None,
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=300) as resp:
-            return resp.status, resp.read()
+            return resp.status, resp.read(), dict(resp.headers)
     except urllib.error.HTTPError as e:
-        return e.code, e.read()
+        return e.code, e.read(), dict(e.headers)
+    except urllib.error.URLError:
+        return 503, b"", {}
 
 
 def bazel_find_package_by_sha(base: str, token: str | None, hex_digest: str) -> tuple[str, bytes] | None:

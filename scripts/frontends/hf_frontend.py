@@ -64,6 +64,8 @@ def erebus_request(base: str, method: str, path: str, token: str | None,
             return resp.status, resp.read(), dict(resp.headers)
     except urllib.error.HTTPError as e:
         return e.code, e.read(), dict(e.headers)
+    except urllib.error.URLError:
+        return 503, b"", {}
 
 
 def hf_list_models(base: str, token: str | None) -> tuple[int, bytes]:

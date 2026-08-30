@@ -33,9 +33,7 @@ pub fn run(args: AuditLogArgs) -> Result<()> {
         url.push_str(&format!("&org={}", urlencoding::encode(&org)));
     }
 
-    let client = Client::builder()
-        .user_agent("erebus-cli/0.5.0")
-        .build()?;
+    let client = Client::builder().user_agent("erebus-cli/0.5.0").build()?;
 
     let mut req = client.get(&url);
     if let Some(token) = args.token {
@@ -44,18 +42,25 @@ pub fn run(args: AuditLogArgs) -> Result<()> {
 
     let resp = req.send().context("failed to contact registry")?;
     if !resp.status().is_success() {
-        anyhow::bail!("registry returned {}: {}", resp.status(), resp.text().unwrap_or_default());
+        anyhow::bail!(
+            "registry returned {}: {}",
+            resp.status(),
+            resp.text().unwrap_or_default()
+        );
     }
 
     let body = resp.bytes().context("failed to read response body")?;
 
     match args.output {
         Some(path) => {
-            std::fs::write(&path, &body).with_context(|| format!("failed to write {}", path.display()))?;
+            std::fs::write(&path, &body)
+                .with_context(|| format!("failed to write {}", path.display()))?;
             eprintln!("wrote {} bytes to {}", body.len(), path.display());
         }
         None => {
-            std::io::stdout().write_all(&body).context("failed to write to stdout")?;
+            std::io::stdout()
+                .write_all(&body)
+                .context("failed to write to stdout")?;
         }
     }
 

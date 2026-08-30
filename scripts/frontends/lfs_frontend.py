@@ -43,7 +43,7 @@ def parse_auth(headers: dict) -> str | None:
 
 
 def erebus_request(base: str, method: str, path: str, token: str | None,
-                   data: bytes | None = None, content_type: str = "") -> tuple[int, bytes]:
+                   data: bytes | None = None, content_type: str = "") -> tuple[int, bytes, dict]:
     url = urllib.parse.urljoin(base, path)
     headers = {"User-Agent": "erebus-lfs-frontend/0.5"}
     if token:
@@ -53,24 +53,26 @@ def erebus_request(base: str, method: str, path: str, token: str | None,
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=300) as resp:
-            return resp.status, resp.read()
+            return resp.status, resp.read(), dict(resp.headers)
     except urllib.error.HTTPError as e:
-        return e.code, e.read()
+        return e.code, e.read(), dict(e.headers)
+    except urllib.error.URLError:
+        return 503, b"", {}
 
 
-def lfs_batch(base: str, token: str | None, body: bytes) -> tuple[int, bytes]:
+def lfs_batch(base: str, token: str | None, body: bytes) -> tuple[int, bytes, dict]:
     try:
         req = json.loads(body)
     except ValueError:
-        return 400, json.dumps({"message": "Invalid JSON body"}).encode()
+        return 400, json.dumps({"message": "Invalid JSON body"}).encode(), {}
     objects = req.get("objects", [])
     operation = req.get("operation", "download")
     if not isinstance(objects, list):
-        return 400, json.dumps({"message": "objects must be an array"}).encode()
+        return 400, json.dumps({"message": "objects must be an array"}).encode(), {}
     # Build sha256 set from index
     code, index_body, _ = erebus_request(base, "GET", "/index.json", token)
     if code != 200:
-        return code, json.dumps({"message": "upstream error", "status": code}).encode()
+        return code, json.dumps({"message": "upstream error", "status": code}).encode(), {}
     try:
         packages = json.loads(index_body).get("packages", [])
     except ValueError:
@@ -117,16 +119,16 @@ def lfs_batch(base: str, token: str | None, body: bytes) -> tuple[int, bytes]:
             results.append({"oid": oid, "size": size})
         else:
             results.append({"oid": oid, "size": size, "error": {"code": 400, "message": f"unknown operation {operation}"}})
-    return 200, json.dumps({"transfer": ["basic"], "objects": results}).encode()
+    return 200, json.dumps({"transfer": ["basic"], "objects": results}).encode(), {}
 
 
-def lfs_upload_object(base: str, token: str | None, oid: str, data: bytes) -> tuple[int, bytes]:
+def lfs_upload_object(base: str, token: str | None, oid: str, data: bytes) -> tuple[int, bytes, dict]:
     if not oid.startswith("sha256:"):
-        return 400, json.dumps({"message": "invalid oid"}).encode()
+        return 400, json.dumps({"message": "invalid oid"}).encode(), {}
     hex_digest = oid[7:]
     actual = hashlib.sha256(data).hexdigest()
     if actual != hex_digest:
-        return 422, json.dumps({"message": "checksum mismatch", "oid": oid}).encode()
+        return 422, json.dumps({"message": "checksum mismatch", "oid": oid}).encode(), {}
     # Use first package slot or create a deterministic name
     pkg_name = f"lfs-{hex_digest[:16]}"
     expected = f"{pkg_name}.erebus"
@@ -140,8 +142,8 @@ def lfs_upload_object(base: str, token: str | None, oid: str, data: bytes) -> tu
     code, _, _ = erebus_request(base, "POST", path, token, data=body,
                                 content_type=f"multipart/form-data; boundary={boundary}")
     if code in (200, 201):
-        return 201, json.dumps({"oid": oid, "size": len(data)}).encode()
-    return code, json.dumps({"message": "upload failed", "status": code}).encode()
+        return 201, json.dumps({"oid": oid, "size": len(data)}).encode(), {}
+    return code, json.dumps({"message": "upload failed", "status": code}).encode(), {}
 
 
 class LFSHandler(BaseHTTPRequestHandler):
@@ -168,13 +170,13 @@ class LFSHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(min(length, 10 << 20))
         if path == "/objects/batch":
-            code, resp = lfs_batch(self.erebus_base, token, body)
+            code, resp, _ = lfs_batch(self.erebus_base, token, body)
             return self._send_json(code, resp)
         # Single object upload endpoint some clients use
         m = re.match(r"^/objects/([^/]+)$", path)
         if m:
             oid = urllib.parse.unquote(m.group(1))
-            code, resp = lfs_upload_object(self.erebus_base, token, oid, body)
+            code, resp, _ = lfs_upload_object(self.erebus_base, token, oid, body)
             return self._send_json(code, resp)
         self.send_response(404)
         self.end_headers()
