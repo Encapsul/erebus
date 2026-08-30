@@ -639,6 +639,51 @@ class Store:
             self._save_locked(self.integrity_path, snapshot)
         return snapshot
 
+    def garbage_collect_locked(self, dry_run: bool = True) -> dict:
+        """Find and optionally reclaim unreachable or corrupt blobs.
+
+        Returns a report dict with:
+          - dry_run: boolean
+          - corrupt: list of corrupt blob filenames
+          - unreachable: list of blob filenames not in the current index
+          - quarantined: list of blobs moved to quarantine (empty if dry_run)
+        """
+        index_names = set()
+        for name in os.listdir(self.pkg_dir):
+            if name.endswith(".erebus") and os.path.isfile(os.path.join(self.pkg_dir, name)):
+                index_names.add(name)
+
+        integrity = self.integrity if hasattr(self, 'integrity') else {}
+        corrupt = [name for name, info in integrity.items() if not info.get("ok") and name in index_names]
+        referenced = set()
+        meta_names = set(os.listdir(self.meta_dir)) if os.path.isdir(self.meta_dir) else set()
+        for meta_name in meta_names:
+            if meta_name.endswith(".json"):
+                pkg_name = meta_name[:-5]
+                if pkg_name + ".erebus" in index_names:
+                    referenced.add(pkg_name + ".erebus")
+        unreachable = sorted(index_names - referenced)
+        quarantined = []
+        if not dry_run:
+            quarantine_dir = os.path.join(self.root, "quarantine")
+            os.makedirs(quarantine_dir, exist_ok=True)
+            for name in corrupt + unreachable:
+                src = os.path.join(self.pkg_dir, name)
+                if os.path.isfile(src):
+                    dst = os.path.join(quarantine_dir, name)
+                    try:
+                        atomic_write(dst, open(src, "rb").read())
+                        os.remove(src)
+                        quarantined.append(name)
+                    except OSError:
+                        pass
+        return {
+            "dry_run": dry_run,
+            "corrupt": corrupt,
+            "unreachable": unreachable,
+            "quarantined": quarantined,
+        }
+
     def index(self) -> bytes:
         packages = []
         for name in sorted(os.listdir(self.pkg_dir)):
@@ -904,6 +949,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(self.store.stats())
         if path == "/index.json":
             return self._send_index()
+        if path == "/admin/gc":
+            return self._admin_gc()
         if path == "/" or path == "/ui":
             body = LANDING.format().encode()
             self.send_response(200)
@@ -937,6 +984,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/audit/download":
             return self._audit_download(self.path.split("?", 1)[1] if "?" in self.path else "")
         self.send_json({"error": "not found"}, 404)
+
+    def _admin_gc(self):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        dry_run = not any("execute=1" in q for q in self.path.split("?")[1].split("&") if "?" in self.path)
+        report = self.store.garbage_collect_locked(dry_run=dry_run)
+        self.send_json(report)
 
     def _send_index(self):
         body = self.store.index()
