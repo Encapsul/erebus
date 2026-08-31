@@ -346,6 +346,15 @@ pub struct ModelLayer {
     pub format: String, // "gguf", "safetensors", "onnx", etc.
     pub path: String,   // path within layer directory
     pub size: u64,
+    /// Human-readable source identifier (e.g. HuggingFace repo name,
+    /// OCI digest, Git LFS pointer, S3 key prefix).
+    pub source: Option<String>,
+    /// Artefact scan results (e.g. CVE IDs, GGUF tensor integrity flags,
+    /// anti-malware verdicts). Stored as a free‑form JSON value to accept
+    /// any schema without breaking the binary format.
+    pub scan_results: Option<serde_json::Value>,
+    /// Arbitrary key/value metadata (deprecated in favour of `source` /
+    /// `scan_results` where possible, but kept for downstream compatibility).
     pub metadata: Option<serde_json::Value>,
 }
 
@@ -444,6 +453,8 @@ mod tests {
             format: "gguf".into(),
             path: "models/llama-7b.gguf".into(),
             size: 4_000_000_000,
+            source: None,
+            scan_results: None,
             metadata: None,
         };
         assert_eq!(layer.kind(), LayerKind::Model);

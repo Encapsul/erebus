@@ -1,19 +1,19 @@
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Nonce,
+};
 use anyhow::{Context, Result};
 use clap::Args;
 use erebus_core::encrypt::generate_salt;
 use hkdf::Hkdf;
 use rand::rngs::OsRng;
 use rand::RngCore;
-use sha2::{Sha256};
+use sha2::Sha256;
 use std::fs::{self, File};
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use tar::Builder;
 use zeroize::Zeroizing;
-use aes_gcm::{
-    aead::{Aead, KeyInit},
-    Aes256Gcm, Nonce,
-};
 
 #[derive(Args)]
 pub struct MirrorArgs {
@@ -55,8 +55,16 @@ pub enum MirrorCommand {
 
 pub fn run(args: MirrorArgs) -> Result<()> {
     match args.command {
-        MirrorCommand::Export { dir, output, password } => export(&dir, &output, &password),
-        MirrorCommand::Import { input, dir, password } => import(&input, &dir, &password),
+        MirrorCommand::Export {
+            dir,
+            output,
+            password,
+        } => export(&dir, &output, &password),
+        MirrorCommand::Import {
+            input,
+            dir,
+            password,
+        } => import(&input, &dir, &password),
     }
 }
 
@@ -100,7 +108,9 @@ fn export(dir: &Path, output: &PathBuf, password: &str) -> Result<()> {
         let key_bytes: [u8; 32] = *key;
         let cipher = Aes256Gcm::new_from_slice(&key_bytes).context("aes key init")?;
         let nonce_bytes = Nonce::from_slice(&nonce);
-        cipher.encrypt(nonce_bytes, tar_data.as_ref()).map_err(|e| anyhow::anyhow!("encryption failed: {e}"))?
+        cipher
+            .encrypt(nonce_bytes, tar_data.as_ref())
+            .map_err(|e| anyhow::anyhow!("encryption failed: {e}"))?
     };
 
     let mut out = File::create(output).context("failed to create output file")?;
@@ -111,7 +121,11 @@ fn export(dir: &Path, output: &PathBuf, password: &str) -> Result<()> {
     out.write_all(&ciphertext[..ciphertext.len() - 16])?;
     out.flush()?;
 
-    println!("Mirror exported to {} ({} bytes)", output.display(), out.metadata()?.len());
+    println!(
+        "Mirror exported to {} ({} bytes)",
+        output.display(),
+        out.metadata()?.len()
+    );
     Ok(())
 }
 
@@ -132,7 +146,9 @@ fn import(input: &PathBuf, dir: &Path, password: &str) -> Result<()> {
         let key_bytes: [u8; 32] = *key;
         let cipher = Aes256Gcm::new_from_slice(&key_bytes).context("aes key init")?;
         let nonce_bytes = Nonce::from_slice(&nonce);
-        cipher.decrypt(nonce_bytes, ciphertext.as_ref()).map_err(|e| anyhow::anyhow!("decryption failed: {e}"))?
+        cipher
+            .decrypt(nonce_bytes, ciphertext.as_ref())
+            .map_err(|e| anyhow::anyhow!("decryption failed: {e}"))?
     };
 
     fs::create_dir_all(dir)?;

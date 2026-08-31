@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "erebus-registry.fullname" . }}
+  labels: {{- include "erebus-registry.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "erebus-registry.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations: {{- toYaml .Values.podAnnotations | nindent 8 }}
+      labels: {{- include "erebus-registry.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "erebus-registry.serviceAccountName" . }}
+      securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          command:
+            - python3
+            - /app/registry_server.py
+            - --dir
+            - /data
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8080"
+            - --quota-gb
+            - {{ .Values.registry.quotaGb | quote }}
+            - --upload-cap-gb
+            - {{ .Values.registry.uploadCapGb | quote }}
+            {{- if .Values.registry.requireAuth }}
+            - --require-auth
+            {{- end }}
+            {{- if .Values.registry.allowAnonUploads }}
+            - --allow-anon-uploads
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "erebus-registry.fullname" . }}

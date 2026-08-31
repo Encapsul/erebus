@@ -1638,6 +1638,8 @@ mod tests {
             format: "gguf".into(),
             path: "models/llama.gguf".into(),
             size: 4_000_000_000,
+            source: None,
+            scan_results: None,
             metadata: None,
         };
         let meta = Metadata {

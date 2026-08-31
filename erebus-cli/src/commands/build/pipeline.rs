@@ -775,6 +775,8 @@ pub(crate) fn build_single_target(
                         format: "gguf".to_string(),
                         path: format!("models/{model_name}"),
                         size: model_bytes.len() as u64,
+                        source: None,
+                        scan_results: None,
                         metadata: Some(serde_json::json!({ "sha256": model_sha256 })),
                     };
                     layers.push(SerializableLayer::Model(model_layer));

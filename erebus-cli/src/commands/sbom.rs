@@ -68,7 +68,8 @@ fn write_metadata(path: &PathBuf, meta: &Value, output: Option<&PathBuf>) -> Res
         let meta_offset = footer.meta_offset as usize;
         out.write_all(&leading[..meta_offset])
             .context("failed to copy payload")?;
-        out.write_all(&json_bytes).context("failed to write metadata")?;
+        out.write_all(&json_bytes)
+            .context("failed to write metadata")?;
         let mut hasher = Sha256::new();
         hasher.update(&leading[..meta_offset]);
         hasher.update(&json_bytes);
@@ -117,8 +118,7 @@ pub fn run(args: SbomArgs) -> Result<()> {
         let output_path = args
             .output
             .unwrap_or_else(|| args.file.with_extension("erebus.sbom.json"));
-        let json_bytes =
-            serde_json::to_vec_pretty(&sbom).context("failed to serialize SBOM")?;
+        let json_bytes = serde_json::to_vec_pretty(&sbom).context("failed to serialize SBOM")?;
         std::fs::write(&output_path, &json_bytes)
             .with_context(|| format!("failed to write {}", output_path.display()))?;
         if !args.quiet {

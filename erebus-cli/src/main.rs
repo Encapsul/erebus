@@ -159,6 +159,14 @@ enum Commands {
     /// Download a bundle from a registry (integrity-checked)
     Pull(commands::pull::PullArgs),
 
+    /// HuggingFace Hub API compat — drop-in for `huggingface-cli`.
+    ///
+    /// Supported operations:
+    ///   `erebus hf login` — store HF token
+    ///   `erebus hf push <model.erebus> — push to HF Hub`
+    ///   `erebus hf pull <repo_id> — pull from HF Hub`
+    Hf(commands::hf::HfArgs),
+
     /// Serve a bundle model as an OpenAI-compatible API
     ///
     /// Examples:
@@ -331,6 +339,7 @@ fn main() -> ExitCode {
             }
             commands::pull::run(args)
         }
+        Commands::Hf(args) => commands::hf::run(args),
         Commands::Chat(args) => commands::chat::run(args),
         Commands::Serve(args) => commands::serve::run(args),
         Commands::Swap(args) => commands::swap::run(args),
