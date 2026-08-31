@@ -18,26 +18,16 @@ app directory ──→ detect.rs ──→ runtime + entrypoint
 
 Identifies the runtime and resolves the entrypoint:
 
-- `app.py` / `main.py` / `server.py` → **Python**
-- `package.json` → **Node.js**
-- `deno.json` / `deno.jsonc` → **Deno**
-- `pom.xml` / `build.gradle` → **Java**
-- `Gemfile` → **Ruby**
-- `*.csproj` / `*.sln` → **.NET/C#**
-- `go.mod` → **Go**
-- `composer.json` → **PHP**
-- `Makefile.PL` / `cpanfile` → **Perl**
-- `hugo.toml` / `hugo.yaml` → **Hugo**
+- `app.py` / `main.py` / `server.py` / `__main__.py` / `pyproject.toml` / `requirements.txt` / `setup.py` → **Python**
 - ELF executable → **Binary**
 
 ### Package manager detection (`pkgmgr.rs`)
 
-Detects which package manager an app uses (speed-based priority):
+Detects which package manager an app uses:
 
 | Runtime | Priority order |
 |---------|---------------|
 | Python | uv > poetry > pipenv > pip |
-| Node.js | pnpm > yarn > bun > npm |
 
 ### ELF dependency resolution
 

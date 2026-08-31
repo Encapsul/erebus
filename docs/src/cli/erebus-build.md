@@ -11,10 +11,9 @@ trailing slash appends `app.erebus` to the directory).
 
 ## Runtime selection
 
-The runtime is auto-detected from the app directory (Python, Node.js, Deno,
-Java, Ruby, .NET/C#, Go, PHP, Perl, native binary). Override the detected
-interpreter with `--embed-interpreter` (for example `python3`, `node`,
-`php`, `ruby`, `deno`).
+The runtime is auto-detected from the app directory (**Python**, **Binary**).
+Override the detected interpreter with `--embed-interpreter` (for example
+`python3` for Python, or the path to a native binary).
 
 ## Common options
 
@@ -22,7 +21,7 @@ interpreter with `--embed-interpreter` (for example `python3`, `node`,
 |---|---|
 | `-o, --output <PATH>` | Output file (default `app.erebus`) |
 | `-k, --key <PATH>` | Ed25519 signing key (32 raw bytes) |
-| `--isolation <MODE>` | Isolation level: `sandbox` (0) .. hard (default `sandbox`) |
+| `--isolation <MODE>` | Isolation level: `none` (0), `sandbox` (1), `hard` (2) (default `sandbox`) |
 | `--seccomp` | Install a seccomp BPF denylist at runtime |
 | `--landlock` | Enable Landlock LSM filesystem sandbox |
 | `--encrypt` | Encrypt the payload (AES-256-GCM, key derived from signing seed) |
@@ -32,6 +31,9 @@ interpreter with `--embed-interpreter` (for example `python3`, `node`,
 | `--env KEY=VALUE` | Set an env var (repeatable) |
 | `--define KEY=VALUE` | Build-time define, injected as an env var (repeatable) |
 | `--version-info <STR>` | Version string recorded in metadata |
+| `--author <STR>` | Author string recorded in metadata |
+| `--description <STR>` | Description recorded in metadata |
+| `--license <STR>` | License string recorded in metadata |
 | `--include <PATH>` | Extra files/dirs to embed in the rootfs (repeatable) |
 | `--dry-run` | Print the build plan without building |
 | `--json` | Emit a JSON build result on stdout |

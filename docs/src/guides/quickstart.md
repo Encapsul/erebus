@@ -27,7 +27,7 @@ make stub
 # or: cd stub && cargo build --release --target x86_64-unknown-linux-musl
 ```
 
-## 2. Build & run a Python app
+## 2. Build & run a Python web app
 
 ```bash
 erebus build ./examples/hello-web -o hello-web.erebus
@@ -38,16 +38,16 @@ erebus build ./examples/hello-web -o hello-web.erebus
 
 Open http://127.0.0.1:8080 in your browser.
 
-## 3. Build & run a Node.js app
+## 3. Build & run a Python app with dependencies
 
 ```bash
-erebus build ./examples/hello-node -o hello-node.erebus
+erebus build ./examples/bottle-web -o bottle-web.erebus
 
-./hello-node.erebus
+./bottle-web.erebus
 # Server listening on http://127.0.0.1:8080
 ```
 
-See the [Node.js guide](./node.md) for details on dependencies and `node_modules`.
+See the [Python guide](./python.md) for details on dependencies and `requirements.txt`.
 
 ## 4. Inspect a .erebus
 
@@ -58,7 +58,7 @@ erebus inspect hello-web.erebus
 ```
 name:            hello-web
 runtime:         python
-entrypoint:      /usr/bin/python3.12 /app/app.py
+entrypoint:      python3 /app/app.py
 layers:
   - runtime   11.9MB compressed / 54.0MB raw
   - app        0.0MB compressed /  0.0MB raw
@@ -94,6 +94,6 @@ The runtime layer (interpreter + stdlib + .so) is cached. Only app code is
 recompressed on subsequent builds:
 
 ```bash
-# First build  : ~25s (Python) / ~53s (Node)
+# First build  : ~25s (Python)
 # Rebuild (code): ~1s
 ```

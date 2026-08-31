@@ -1,6 +1,6 @@
 [book]
 title = "erebus"
-description = "Ship your web app like a binary. Run anywhere."
+description = "Ship AI agents as self-contained binaries with verifiable attestation."
 authors = ["Tednoob17"]
 language = "en"
 src = "src"

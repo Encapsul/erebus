@@ -6,7 +6,7 @@ No runtime embedding is needed — just the binary and its shared libraries.
 ## Detection
 
 The builder detects a native binary when a single ELF executable is found in the
-app directory and no other runtime (Python, Node, Java, etc.) is detected.
+app directory and no Python runtime is detected.
 
 ```
 my-binary/
@@ -51,7 +51,7 @@ erebus inspect my-binary.erebus
 
 Native binaries cannot be cross-compiled by `erebus` — the binary must already be
 built for the target architecture. Use `erebus build --target aarch64` only for
-interpreted runtimes (Python, etc.) where the interpreter can be downloaded for
+interpreted runtimes (Python) where the interpreter can be downloaded for
 the target arch.
 
 ## Known limitations

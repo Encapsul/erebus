@@ -49,6 +49,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import sys
 import threading
 import time
@@ -587,6 +588,19 @@ class Store:
             users[username] = rec
             self._save_locked(self.users_path, {"users": users})
             self.users = users
+        # Replication event for new user
+        self.record_replication_event(
+            "upsert_user",
+            username,
+            {
+                "sha256": "",
+                "size": 0,
+                "at": datetime.now(timezone.utc).isoformat(),
+                "private": False,
+                "deleted": False,
+                "meta": {"tier": "free"},
+            },
+        )
         return True, token
 
     def login(self, username: str, password: str, provided_token: str | None) -> str | None:
@@ -709,6 +723,19 @@ class Store:
             self._save_locked(self.users_path, {"users": users})
             self.users = users
         self.record_audit(username, "billing_tier", tier)
+        # Replication event
+        self.record_replication_event(
+            "tier_change",
+            username,
+            {
+                "sha256": "",
+                "size": 0,
+                "at": datetime.now(timezone.utc).isoformat(),
+                "private": False,
+                "deleted": False,
+                "meta": {"tier": tier},
+            },
+        )
         return True
 
     def quota_for(self, username: str) -> int:
@@ -884,6 +911,20 @@ class Store:
                 os.path.join(self.meta_dir, fname + ".json"),
                 json.dumps({"owner": owner, "private": private, "deleted": deleted, "deleted_at": deleted_at}).encode(),
             )
+            # Replication event
+            meta = self.get_meta(fname)
+            self.record_replication_event(
+                "upsert_artifact",
+                fname,
+                {
+                    "sha256": self.sha256_cached(os.path.join(self.pkg_dir, fname)),
+                    "size": os.path.getsize(os.path.join(self.pkg_dir, fname)),
+                    "at": datetime.now(timezone.utc).isoformat(),
+                    "private": private,
+                    "deleted": deleted,
+                    "meta": meta,
+                },
+            )
 
     def soft_delete(self, fname: str, user: str) -> None:
         with self.lock:
@@ -896,6 +937,19 @@ class Store:
                 json.dumps(meta).encode(),
             )
             self.store.record_audit(user, "artifact_deleted", fname)
+            # Replication event
+            self.record_replication_event(
+                "delete_artifact",
+                fname,
+                {
+                    "sha256": self.sha256_cached(os.path.join(self.pkg_dir, fname)),
+                    "size": 0,
+                    "at": datetime.now(timezone.utc).isoformat(),
+                    "private": meta.get("private", False),
+                    "deleted": True,
+                    "meta": meta,
+                },
+            )
 
 
     def get_meta(self, fname: str) -> dict:
@@ -1062,6 +1116,54 @@ class Store:
             "unreachable": unreachable,
             "quarantined": quarantined,
         }
+
+    # ---- Replication journal -----------------------------------------
+    def _replication_path(self) -> str:
+        return os.path.join(self.root, "replication.jsonl")
+
+    def record_replication_event(self, op: str, name: str, payload: dict) -> int:
+        """Append an event to the replication journal. Returns the sequence number."""
+        with self.lock:
+            # Read current max seq
+            max_seq = 0
+            if os.path.exists(self._replication_path()):
+                with open(self._replication_path(), "r") as f:
+                    for line in f:
+                        try:
+                            rec = json.loads(line)
+                            if rec.get("seq", 0) > max_seq:
+                                max_seq = rec["seq"]
+                        except (json.JSONDecodeError, KeyError):
+                            continue
+            next_seq = max_seq + 1
+            entry = {
+                "seq": next_seq,
+                "op": op,
+                "name": name,
+                "payload": payload,
+                "at": datetime.now(timezone.utc).isoformat(),
+            }
+            with open(self._replication_path(), "a") as f:
+                f.write(json.dumps(entry) + "\n")
+            return next_seq
+
+    def replication_journal(self, after: int = 0) -> tuple[list[dict], int]:
+        """Return journal entries with seq > after, and the next_seq."""
+        entries = []
+        max_seq = 0
+        if os.path.exists(self._replication_path()):
+            with open(self._replication_path(), "r") as f:
+                for line in f:
+                    try:
+                        rec = json.loads(line)
+                        if rec.get("seq", 0) > after:
+                            entries.append(rec)
+                        if rec.get("seq", 0) > max_seq:
+                            max_seq = rec["seq"]
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+        next_seq = max_seq + 1
+        return entries, next_seq
 
     def index(self) -> bytes:
         packages = []
@@ -1507,6 +1609,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._sso_start()
         if path == "/auth/sso/callback":
             return self._sso_callback()
+        if path == "/replicate/index":
+            return self._replicate_index()
+        if path.startswith("/replicate/blob/"):
+            return self._replicate_blob(path[len("/replicate/blob/"):])
         if path == "/stats":
             return self.send_json(self.store.stats())
         if path == "/index.json":
@@ -1818,19 +1924,68 @@ class Handler(BaseHTTPRequestHandler):
         # Fallback: infer from Host header
         scheme = "https" if self.headers.get("X-Forwarded-Proto") == "https" else "http"
         return f"{scheme}://{host}/auth/sso/callback"
-        user = self._authorized_user()
-        if not user:
-            return self.send_json({"error": "authentication required"}, 401)
-        path = os.path.join(self.store.pkg_dir, fname)
-        if not os.path.isfile(path):
-            return self.send_json({"error": "package not found"}, 404)
-        meta = self.store.get_meta(fname)
-        if meta.get("owner") and meta["owner"] != user:
-            return self.send_json({"error": "forbidden"}, 403)
-        self.store.soft_delete(fname, user)
-        self.send_json({"ok": True, "file": fname})
 
-    def _serve_package(self, fname: str):
+    # ---- Replication handlers -----------------------------------------
+    def _replicate_index(self):
+        # Optional: require replication token if configured
+        cfg = self.store.get_sso_config()
+        # Replication token can be stored in sso.json as "replicate_token"
+        replicate_token = cfg.get("replicate_token") if cfg else None
+        if replicate_token:
+            auth = self.headers.get("Authorization", "")
+            token_header = self.headers.get("X-Replicate-Token", "")
+            token = None
+            if auth.startswith("Bearer replicate:"):
+                token = auth[len("Bearer replicate:"):].strip()
+            elif token_header:
+                token = token_header
+            if token != replicate_token:
+                self.send_json({"error": "replication token required"}, 403)
+                return
+
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        after = int(qs.get("after", ["0"])[0]) if qs.get("after") else 0
+        entries, next_seq = self.store.replication_journal(after)
+        self.send_json({
+            "leader": socket.gethostname(),
+            "journal": entries,
+            "next_seq": next_seq,
+        })
+
+    def _replicate_blob(self, fname: str):
+        fname = os.path.basename(fname)
+        full = os.path.join(self.store.pkg_dir, fname)
+        if not SAFE_FILE.match(fname) or not os.path.isfile(full):
+            self.send_json({"error": "blob not found"}, 404)
+            return
+        # Same token check as _replicate_index
+        cfg = self.store.get_sso_config()
+        replicate_token = cfg.get("replicate_token") if cfg else None
+        if replicate_token:
+            auth = self.headers.get("Authorization", "")
+            token_header = self.headers.get("X-Replicate-Token", "")
+            token = None
+            if auth.startswith("Bearer replicate:"):
+                token = auth[len("Bearer replicate:"):].strip()
+            elif token_header:
+                token = token_header
+            if token != replicate_token:
+                self.send_json({"error": "replication token required"}, 403)
+                return
+        # Stream the blob
+        try:
+            stat = os.stat(full)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(stat.st_size))
+            self.end_headers()
+            with open(full, "rb") as f:
+                while chunk := f.read(CHUNK):
+                    self.wfile.write(chunk)
+        except Exception:
+            self.send_json({"error": "blob read failed"}, 500)
+
+    def _package_delete(self, fname: str):
         fname = os.path.basename(fname)
         full = os.path.join(self.store.pkg_dir, fname)
         is_sidecar = bool(SAFE_SIDECAR.match(fname))

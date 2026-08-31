@@ -82,6 +82,17 @@ erebus build ./my_app -o my_app.erebus
 # [erebus] pip install: ./my_app/requirements.txt → /app/site-packages
 ```
 
+## Supported entrypoints
+
+The builder auto-detects the entrypoint in this priority order:
+
+1. **Django** — `manage.py` → `python3 /app/manage.py runserver 0.0.0.0:8000`
+2. **Streamlit** — `streamlit` in requirements → `streamlit run /app/app.py --server.port 8501 --server.address 0.0.0.0`
+3. **FastAPI/ASGI** — `uvicorn`/`gunicorn` in requirements or `pyproject.toml` → `uvicorn module:app --host 0.0.0.0 --port 8000`
+4. **PEP 621 `[project.scripts]`** — `start = "..."` in `pyproject.toml`
+5. **Python module** — `pyproject.toml` with `tool.fastapi.entrypoint` or package with `__main__.py` → `python3 -m module`
+6. **Script fallback** — first of `app.py`, `main.py`, `__main__.py`, `server.py` → `python3 /app/<script>`
+
 ## Current limitations
 
 - **Cross-distro portability**: see [Isolation](../reference/isolation.md)

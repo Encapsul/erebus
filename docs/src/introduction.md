@@ -57,8 +57,8 @@ erebus chat agent.erebus
 
 | Runtime | Detection | Use case |
 |---|---|---|
-| Python | `requirements.txt`, `pyproject.toml`, … | FastAPI/Flask agents, tools |
-| Binary | executable present | llama.cpp engines, Go/Rust servers |
+| Python | `requirements.txt`, `pyproject.toml`, `app.py`, `main.py`, ... | FastAPI/Flask agents, tools |
+| Binary | executable present (ELF/PE) | llama.cpp engines, Go/Rust servers |
 
 Cross-platform launcher stubs are built with cargo-zigbuild; any host can
 target any platform.
