@@ -71,7 +71,13 @@ fn seccomp_denylist_allows_normal_execution() {
     let stub = PathBuf::from(env!("CARGO_BIN_EXE_erebus-stub"));
     let erebus_path = build_seccomp_erebus(&work, &stub, true);
 
-    let output = Command::new(&erebus_path).output().expect("run erebus");
+    // Isolate the extraction cache per test: all seccomp tests share the same
+    // payload → same cache hash. A global ~/.cache/erebus would let one test's
+    // warm start consume another's (stale) rootfs and fail spuriously.
+    let output = Command::new(&erebus_path)
+        .env("XDG_CACHE_HOME", work.join("cache"))
+        .output()
+        .expect("run erebus");
     assert!(
         output.status.success(),
         "erebus with seccomp should run successfully (denylist, not deny-all): stderr={}",
@@ -94,7 +100,10 @@ fn seccomp_without_flag_works() {
     let stub = PathBuf::from(env!("CARGO_BIN_EXE_erebus-stub"));
     let erebus_path = build_seccomp_erebus(&work, &stub, false);
 
-    let output = Command::new(&erebus_path).output().expect("run erebus");
+    let output = Command::new(&erebus_path)
+        .env("XDG_CACHE_HOME", work.join("cache"))
+        .output()
+        .expect("run erebus");
     assert!(
         output.status.success(),
         "erebus without seccomp should run successfully: stderr={}",
