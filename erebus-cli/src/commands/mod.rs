@@ -1,6 +1,7 @@
 pub mod attest;
 pub mod audit;
 pub mod audit_log;
+pub mod backup;
 pub mod billing;
 pub mod build;
 pub mod chat;
@@ -16,6 +17,7 @@ pub mod lifecycle;
 pub mod mirror;
 pub mod publish;
 pub mod pull;
+pub mod restore;
 pub mod run;
 pub mod sbom;
 pub mod scan;

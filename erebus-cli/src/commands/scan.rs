@@ -29,6 +29,10 @@ pub struct ScanArgs {
     /// Show cache statistics
     #[arg(long)]
     pub cache: bool,
+
+    /// Scan project directory for vulnerable dependencies
+    #[arg(long)]
+    pub cve: bool,
 }
 
 pub fn run(args: ScanArgs) -> Result<()> {
@@ -62,6 +66,10 @@ pub fn run(args: ScanArgs) -> Result<()> {
             eprintln!("No cache found at {}", cache_dir.display());
         }
         return Ok(());
+    }
+
+    if args.cve {
+        return scan_cve(&args);
     }
 
     if args.dry_run {
@@ -336,6 +344,100 @@ fn cache_stats(dir: &Path) -> Result<(usize, u64)> {
         }
     }
     Ok((count, total))
+}
+
+const DEP_MANIFESTS: [&str; 3] = ["requirements.txt", "package.json", "pyproject.toml"];
+
+fn find_dep_files(path: &Path) -> Vec<PathBuf> {
+    let dir = if path.is_file() {
+        path.parent().unwrap_or_else(|| Path::new("."))
+    } else {
+        path
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .map_or(false, |n| DEP_MANIFESTS.contains(&n.to_str().unwrap_or("")))
+        })
+        .collect()
+}
+
+fn scan_cve(args: &ScanArgs) -> Result<()> {
+    let mut findings = Vec::new();
+    let mut found_any = false;
+
+    for path in &args.paths {
+        let manifests = find_dep_files(path);
+        if manifests.is_empty() {
+            eprintln!("No dependency manifests found in {}", path.display());
+            continue;
+        }
+        found_any = true;
+        for manifest in manifests {
+            match erebus_core::cve::scan_file(&manifest, &erebus_core::cve::default_rules()) {
+                Ok(f) => findings.extend(f),
+                Err(e) => eprintln!("Warning: failed to scan {}: {e}", manifest.display()),
+            }
+        }
+    }
+
+    if !found_any {
+        return Ok(());
+    }
+
+    if args.json {
+        let json_str =
+            serde_json::to_string_pretty(&erebus_core::cve::findings_to_json(&findings))?;
+        write_json_output(&json_str, args.output.as_deref())?;
+    } else if args.plain {
+        for f in &findings {
+            println!(
+                "{}\t{}\t{}\t{}\t{}",
+                f.cve_id, f.package, f.installed_version, f.fixed_in, f.severity
+            );
+        }
+    } else {
+        let rows = findings.len();
+        let mut pager = crate::pager::Pager::start(20, rows + 2);
+        if pager.is_active() {
+            use std::io::Write;
+            let mut w = pager.writer();
+            writeln!(
+                w,
+                "{:<15} {:<20} {:<12} {:<12} {:<8}",
+                "CVE_ID", "PACKAGE", "INSTALLED", "FIXED_IN", "SEVERITY"
+            )
+            .ok();
+            writeln!(w, "{}", "-".repeat(70)).ok();
+            for f in &findings {
+                writeln!(
+                    w,
+                    "{:<15} {:<20} {:<12} {:<12} {:<8}",
+                    f.cve_id, f.package, f.installed_version, f.fixed_in, f.severity
+                )
+                .ok();
+            }
+        } else {
+            println!(
+                "{:<15} {:<20} {:<12} {:<12} {:<8}",
+                "CVE_ID", "PACKAGE", "INSTALLED", "FIXED_IN", "SEVERITY"
+            );
+            println!("{}", "-".repeat(70));
+            for f in &findings {
+                println!(
+                    "{:<15} {:<20} {:<12} {:<12} {:<8}",
+                    f.cve_id, f.package, f.installed_version, f.fixed_in, f.severity
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn write_json_output(json_str: &str, output: Option<&Path>) -> Result<()> {

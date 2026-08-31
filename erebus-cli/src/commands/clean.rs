@@ -23,9 +23,58 @@ pub struct CleanArgs {
     /// Output result as JSON
     #[arg(long)]
     pub json: bool,
+
+    /// Garbage-collect orphaned content-addressed blobs in a registry
+    ///
+    /// Requires --blob-dir and --manifest-dir to be set
+    #[arg(long)]
+    pub gc_blobs: bool,
+
+    /// Registry blob directory (used with --gc-blobs)
+    #[arg(long)]
+    pub blob_dir: Option<std::path::PathBuf>,
+
+    /// Registry manifest directory (used with --gc-blobs)
+    #[arg(long)]
+    pub manifest_dir: Option<std::path::PathBuf>,
+
+    /// Trash directory for reclaimed blobs (defaults to <blob-dir>/trash)
+    #[arg(long)]
+    pub trash_dir: Option<std::path::PathBuf>,
 }
 
 pub fn run(args: CleanArgs) -> Result<()> {
+    if args.gc_blobs {
+        let blob = args
+            .blob_dir
+            .context("--blob-dir required with --gc-blobs")?;
+        let manifest = args
+            .manifest_dir
+            .context("--manifest-dir required with --gc-blobs")?;
+        let trash = args.trash_dir.unwrap_or_else(|| blob.join("trash"));
+        let res = erebus_core::gc::collect_garbage(&blob, &manifest, &trash)?;
+        if args.json {
+            let info = serde_json::json!({
+                "reclaimed": res.reclaimed,
+                "bytes_reclaimed": res.bytes_reclaimed,
+                "live_count": res.live_count,
+            });
+            println!("{}", serde_json::to_string_pretty(&info)?);
+        } else {
+            eprintln!("GC complete:");
+            eprintln!("  Orphans reclaimed: {}", res.reclaimed.len());
+            eprintln!(
+                "  Bytes freed:      {}",
+                erebus_core::paths::format_size(res.bytes_reclaimed)
+            );
+            eprintln!("  Live blobs:       {}", res.live_count);
+            if !res.reclaimed.is_empty() {
+                eprintln!("  Moved to: {}", trash.display());
+            }
+        }
+        return Ok(());
+    }
+
     if args.gc {
         let cache = BuildCache::new(std::path::Path::new("."), 50);
         cache.gc();

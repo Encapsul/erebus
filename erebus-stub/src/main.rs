@@ -30,6 +30,7 @@ mod win;
 
 use erebus_core::detect;
 use erebus_core::format::{self as format, read_at, Footer};
+use erebus_core::gguf;
 use erebus_core::layer::SerializableLayer;
 use erebus_core::sisr::health::{HealthCheckPolicy, HealthState, HealthStore};
 use erebus_core::sisr::resilience::{
@@ -580,6 +581,10 @@ fn run() -> io::Result<()> {
             extract_atomic(&[&payload], &cache_root, declared_model_bytes(&meta))?;
         }
         write_layer_manifest(&cache_root, &meta)?;
+        if let Err(e) = verify_model_tensor_integrity(&rootfs, &meta) {
+            eprintln!("[erebus] GGUF integrity check failed: {e}");
+            return Err(e);
+        }
     }
 
     // Record source identity after every successful verification/extraction
@@ -1373,6 +1378,49 @@ fn declared_model_bytes(meta: &Metadata) -> u64 {
         .fold(0u64, u64::saturating_add)
 }
 
+/// Verify GGUF tensor manifests for all model layers that carry one.
+///
+/// Reads only the first 2 MiB of each GGUF file (enough for any header)
+/// and compares the on-disk tensor list against the compiled manifest to
+/// detect weight swapping.
+fn verify_model_tensor_integrity(rootfs: &Path, meta: &Metadata) -> io::Result<()> {
+    const HEADER_READ_LIMIT: usize = 2 * 1024 * 1024;
+    for layer in &meta.layers {
+        let SerializableLayer::Model(m) = layer else {
+            continue;
+        };
+        let Some(ref manifest) = m.tensor_manifest else {
+            continue;
+        };
+        let model_path = rootfs.join(m.path.trim_start_matches('/'));
+        let mut file = File::open(&model_path).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("GGUF file missing: {}: {e}", model_path.display()),
+            )
+        })?;
+        let mut buf = vec![0u8; HEADER_READ_LIMIT];
+        let n = file.read(&mut buf)?;
+        buf.truncate(n);
+        let parsed = gguf::parse_header(&buf).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("GGUF header parse failed: {e}"),
+            )
+        })?;
+        if !erebus_core::layer::verify_tensor_manifest(manifest, &parsed) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "GGUF tensor manifest mismatch for {}: possible weight swap",
+                    m.name
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn extract_squashfs_atomic(blobs: &[&[u8]], cache_root: &Path) -> io::Result<()> {
     extraction::extract_squashfs_atomic(blobs, cache_root)
 }
@@ -1794,5 +1842,76 @@ mod tests {
         let loaded = load_layer_manifest(tmp.path()).unwrap();
         assert_eq!(loaded.version, 1);
         assert!(loaded.layers.is_empty());
+    }
+
+    /// Minimal GGUF header with a single F16 tensor (mirrors `gguf.rs` tests).
+    fn model_gguf_bytes() -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&0x4655_4747u32.to_le_bytes()); // magic
+        v.extend_from_slice(&2u32.to_le_bytes()); // version
+        v.extend_from_slice(&1u64.to_le_bytes()); // tensor count
+        v.extend_from_slice(&0u64.to_le_bytes()); // kv count
+        let name = b"tok_embeddings.weight";
+        v.extend_from_slice(&(name.len() as u64).to_le_bytes());
+        v.extend_from_slice(name);
+        v.extend_from_slice(&1u32.to_le_bytes()); // 1 dim
+        v.extend_from_slice(&32000u64.to_le_bytes());
+        v.extend_from_slice(&1u32.to_le_bytes()); // F16
+        v.extend_from_slice(&123456u64.to_le_bytes()); // offset
+        v
+    }
+
+    fn manifest_layer(manifest: Option<erebus_core::layer::TensorManifest>) -> Metadata {
+        let model = erebus_core::layer::ModelLayer {
+            name: "llama".into(),
+            format: "gguf".into(),
+            path: "models/llama.gguf".into(),
+            size: 1024,
+            tensor_manifest: manifest,
+            source: None,
+            scan_results: None,
+            metadata: None,
+        };
+        let mut meta = sample_meta(None, None);
+        meta.layers = vec![erebus_core::layer::SerializableLayer::Model(model)];
+        meta
+    }
+
+    #[test]
+    fn verify_model_tensor_integrity_accepts_matching_header() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs");
+        fs::create_dir_all(rootfs.join("models")).unwrap();
+        let gguf = model_gguf_bytes();
+        fs::write(rootfs.join("models/llama.gguf"), &gguf).unwrap();
+        let recorded = erebus_core::gguf::parse_header(&gguf).unwrap();
+        let meta = manifest_layer(Some(recorded));
+        verify_model_tensor_integrity(&rootfs, &meta).unwrap();
+    }
+
+    #[test]
+    fn verify_model_tensor_integrity_rejects_weight_swap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs");
+        fs::create_dir_all(rootfs.join("models")).unwrap();
+        let gguf = model_gguf_bytes();
+        let recorded = erebus_core::gguf::parse_header(&gguf).unwrap();
+        let mut swapped = gguf.clone();
+        let offset = swapped.len() - 8;
+        swapped[offset..].copy_from_slice(&999999u64.to_le_bytes());
+        fs::write(rootfs.join("models/llama.gguf"), &swapped).unwrap();
+        let meta = manifest_layer(Some(recorded));
+        let e = verify_model_tensor_integrity(&rootfs, &meta).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+        assert!(e.to_string().contains("weight swap"));
+    }
+
+    #[test]
+    fn verify_model_tensor_integrity_skips_manifestless_layers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs");
+        let meta = manifest_layer(None);
+        // No manifest: the model file need not exist for the check to pass.
+        verify_model_tensor_integrity(&rootfs, &meta).unwrap();
     }
 }

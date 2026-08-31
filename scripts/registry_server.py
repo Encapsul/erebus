@@ -35,6 +35,7 @@ Storage layout under --dir:
     audit/YYYY-MM.jsonl       append-only action log
 """
 import argparse
+import base64
 import fcntl
 import hashlib
 import hmac
@@ -385,6 +386,101 @@ def verify_integrity(path: str) -> tuple[bool, str]:
     return got == expected, "corrupt" if got != expected else "ok"
 
 
+# ---- Ed25519 pure-Python verification (RFC 8032 §5.1.7, stdlib only) -----
+# The Rust `Ed25519Authenticator` (erebus-core/src/auth.rs) signs the subject
+# bytes with Ed25519 and emits `subject:base64url(sig)`. Ed25519 is not in the
+# Python stdlib, so verification is re-implemented here with field arithmetic
+# over GF(2^255 - 19). This is verify-only — no secret material is handled.
+_ED_P = 2 ** 255 - 19
+_ED_L = 2 ** 252 + 27742317777372353535851937790883648493
+_ED_D = -121665 * pow(121666, _ED_P - 2, _ED_P) % _ED_P
+_ED_I = pow(2, (_ED_P - 1) // 4, _ED_P)
+_ED_B = (
+    15112221349535400772501151409588531511454012693041857206046113283949847762202,
+    46316835694926478169428394003475163141307993866256225615783033603165251855960,
+)
+
+
+def _ed_add(p, q):
+    """Unified Edwards point addition (twisted Edwards, a = -1)."""
+    if p is None:
+        return q
+    if q is None:
+        return p
+    x1, y1 = p
+    x2, y2 = q
+    x1y1x2y2 = x1 * y1 * x2 * y2 % _ED_P
+    den_x = (1 + _ED_D * x1y1x2y2) % _ED_P
+    den_y = (1 - _ED_D * x1y1x2y2) % _ED_P
+    inv_x = pow(den_x, _ED_P - 2, _ED_P)
+    inv_y = pow(den_y, _ED_P - 2, _ED_P)
+    return (
+        (x1 * y2 + y1 * x2) * inv_x % _ED_P,
+        (y1 * y2 + x1 * x2) * inv_y % _ED_P,
+    )
+
+
+def _ed_scalarmult(p, s):
+    """Double-and-add scalar multiplication; `None` is the point at infinity."""
+    acc = None
+    while s:
+        if s & 1:
+            acc = _ed_add(acc, p)
+        p = _ed_add(p, p)
+        s >>= 1
+    return acc
+
+
+def _ed_point_decode(data):
+    """Decode a 32-byte compressed Edwards point, or None if invalid."""
+    if len(data) != 32:
+        return None
+    raw = int.from_bytes(data, "little")
+    sign = (raw >> 255) & 1
+    y = raw & ((1 << 255) - 1)
+    if y >= _ED_P:
+        return None
+    y2 = y * y % _ED_P
+    x2 = (y2 - 1) * pow(_ED_D * y2 + 1, _ED_P - 2, _ED_P) % _ED_P
+    x = pow(x2, (_ED_P + 3) // 8, _ED_P)
+    if x * x % _ED_P != x2:
+        x = x * _ED_I % _ED_P
+    if x * x % _ED_P != x2:
+        return None
+    if (x & 1) != sign:
+        x = _ED_P - x
+    return x, y
+
+
+def _ed25519_verify(public_key: bytes, message: bytes, signature: bytes) -> bool:
+    """Verify an Ed25519 signature (RFC 8032 §5.1.7). Pure-Python, stdlib only.
+
+    Uses the cofactorless group equation [S]B = R + [k]A, which RFC 8032
+    explicitly permits. Compatible with `ed25519_dalek::verify_strict`.
+    """
+    if len(public_key) != 32 or len(signature) != 64:
+        return False
+    r_bytes = signature[:32]
+    s = int.from_bytes(signature[32:], "little")
+    if s >= _ED_L:
+        return False
+    a = _ed_point_decode(public_key)
+    r = _ed_point_decode(r_bytes)
+    if a is None or r is None:
+        return False
+    k = int.from_bytes(
+        hashlib.sha512(r_bytes + public_key + message).digest(), "little"
+    )
+    k %= _ED_L
+    return _ed_scalarmult(_ED_B, s) == _ed_add(r, _ed_scalarmult(a, k))
+
+
+def base64url_decode(s: str) -> bytes:
+    """Decode unpadded (or padded) base64url without raising on garbage."""
+    s = s.rstrip("=")
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
 class Store:
     """All mutable state, guarded by an in-process RLock + per-file flock."""
 
@@ -448,7 +544,8 @@ class Store:
     def _hash_password(password: str, salt: bytes) -> str:
         return hashlib.scrypt(password.encode(), salt=salt, n=2 ** 14, r=8, p=1).hex()
 
-    def register(self, username: str, password: str) -> tuple[bool, str]:
+    def register(self, username: str, password: str,
+                 ed25519_pub: str | None = None) -> tuple[bool, str]:
         if not SAFE_USER.match(username or ""):
             return False, "invalid username ([a-z0-9_-], max 32)"
         if len(password or "") < 10:
@@ -462,6 +559,15 @@ class Store:
             "tier": "free",
             "created": time.time(),
         }
+        if ed25519_pub:
+            # Optional native Ed25519 sign-in: 32-byte public key, hex-encoded.
+            try:
+                pub_bytes = bytes.fromhex(ed25519_pub)
+            except ValueError:
+                return False, "ed25519_pub must be hex"
+            if len(pub_bytes) != 32:
+                return False, "ed25519_pub must be 32 bytes"
+            rec["ed25519_pub"] = ed25519_pub
         with self.lock:
             # Same shape as login(): credentials live under the "users" key.
             users = self._load(self.users_path, {}).get("users", {})
@@ -522,8 +628,39 @@ class Store:
             return None
         if scheme == "hmac":
             return self._auth_hmac(payload, users)
-        if scheme == "hmac":
-            return self._auth_hmac(payload, users)
+        if scheme == "ed25519":
+            return self._auth_ed25519(payload, users)
+        return None
+
+    def _auth_ed25519(self, payload: str, users: dict) -> str | None:
+        """Verify Ed25519 bearer token: `bundle_id:base64url(sig)`.
+
+        Matches the Rust `Ed25519Authenticator` (erebus-core/src/auth.rs): the
+        signature is Ed25519 over the subject (bundle_id) bytes, verified
+        against a per-user stored Ed25519 public key.
+        """
+        try:
+            bundle_id, sig_b64url = payload.split(":", 1)
+        except ValueError:
+            return None
+        try:
+            sig_bytes = base64url_decode(sig_b64url)
+        except Exception:
+            return None
+        if len(sig_bytes) != 64:
+            return None
+        for username, rec in users.items():
+            pub_hex = rec.get("ed25519_pub")
+            if not pub_hex:
+                continue
+            try:
+                pub_bytes = bytes.fromhex(pub_hex)
+                if len(pub_bytes) == 32 and _ed25519_verify(
+                    pub_bytes, bundle_id.encode(), sig_bytes
+                ):
+                    return username
+            except (ValueError, OSError):
+                continue
         return None
 
     def _auth_hmac(self, payload: str, users: dict) -> str | None:
@@ -1527,7 +1664,9 @@ class Handler(BaseHTTPRequestHandler):
             if not user:
                 return self.send_json({"error": "invalid credentials"}, 401)
             return self.send_json({"username": user, "note": "use your registration token"})
-        ok, msg = self.store.register(username, password)
+        ok, msg = self.store.register(
+            username, password, ed25519_pub=str(payload.get("ed25519_pub") or "").strip() or None
+        )
         if not ok:
             return self.send_json({"error": msg}, 400)
         self.store.record_audit(username, "register")

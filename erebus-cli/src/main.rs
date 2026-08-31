@@ -193,6 +193,18 @@ enum Commands {
     /// Show erebus environment info
     Env(commands::env::EnvArgs),
 
+    /// Create a signed backup manifest for disaster recovery
+    ///
+    /// Examples:
+    ///   erebus backup --manifest-dir /var/lib/registry/meta --blob-dir /var/lib/registry/packages -o backup.json
+    Backup(commands::backup::BackupArgs),
+
+    /// Verify a backup manifest against a verifying key
+    ///
+    /// Examples:
+    ///   erebus restore --manifest backup.json --key ~/.erebus/keys/verify.key
+    Restore(commands::restore::RestoreArgs),
+
     /// Generate shell completion scripts
     Completion {
         /// Shell to generate completions for
@@ -343,6 +355,8 @@ fn main() -> ExitCode {
         Commands::Chat(args) => commands::chat::run(args),
         Commands::Serve(args) => commands::serve::run(args),
         Commands::Swap(args) => commands::swap::run(args),
+        Commands::Backup(args) => commands::backup::run(args),
+        Commands::Restore(args) => commands::restore::run(args),
         Commands::Layer(args) => commands::layer::run(args),
         Commands::Env(args) => commands::env::run(args),
         Commands::Completion { shell } => {

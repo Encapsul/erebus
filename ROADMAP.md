@@ -127,10 +127,13 @@ Reproducible numbers: [`benchmarks/`](benchmarks/README.md).
 
 ### 🟡 P2 — Registry functional gaps (competitor audit)
 
-All P2 items implemented (`erebus-core`):
+All P2 items implemented in `erebus-core` **and wired to user-facing surfaces**:
 - **GGUF guard** — `erebus-core/src/gguf.rs`: GGUF header + tensor manifest
   parser (`parse_header`), `tensor_manifest` on `ModelLayer`, weight-swap
-  detection via `verify_tensor_manifest`. Tested: 4 gguf + 1 layer.
+  detection via `verify_tensor_manifest`. **Wired**: the stub launcher
+  (`erebus-stub/src/main.rs`) verifies every `ModelLayer`'s tensor manifest
+  against the extracted GGUF at cold start and refuses to execute on mismatch
+  (3 new stub tests). Tested: 4 gguf + 1 layer + 3 stub.
 - **Periodic integrity verification** — `erebus-core/src/sisr/health.rs`
   `periodic_integrity_check`: SHA-256 reconcile of cache, quarantine on
   mismatch. Tested.
@@ -141,18 +144,26 @@ All P2 items implemented (`erebus-core`):
   (Ed25519). Tested: 3 deletion-entry tests.
 - **Garbage collection** — `erebus-core/src/gc.rs` `collect_garbage`: moves
   orphaned content-addressed blobs to a trash dir (soft-delete compatible).
+  **Wired**: `erebus clean --gc-blobs --blob-dir … --manifest-dir …`
+  (verified end-to-end: orphan moved to trash, live blob kept).
   Tested: 5 tests.
 - **Backup/restore** — `erebus-core/src/backup.rs` `build_backup_manifest` +
   `verify_backup`: signed DR manifest, blob-closure verification.
+  **Wired**: `erebus backup` + `erebus restore` CLI commands
+  (verified end-to-end: valid restore passes, tampered manifest fails).
   Tested: 4 tests.
 - **Pluggable auth** — `erebus-core/src/auth.rs`: `Authenticator` trait with
   HMAC-SHA256 and Ed25519 bearer strategies, constant-time token compare.
-  Tested: 5 tests.
+  **Wired**: `scripts/registry_server.py` accepts `ed25519:` bearer tokens
+  verified via a pure-Python Ed25519 verifier (RFC 8032 test vectors +
+  interop against real `ed25519_dalek` tokens). Tested: 5 tests.
 - **Provider integration** — OCI/LFS/S3/Bazel/HF frontends under
   `scripts/frontends/` (chaos exercises them).
 - **CVE scanning** — `erebus-core/src/cve.rs`: parses
   requirements.txt/package.json/pyproject.toml, matches known-weak versions,
-  findings feed `scan_results`. Tested: 6 tests.
+  findings feed `scan_results`. **Wired**: `erebus scan --cve
+  [--json|--plain]` (verified end-to-end: flags `requests==2.25.0`, skips
+  patched `urllib3==2.2.1`). Tested: 6 tests.
 
 ### 🔵 P3 — Multi-protocol frontends (Shardline-like)
 
