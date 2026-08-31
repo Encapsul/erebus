@@ -122,6 +122,13 @@ enum Commands {
     ///   erebus mirror import --input backup.mirror.enc --dir /var/lib/erebus-registry --password <secret>
     Mirror(commands::mirror::MirrorArgs),
 
+    /// Replicate registry data from a leader (incremental or full sync)
+    ///
+    /// Examples:
+    ///   erebus replicate full --leader `<https://registry.example.com>` --dir /var/lib/erebus-registry
+    ///   erebus replicate pull --leader `<https://registry.example.com>` --dir /var/lib/erebus-registry --token <token>
+    Replicate(commands::replicate::ReplicateArgs),
+
     /// Verify a .erebus file's signature
     Verify(commands::verify::VerifyArgs),
 
@@ -312,6 +319,7 @@ fn main() -> ExitCode {
             commands::lifecycle::run(args)
         }
         Commands::Mirror(args) => commands::mirror::run(args),
+        Commands::Replicate(args) => commands::replicate::run(args),
         Commands::Trust(mut args) => {
             if cli.quiet {
                 args.quiet = true;

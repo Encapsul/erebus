@@ -17,6 +17,7 @@ pub mod lifecycle;
 pub mod mirror;
 pub mod publish;
 pub mod pull;
+pub mod replicate;
 pub mod restore;
 pub mod run;
 pub mod sbom;

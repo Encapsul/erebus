@@ -23,6 +23,10 @@ Routes (backward compatible with erebus CLI publish/pull):
     POST /orgs/<n>/members    -> add member {username, role} (owner/admin)
     DELETE /orgs/<n>/members/<u> -> remove member (owner/admin)
     GET  /audit/download?month=YYYY-MM[&org=n] -> JSONL audit trail (Team)
+    GET  /auth/sso/config     -> {"enabled": bool, "provider": str}
+    GET  /auth/sso/start      -> {"auth_url": str} (OIDC authorization URL)
+    GET  /auth/sso/callback?code=..&state=.. -> token exchange + auto-provision
+    GET  /sla                 -> uptime, package count, integrity, SSO status
 
 Storage layout under --dir:
     packages/<file>           blobs
@@ -33,6 +37,7 @@ Storage layout under --dir:
     waitlist.txt              one email per line
     orgs.json                 {"orgs": {name: {owner, members:{user:role}}}}
     audit/YYYY-MM.jsonl       append-only action log
+    sso.json                  {"issuer","client_id","client_secret","provider_name"}
 """
 import argparse
 import base64
@@ -66,6 +71,12 @@ SAFE_MONTH = re.compile(r"^\d{4}-\d{2}$")
 CHUNK = 64 * 1024
 MONTH_FMT = "%Y-%m"
 WEEK_FMT = "%G-W%V"
+SSO_CACHE_TTL = 300  # seconds to cache discovery doc + JWKS
+REGISTRY_VERSION = "0.5.0"
+
+# Set in main() once the server starts; None until then.
+STARTED_AT: str | None = None
+START_TS: float = 0.0
 
 # BUSINESS.md tiers. Quotas are monthly private-transfer bytes.
 TIER_QUOTAS = {"free": 20 * 10**9, "pro": 1000 * 10**9, "team": 5000 * 10**9}
@@ -1181,6 +1192,151 @@ class Store:
                 f.write(email + "\n")
         return True, "added"
 
+    # ---- SSO config -------------------------------------------------------
+    def set_sso_config(
+        self, issuer: str, client_id: str, client_secret: str, provider_name: str = "OIDC"
+    ) -> None:
+        """Persist SSO config to sso.json in the registry root."""
+        config = {
+            "issuer": issuer,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "provider_name": provider_name,
+        }
+        atomic_write(os.path.join(self.root, "sso.json"), json.dumps(config).encode())
+
+    def get_sso_config(self) -> dict | None:
+        """Read sso.json, or None if SSO not configured."""
+        return self._load(os.path.join(self.root, "sso.json"), None)
+
+    def sso_enabled(self) -> bool:
+        return self.get_sso_config() is not None
+
+
+# ---- SSO (OIDC) ------------------------------------------------------------
+# Pure-stdlib OIDC authorization-code flow with JWT RS256 verification.
+# Caches discovery doc + JWKS. Fail-closed on any verification error.
+
+_SSO_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+def _fetch_json(url: str) -> dict | None:
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "erebus-registry-sso/0.1"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _get_cached_discovery(issuer: str) -> dict | None:
+    now = time.time()
+    cached = _SSO_CACHE.get(issuer)
+    if cached and now - cached[0] < SSO_CACHE_TTL:
+        return cached[1]
+    # Discovery document at {issuer}/.well-known/openid-configuration
+    disc = _fetch_json(issuer.rstrip("/") + "/.well-known/openid-configuration")
+    if not disc:
+        return None
+    # Fetch JWKS and attach
+    jwks_uri = disc.get("jwks_uri")
+    if jwks_uri:
+        jwks = _fetch_json(jwks_uri)
+        if jwks:
+            disc["_jwks"] = jwks
+    _SSO_CACHE[issuer] = (now, disc)
+    return disc
+
+
+def _jwt_verify_rs256(token: str, jwks: dict) -> dict | None:
+    """Verify a JWT RS256 signature using the JWKS. Returns payload dict on success."""
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return None
+        header_b64, payload_b64, sig_b64 = parts
+        # Decode header
+        header = json.loads(base64url_decode(header_b64).decode("utf-8"))
+        if header.get("alg") != "RS256":
+            return None
+        # Find matching JWK by kid
+        kid = header.get("kid")
+        jwk = None
+        if kid:
+            for key in jwks.get("keys", []):
+                if key.get("kid") == kid and key.get("kty") == "RSA":
+                    jwk = key
+                    break
+        if not jwk:
+            # No kid or not found; try first RSA key
+            for key in jwks.get("keys", []):
+                if key.get("kty") == "RSA":
+                    jwk = key
+                    break
+        if not jwk:
+            return None
+        n = int.from_bytes(base64url_decode(jwk["n"]), "big")
+        e = int.from_bytes(base64url_decode(jwk["e"]), "big")
+        # Reconstruct signing input and signature
+        signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+        sig = int.from_bytes(base64url_decode(sig_b64), "big")
+        # RSASSA-PKCS1-v1_5 verification: m = sig^e mod n
+        m = pow(sig, e, n)
+        # Convert m to bytes (size = ceil(n.bit_length()/8))
+        em = m.to_bytes((n.bit_length() + 7) // 8, "big")
+        # PKCS1 v1.5: 00 01 FF...FF 00 || DER(SHA-256) || digest
+        # DER for SHA-256: 30 31 30 0d 06 09 60 86 48 01 65 03 04 02 01 05 00 04 20
+        der_prefix = bytes.fromhex(
+            "3031300d060960864801650304020105000420"
+        )
+        if not em.startswith(b"\x00\x01"):
+            return None
+        # Find the 00 separator after FF padding
+        try:
+            sep = em.index(b"\x00", 2)
+        except ValueError:
+            return None
+        if sep < 10:  # at least 8 FF bytes
+            return None
+        if not em[2:sep] == b"\xff" * (sep - 2):
+            return None
+        body = em[sep + 1 :]
+        if not body.startswith(der_prefix):
+            return None
+        digest = body[len(der_prefix) :]
+        if len(digest) != 32:
+            return None
+        # Compute expected digest of signing_input
+        expected = hashlib.sha256(signing_input).digest()
+        if not hmac.compare_digest(digest, expected):
+            return None
+        # Signature verified; parse payload
+        payload = json.loads(base64url_decode(payload_b64).decode("utf-8"))
+        return payload
+    except Exception:
+        return None
+
+
+def _jwt_verify_id_token(id_token: str, client_id: str, issuer: str, jwks: dict) -> dict | None:
+    """Verify ID token signature + standard claims (iss, aud, exp)."""
+    payload = _jwt_verify_rs256(id_token, jwks)
+    if not payload:
+        return None
+    if payload.get("iss") != issuer:
+        return None
+    aud = payload.get("aud")
+    if isinstance(aud, list):
+        if client_id not in aud:
+            return None
+    elif aud != client_id:
+        return None
+    exp = payload.get("exp")
+    if exp is None or int(exp) < int(time.time()):
+        return None
+    return payload
+
 
 # ---- Stripe (stdlib REST, no SDK) -----------------------------------------
 # Keys come from CLI flags or env; never logged, never stored on disk here.
@@ -1343,6 +1499,14 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/health":
             return self.send_json({"status": "ok"})
+        if path == "/sla":
+            return self._sla()
+        if path == "/auth/sso/config":
+            return self._sso_config()
+        if path == "/auth/sso/start":
+            return self._sso_start()
+        if path == "/auth/sso/callback":
+            return self._sso_callback()
         if path == "/stats":
             return self.send_json(self.store.stats())
         if path == "/index.json":
@@ -1476,7 +1640,184 @@ class Handler(BaseHTTPRequestHandler):
     def _authorized_user(self) -> str | None:
         return self.store.authenticate(self.headers.get("Authorization", ""))
 
-    def _package_delete(self, fname: str):
+    # ---- SSO handlers ---------------------------------------------------
+    def _sla(self):
+        uptime = int(time.time() - START_TS) if START_TS else 0
+        stats = self.store.stats()
+        integrity = self.store.integrity
+        ok_count = sum(1 for v in integrity.values() if v.get("ok"))
+        bad_count = len(integrity) - ok_count
+        self.send_json({
+            "status": "operational",
+            "uptime_seconds": uptime,
+            "started_at": STARTED_AT,
+            "packages": stats.get("packages", 0),
+            "integrity": {"ok": ok_count, "corrupt": bad_count},
+            "sso_enabled": self.store.sso_enabled(),
+            "version": REGISTRY_VERSION,
+        })
+
+    def _sso_config(self):
+        cfg = self.store.get_sso_config()
+        if not cfg:
+            self.send_json({"enabled": False})
+            return
+        # Never expose client_secret
+        self.send_json({
+            "enabled": True,
+            "provider": cfg.get("provider_name", "OIDC"),
+            "issuer": cfg.get("issuer"),
+            "client_id": cfg.get("client_id"),
+        })
+
+    def _sso_start(self):
+        cfg = self.store.get_sso_config()
+        if not cfg:
+            self.send_json({"error": "SSO not configured"}, 400)
+            return
+        issuer = cfg["issuer"]
+        client_id = cfg["client_id"]
+        disc = _get_cached_discovery(issuer)
+        if not disc:
+            self.send_json({"error": "SSO discovery failed"}, 502)
+            return
+        auth_endpoint = disc.get("authorization_endpoint")
+        if not auth_endpoint:
+            self.send_json({"error": "SSO provider missing authorization_endpoint"}, 502)
+            return
+        state = secrets.token_urlsafe(24)
+        redirect_uri = self._sso_redirect_uri()
+        params = {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": "openid email profile",
+            "state": state,
+        }
+        auth_url = auth_endpoint + "?" + urllib.parse.urlencode(params)
+        self.send_json({"auth_url": auth_url})
+
+    def _sso_callback(self):
+        cfg = self.store.get_sso_config()
+        if not cfg:
+            self.send_json({"error": "SSO not configured"}, 400)
+            return
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        code = qs.get("code", [None])[0]
+        state = qs.get("state", [None])[0]
+        if not code:
+            self.send_json({"error": "missing code"}, 400)
+            return
+        issuer = cfg["issuer"]
+        client_id = cfg["client_id"]
+        client_secret = cfg["client_secret"]
+        disc = _get_cached_discovery(issuer)
+        if not disc:
+            self.send_json({"error": "SSO discovery failed"}, 502)
+            return
+        token_endpoint = disc.get("token_endpoint")
+        if not token_endpoint:
+            self.send_json({"error": "SSO provider missing token_endpoint"}, 502)
+            return
+        redirect_uri = self._sso_redirect_uri()
+        data = urllib.parse.urlencode({
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "client_id": client_id,
+            "client_secret": client_secret,
+        }).encode("ascii")
+        try:
+            req = urllib.request.Request(
+                token_endpoint,
+                data=data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                token_resp = json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            self.send_json({"error": f"token exchange failed: {e}"}, 502)
+            return
+        id_token = token_resp.get("id_token")
+        if not id_token:
+            self.send_json({"error": "no id_token in response"}, 502)
+            return
+        jwks = disc.get("_jwks")
+        if not jwks:
+            self.send_json({"error": "no JWKS available"}, 502)
+            return
+        claims = _jwt_verify_id_token(id_token, client_id, issuer, jwks)
+        if not claims:
+            self.send_json({"error": "ID token verification failed"}, 401)
+            return
+        # Map claims to local user
+        email = claims.get("email")
+        sub = claims.get("sub")
+        if not email and not sub:
+            self.send_json({"error": "ID token missing email/sub"}, 401)
+            return
+        # Username from email local-part, sanitized
+        username = None
+        if email:
+            local = email.split("@")[0]
+            username = re.sub(r"[^a-z0-9_-]", "", local.lower())
+            if not username or not SAFE_USER.match(username):
+                username = None
+        if not username and sub:
+            username = f"sso_{sub[:16]}"
+        # Find existing user by email or create
+        users = self.store._load(self.store.users_path, {}).get("users", {})
+        target_user = None
+        if email:
+            for u, rec in users.items():
+                if rec.get("email") == email:
+                    target_user = u
+                    break
+        if target_user:
+            user = target_user
+        elif username and username not in users:
+            user = username
+            # Auto-provision with no password (SSO-only)
+            salt = secrets.token_bytes(16)
+            token = secrets.token_hex(32)
+            rec = {
+                "salt": salt.hex(),
+                "pwhash": "",
+                "token_hash": hashlib.sha256(token.encode()).hexdigest(),
+                "tier": "free",
+                "created": time.time(),
+                "email": email,
+            }
+            with self.store.lock:
+                users[user] = rec
+                self.store._save_locked(self.store.users_path, {"users": users})
+            self.store.record_audit(user, "sso_provision", f"email={email}")
+        elif username:
+            user = username
+        else:
+            self.send_json({"error": "could not determine username"}, 500)
+            return
+        # Generate bearer token for this session
+        token = secrets.token_hex(32)
+        with self.store.lock:
+            users = self.store._load(self.store.users_path, {}).get("users", {})
+            users[user]["token_hash"] = hashlib.sha256(token.encode()).hexdigest()
+            self.store._save_locked(self.store.users_path, {"users": users})
+        self.store.record_audit(user, "sso_login", f"provider={cfg.get('provider_name','OIDC')}")
+        self.send_json({"username": user, "token": token})
+
+    def _sso_redirect_uri(self) -> str:
+        # Build redirect URI from Host header or configured base_url
+        host = self.headers.get("Host", "")
+        # If we have a configured base_url, use it; otherwise infer from Host
+        cfg = self.store.get_sso_config()
+        if cfg and cfg.get("base_url"):
+            base = cfg["base_url"].rstrip("/")
+            return f"{base}/auth/sso/callback"
+        # Fallback: infer from Host header
+        scheme = "https" if self.headers.get("X-Forwarded-Proto") == "https" else "http"
+        return f"{scheme}://{host}/auth/sso/callback"
         user = self._authorized_user()
         if not user:
             return self.send_json({"error": "authentication required"}, 401)
@@ -2246,6 +2587,16 @@ def main() -> None:
     ap.add_argument("--billing-cancel-url",
                     default="https://registry.erebus.dev/billing/cancelled",
                     help="redirect target after Checkout cancellation")
+    # SSO (OIDC) options
+    ap.add_argument("--sso-issuer",
+                    help="OIDC issuer URL (e.g. https://accounts.google.com)")
+    ap.add_argument("--sso-client-id", help="OIDC client ID")
+    ap.add_argument("--sso-client-secret",
+                    help="OIDC client secret (never logged)")
+    ap.add_argument("--sso-provider", default="OIDC",
+                    help="Display name for the SSO provider (default: OIDC)")
+    ap.add_argument("--sso-base-url",
+                    help="Public base URL of this registry (for redirect_uri)")
     args = ap.parse_args()
 
     if bool(args.tls_cert) != bool(args.tls_key):
@@ -2264,6 +2615,19 @@ def main() -> None:
         "success_url": args.billing_success_url,
         "cancel_url": args.billing_cancel_url,
     }
+    # Initialize SSO config if provided
+    if args.sso_issuer and args.sso_client_id and args.sso_client_secret:
+        Handler.store.set_sso_config(
+            args.sso_issuer,
+            args.sso_client_id,
+            args.sso_client_secret,
+            args.sso_provider,
+        )
+        # Store base_url for redirect_uri construction
+        if args.sso_base_url:
+            cfg = Handler.store.get_sso_config()
+            cfg["base_url"] = args.sso_base_url
+            atomic_write(os.path.join(args.dir, "sso.json"), json.dumps(cfg).encode())
     class Server(ThreadingHTTPServer):
         # Default listen backlog is 5; fleet-style bursts of concurrent
         # pulls/uploads otherwise get connection resets.
@@ -2313,6 +2677,9 @@ def main() -> None:
         f"billing={billing_state}",
         flush=True,
     )
+    global STARTED_AT, START_TS
+    START_TS = time.time()
+    STARTED_AT = datetime.now(timezone.utc).isoformat()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

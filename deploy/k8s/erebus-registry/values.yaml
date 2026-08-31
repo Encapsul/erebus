@@ -1,0 +1,138 @@
+# Default values for erebus-registry.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/anomalyco/erebus-registry
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: false
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+service:
+  type: ClusterIP
+  port: 8080
+  # Annotations to add to the service.
+  annotations: {}
+  # Only used when service.type is NodePort.
+  nodePort: ""
+
+# --- Registry runtime ---
+registry:
+  # Data directory. This must point at the PersistentVolume mount and must be
+  # a writable filesystem that survives restarts.
+  dir: /var/lib/erebus-registry
+  # Monthly transfer quota for free-tier authenticated pulls (GB).
+  quotaGb: 20
+  # Hard cap on any single upload (GB).
+  uploadCapGb: 70
+  # Force strict auth: all uploads require a token.
+  requireAuth: false
+  # Opt-in fail-open: permit anonymous uploads before first user registers.
+  # The server is fail-closed by default, so mutations require auth unless true.
+  allowAnonUploads: false
+  # Extra arguments passed to registry_server.py, e.g. ["--stripe-secret-key", "..."].
+
+# --- SSO (OIDC / OAuth2) ---
+sso:
+  enabled: false
+  # Generic OpenID Connect provider (issuer, client credentials) or a named
+  # provider. Supported hints: "github", "google", "gitlab", "generic".
+  provider: generic
+  issuer: ""
+  clientId: ""
+  # The client secret. This is sensitive and is stored in a Kubernetes Secret,
+  # mounted via secretKeyRef — never commit it to values.yaml.
+  clientSecret: ""
+  baseUrl: ""
+
+persistence:
+  enabled: true
+  # StorageClass to use for the PVC. Leave empty to use the cluster default.
+  storageClass: ""
+  size: 20Gi
+  accessMode: ReadWriteOnce
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+# Probe against the server's /health endpoint, which returns {"status":"ok"}.
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 15
+  periodSeconds: 20
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # For SSO to work, the registry must be reachable at a stable public URL.
+  # Set sso.baseUrl to `https://<host>` when exposing via TLS ingress.
+  hosts:
+    - host: registry.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: erebus-registry-tls
+  #    hosts:
+  #      - registry.example.com
+
+# Horizontal Pod Autoscaler (disabled by default).
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+
+# Additional environment via configMapKeyRef/secretKeyRef is not exposed here;
+# pass raw args through registry.extraArgs if needed.
+extraEnv: []
+#  - name: TZ
+#    value: "UTC"
+
+# Pod-level security context. The registry only needs to write its PVC; it is
+# not root. Adjust as required by your cluster's Pod Security Admission.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# Container-level security context.
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -1,0 +1,14 @@
+apiVersion: v2
+name: erebus-registry
+description: erebus package registry HTTP server (pure-stdlib Python, single RWO PVC state)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - registry
+  - packages
+  - erebus
+home: https://github.com/anomalyco/erebus
+maintainers:
+  - name: erebus maintainers
+    email: maintainers@erebus.dev

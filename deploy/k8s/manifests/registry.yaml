@@ -1,0 +1,148 @@
+# ---------------------------------------------------------------------------
+# erebus registry — plain (non-Helm) manifests
+#
+# A single-file, tutorial-style Deployment for people who don't use Helm.
+# Applies the same defaults as the Helm chart in ../erebus-registry/.
+#
+#   kubectl create namespace erebus
+#   kubectl apply -n erebus -f deploy/k8s/manifests/registry.yaml
+#
+# Requires a PersistentVolume with accessMode ReadWriteOnce for the --dir
+# state (packages/, users.json, usage/, stats.json, audit/, ...).
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: erebus
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: erebus-registry
+  namespace: erebus
+data:
+  REGISTRY_DIR: /var/lib/erebus-registry
+  REGISTRY_QUOTA_GB: "20"
+  REGISTRY_UPLOAD_CAP_GB: "70"
+  REGISTRY_REQUIRE_AUTH: "false"
+  REGISTRY_ALLOW_ANON_UPLOADS: "false"
+---
+# SSO client secret lives in a Secret, never in the ConfigMap.
+# Set the value here (base64) before applying, or --from-literal at apply time.
+# When SSO is disabled (sso.enabled=false) the server is started without SSO args.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: erebus-registry
+  namespace: erebus
+type: Opaque
+stringData:
+  sso-client-secret: changeme
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: erebus-registry
+  namespace: erebus
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: erebus-registry
+  namespace: erebus
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app: erebus-registry
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: erebus-registry
+  namespace: erebus
+  labels:
+    app: erebus-registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: erebus-registry
+  template:
+    metadata:
+      labels:
+        app: erebus-registry
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: registry
+          image: ghcr.io/anomalyco/erebus-registry:0.1.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - /app/registry_server.py
+          args:
+            # Non-auth flags only here. Add the SSO args block below when
+            # sso.enabled is true.
+            - --dir
+            - /var/lib/erebus-registry
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8080"
+            - --quota-gb
+            - "20"
+            - --upload-cap-gb
+            - "70"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/erebus-registry
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: erebus-registry
