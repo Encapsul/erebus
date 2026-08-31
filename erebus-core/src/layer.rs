@@ -346,8 +346,12 @@ pub struct ModelLayer {
     pub format: String, // "gguf", "safetensors", "onnx", etc.
     pub path: String,   // path within layer directory
     pub size: u64,
-    /// Human-readable source identifier (e.g. HuggingFace repo name,
-    /// OCI digest, Git LFS pointer, S3 key prefix).
+    /// Per-tensor manifest for GGUF weights. Present once a GGUF model has
+    /// been parsed by [`crate::gguf::parse_header`]; guards against weight
+    /// swapping by recording every tensor name, type and offset.
+    pub tensor_manifest: Option<TensorManifest>,
+    /// Human-readable source identifier (e.g. `HuggingFace` repo name,
+    /// `OCI` digest, `Git LFS` pointer, `S3` key prefix).
     pub source: Option<String>,
     /// Artefact scan results (e.g. CVE IDs, GGUF tensor integrity flags,
     /// anti-malware verdicts). Stored as a free‑form JSON value to accept
@@ -373,6 +377,50 @@ impl Layer for ModelLayer {
         hasher.update(payload);
         Ok(hasher.finalize().into())
     }
+}
+
+/// Per-tensor manifest for GGUF model layers.
+///
+/// Captures every tensor in a GGUF file so a later launcher/stub can re-verify
+/// the file against the manifest before serving — a weight-swap tampering guard
+/// that would otherwise go undetected by a single top-level hash.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TensorManifest {
+    /// GGUF format version parsed from the file header.
+    pub gguf_version: u32,
+    /// Total number of tensors declared in the header.
+    pub tensor_count: u64,
+    pub tensors: Vec<TensorInfo>,
+}
+
+/// A single GGUF tensor entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TensorInfo {
+    pub name: String,
+    /// GGUF tensor element type (e.g. `F16`, `Q4_K`, `F32`).
+    pub ggml_type: String,
+    /// Byte offset of the tensor data within the file.
+    pub offset: u64,
+    /// Shape inferred from the tensor dimensions.
+    pub dimensions: Vec<u64>,
+}
+
+/// Verify a compiled [`TensorManifest`] against a freshly parsed one.
+///
+/// Returns `true` when the file on disk still matches the manifest — same
+/// tensor order, name, type, offset, and count. A weight swap rotates tensor
+/// offsets or names, so this comparison catches it even if the aggregate
+/// top-level hash is not recomputed.
+#[must_use]
+pub fn verify_tensor_manifest(recorded: &TensorManifest, parsed: &TensorManifest) -> bool {
+    recorded.tensor_count == parsed.tensor_count
+        && recorded.gguf_version == parsed.gguf_version
+        && recorded.tensors.len() == parsed.tensors.len()
+        && recorded
+            .tensors
+            .iter()
+            .zip(parsed.tensors.iter())
+            .all(|(a, b)| a.name == b.name && a.ggml_type == b.ggml_type && a.offset == b.offset)
 }
 
 /// Tool layer (native binary tool)
@@ -453,6 +501,7 @@ mod tests {
             format: "gguf".into(),
             path: "models/llama-7b.gguf".into(),
             size: 4_000_000_000,
+            tensor_manifest: None,
             source: None,
             scan_results: None,
             metadata: None,

@@ -159,10 +159,10 @@ enum Commands {
     /// Download a bundle from a registry (integrity-checked)
     Pull(commands::pull::PullArgs),
 
-    /// HuggingFace Hub API compat — drop-in for `huggingface-cli`.
+    /// `HuggingFace` Hub API compat — drop-in for `huggingface-cli`.
     ///
     /// Supported operations:
-    ///   `erebus hf login` — store HF token
+    ///   `erebus hf login` — store `HF` token
     ///   `erebus hf push <model.erebus> — push to HF Hub`
     ///   `erebus hf pull <repo_id> — pull from HF Hub`
     Hf(commands::hf::HfArgs),

@@ -127,10 +127,32 @@ Reproducible numbers: [`benchmarks/`](benchmarks/README.md).
 
 ### 🟡 P2 — Registry functional gaps (competitor audit)
 
-All P2 items complete:
-- GGUF guard, periodic integrity verification, rich metadata, soft-delete,
-  garbage collection, backup/restore, pluggable auth, provider integration,
-  CVE scanning.
+All P2 items implemented (`erebus-core`):
+- **GGUF guard** — `erebus-core/src/gguf.rs`: GGUF header + tensor manifest
+  parser (`parse_header`), `tensor_manifest` on `ModelLayer`, weight-swap
+  detection via `verify_tensor_manifest`. Tested: 4 gguf + 1 layer.
+- **Periodic integrity verification** — `erebus-core/src/sisr/health.rs`
+  `periodic_integrity_check`: SHA-256 reconcile of cache, quarantine on
+  mismatch. Tested.
+- **Rich metadata** — `ModelLayer.source` + `scan_results` (JSON, open schema).
+  Tested.
+- **Soft-delete** — `ArtifactState::Deleted` terminal state +
+  `audit::record_deletion` signs a `DeletionAuditEntry` per removal
+  (Ed25519). Tested: 3 deletion-entry tests.
+- **Garbage collection** — `erebus-core/src/gc.rs` `collect_garbage`: moves
+  orphaned content-addressed blobs to a trash dir (soft-delete compatible).
+  Tested: 5 tests.
+- **Backup/restore** — `erebus-core/src/backup.rs` `build_backup_manifest` +
+  `verify_backup`: signed DR manifest, blob-closure verification.
+  Tested: 4 tests.
+- **Pluggable auth** — `erebus-core/src/auth.rs`: `Authenticator` trait with
+  HMAC-SHA256 and Ed25519 bearer strategies, constant-time token compare.
+  Tested: 5 tests.
+- **Provider integration** — OCI/LFS/S3/Bazel/HF frontends under
+  `scripts/frontends/` (chaos exercises them).
+- **CVE scanning** — `erebus-core/src/cve.rs`: parses
+  requirements.txt/package.json/pyproject.toml, matches known-weak versions,
+  findings feed `scan_results`. Tested: 6 tests.
 
 ### 🔵 P3 — Multi-protocol frontends (Shardline-like)
 

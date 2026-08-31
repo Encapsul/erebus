@@ -216,6 +216,65 @@ fn unix_secs() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+/// Periodic integrity verification of cached blobs.
+///
+/// Walks the cache directory and verifies that every file's name (expected to be
+/// its SHA-256 hex digest) matches the computed hash of its contents.
+/// Files whose hash mismatches are moved to a `quarantine/` subdirectory.
+///
+/// Returns `(ok_count, corrupt_count)` for observability.
+pub fn periodic_integrity_check(cache_dir: &Path) -> io::Result<(usize, usize)> {
+    use sha2::{Digest, Sha256};
+
+    let mut ok_count = 0usize;
+    let mut corrupt_count = 0usize;
+
+    // List entries directly in the cache directory.
+    let entries = match fs::read_dir(cache_dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((0, 0)),
+        Err(e) => return Err(e),
+    };
+
+    let quarantine_dir = cache_dir.join("quarantine");
+    fs::create_dir_all(&quarantine_dir)?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        let data = match fs::read(&path) {
+            Ok(d) => d,
+            Err(_) => {
+                corrupt_count += 1;
+                continue;
+            }
+        };
+        let computed = Sha256::digest(data);
+        let computed_hex = hex::encode(computed);
+        // The file name is expected to be the SHA-256 hex digest.
+        if computed_hex == file_name {
+            ok_count += 1;
+        } else {
+            let final_name = if quarantine_dir.join(&file_name).exists() {
+                format!("{}_corrupt", file_name)
+            } else {
+                file_name
+            };
+            fs::rename(&path, quarantine_dir.join(&final_name))?;
+            corrupt_count += 1;
+        }
+    }
+
+    Ok((ok_count, corrupt_count))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,57 +363,4 @@ mod tests {
         let (_tmp, store) = store();
         assert!(!store.has_quarantined().unwrap());
     }
-}
-
-/// Periodic integrity verification of cached blobs.
-///
-/// Walks the cache directory and verifies that every file's name (expected to be
-/// its SHA-256 hex digest) matches the computed hash of its contents.
-/// Files whose hash mismatches are moved to a `quarantine/` subdirectory.
-///
-/// Returns `(ok_count, corrupt_count)` for observability.
-pub fn periodic_integrity_check(cache_dir: &Path) -> io::Result<(usize, usize)> {
-    use sha2::{Digest, Sha256};
-
-    let mut ok_count = 0usize;
-    let mut corrupt_count = 0usize;
-
-    // List entries directly in the cache directory.
-    let entries = match fs::read_dir(cache_dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((0, 0)),
-        Err(e) => return Err(e),
-    };
-
-    let quarantine_dir = cache_dir.join("quarantine");
-    fs::create_dir_all(&quarantine_dir)?;
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
-        let data = match fs::read(&path) {
-            Ok(d) => d,
-            Err(_) => { corrupt_count += 1; continue; }
-        };
-        let computed = Sha256::digest(data);
-        let computed_hex = hex::encode(computed);
-        // The file name is expected to be the SHA-256 hex digest.
-        if computed_hex == file_name {
-            ok_count += 1;
-        } else {
-            let quarantine_path = quarantine_dir.join(&file_name);
-            let final_name = if quarantine_dir.join(&file_name).exists() {
-                format!("{}_corrupt", file_name)
-            } else {
-                file_name
-            };
-            fs::rename(&path, quarantine_dir.join(&final_name))?;
-            corrupt_count += 1;
-        }
-    }
-
-    Ok((ok_count, corrupt_count))
 }

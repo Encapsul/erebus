@@ -5,11 +5,11 @@ use std::path::PathBuf;
 /* Arguments for HuggingFace Hub API compat commands. */
 #[derive(Args)]
 pub struct HfArgs {
-    /// HuggingFace token (or set HF_TOKEN env var)
+    /// `HuggingFace` token (or set `HF_TOKEN` env var)
     #[arg(long)]
     pub token: Option<String>,
 
-    /// Model repository ID (e.g. "org/model-name")
+    /// Model repository ID (e.g. `"org/model-name"`)
     #[arg(long)]
     pub repo_id: Option<String>,
 
@@ -26,7 +26,7 @@ pub struct HfArgs {
     pub output: Option<PathBuf>,
 }
 
-/// Run a HuggingFace Hub API compat command.
+/// Run a `HuggingFace` Hub API compat command.
 pub fn run(args: HfArgs) -> Result<()> {
     let token = args.token.or_else(|| std::env::var("HF_TOKEN").ok());
 
@@ -64,9 +64,7 @@ pub fn run(args: HfArgs) -> Result<()> {
         }
         Some("login") => {
             if !token.as_deref().map_or(true, |s| s.is_empty()) {
-                eprintln!(
-                    "[erebus] HF login: token stored (not saved to disk for security)"
-                );
+                eprintln!("[erebus] HF login: token stored (not saved to disk for security)");
                 // TODO: store token securely (e.g. keyring)
                 Ok(())
             } else {
@@ -81,4 +79,3 @@ pub fn run(args: HfArgs) -> Result<()> {
         }
     }
 }
-

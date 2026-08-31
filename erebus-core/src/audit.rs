@@ -1,5 +1,5 @@
 use crate::attest::{sha256_hex, Attestation};
-use ed25519_dalek::{Verifier, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -267,6 +267,77 @@ pub fn file_hash(path: &Path) -> Result<String, anyhow::Error> {
     Ok(sha256_hex(&data))
 }
 
+/// Signed deletion audit entry.
+///
+/// Soft-deletes must leave an auditable, signed record: the artifact name,
+/// who deleted it, from which state, and a fingerprint of the removed bytes
+/// hash. Signature is that of the deletion actor, so a later auditor can
+/// attribute the removal even if the file itself is gone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeletionAuditEntry {
+    pub artifact: String,
+    pub actor: String,
+    pub from_state: String,
+    pub bundle_hash: String,
+    pub deleted_at_utc: String,
+    pub sig_algorithm: String,
+    pub key_fingerprint: String,
+    pub signature_hex: String,
+}
+
+/// Sign a deletion audit record for a soft-deleted artifact.
+///
+/// The serialized entry (minus the signature) is hashed with SHA-256 and
+/// signed with the caller's Ed25519 key. Returns the fully-populated entry
+/// ready for persistence.
+///
+/// # Errors
+///
+/// Returns [`anyhow::Error`] if the signing key or serialization fails.
+pub fn record_deletion(
+    artifact: &str,
+    actor: &str,
+    from_state: &str,
+    bundle_hash: &str,
+    signing_key: &SigningKey,
+) -> Result<DeletionAuditEntry, anyhow::Error> {
+    let mut entry = DeletionAuditEntry {
+        artifact: artifact.to_string(),
+        actor: actor.to_string(),
+        from_state: from_state.to_string(),
+        bundle_hash: bundle_hash.to_string(),
+        deleted_at_utc: time::OffsetDateTime::now_utc().to_string(),
+        sig_algorithm: "ed25519".to_string(),
+        key_fingerprint: sha256_hex(&signing_key.verifying_key().to_bytes()),
+        signature_hex: String::new(),
+    };
+    let doc = serde_json::to_vec(&entry)?;
+    let hash = Sha256::digest(&doc);
+    let sig = signing_key.sign(&hash);
+    entry.signature_hex = hex::encode(sig.to_bytes());
+    Ok(entry)
+}
+
+/// Verify a deletion audit entry against a trusted key.
+///
+/// Returns `true` when the entry's signature validates against `vk`.
+#[must_use]
+pub fn verify_deletion_entry(entry: &DeletionAuditEntry, vk: &VerifyingKey) -> bool {
+    let mut doc = entry.clone();
+    doc.signature_hex = String::new();
+    let Ok(doc_bytes) = serde_json::to_vec(&doc) else {
+        return false;
+    };
+    let hash = Sha256::digest(&doc_bytes);
+    let Ok(sig_bytes) = hex::decode(&entry.signature_hex) else {
+        return false;
+    };
+    let Ok(sig) = ed25519_dalek::Signature::from_slice(&sig_bytes) else {
+        return false;
+    };
+    vk.verify(&hash, &sig).is_ok()
+}
+
 /// Verify an audit report's signature against trusted keys.
 pub fn verify_audit_report(
     report: &AuditReport,
@@ -456,5 +527,48 @@ mod tests {
         assert_eq!(parsed.sbom.components.len(), 1);
         assert_eq!(parsed.sbom.components[0].hashes[0].alg, "SHA-256");
         assert_eq!(parsed.sbom.components[0].hashes[0].value, "abc");
+    }
+
+    fn test_key_signing() -> SigningKey {
+        SigningKey::from_bytes(&[7u8; 32])
+    }
+
+    #[test]
+    fn deletion_entry_roundtrip_and_verify() {
+        let key = test_key_signing();
+        let entry = record_deletion(
+            "models/llama-3.1-8b.erebus",
+            "auditor@acme",
+            "Trusted",
+            "sha256:deadbeef",
+            &key,
+        )
+        .unwrap();
+        assert_eq!(entry.from_state, "Trusted");
+        assert!(!entry.signature_hex.is_empty());
+        assert_eq!(entry.sig_algorithm, "ed25519");
+
+        let vk = key.verifying_key();
+        assert!(verify_deletion_entry(&entry, &vk));
+    }
+
+    #[test]
+    fn deletion_entry_rejects_forged_signature() {
+        let key = test_key_signing();
+        let mut entry = record_deletion("x.erebus", "alice", "Acquired", "h", &key).unwrap();
+        // Tamper with the artifact name after signing.
+        entry.artifact = "y.erebus".to_string();
+        assert!(!verify_deletion_entry(&entry, &key.verifying_key()));
+    }
+
+    #[test]
+    fn deletion_serializes_and_roundtrips() {
+        let key = test_key_signing();
+        let entry = record_deletion("z.erebus", "bob", "Revoked", "h2", &key).unwrap();
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: DeletionAuditEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.artifact, "z.erebus");
+        assert_eq!(parsed.signature_hex, entry.signature_hex);
+        assert!(verify_deletion_entry(&parsed, &key.verifying_key()));
     }
 }
