@@ -1655,7 +1655,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if path.startswith("/packages/"):
-            return self._serve_package(path[len("/packages/"):])
+            return self._package_delete(path[len("/packages/"):])
         if path == "/mcp":
             return self._mcp_list()
         if re.match(r"^/mcp/[^/]+/install$", path):
