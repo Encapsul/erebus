@@ -54,8 +54,7 @@ Reads footer+metadata from `/proc/self/exe` → cache check → SHA-256 verify �
 
 Entrypoint resolution in `detect.rs:resolve_entrypoint()`:
 - Python: `["python3", "/app/app.py"]` (interpreter bare on PATH, app path absolute)
-- Node: `["node", "/app/index.js"]`
-- Go/Binary: `["/app/app"]`
+- Binary: `["/app/app"]`
 
 ### Unsafe boundary
 

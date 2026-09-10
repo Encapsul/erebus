@@ -5,42 +5,106 @@
 > Source of truth: **ROADMAP.md** — real code state, what shipped, what's left,
 > the business model and the pitch.
 >
-> Tagline: *« Sign. Track. Prove. — Ship AI agents with verifiable attestation. »*
+> One-liner: *« AI agents run everywhere. Nobody can prove what they did.
+> We generate the cryptographic proof. »*
 
 ---
 
 ## 1. Vision
 
-**Erebus = the "git log" for AI in the physical world.**
+**Erebus = the proof layer for AI execution.**
 
-Every erebus agent execution emits a signed attestation proving what ran, on
-which machine, at what date, and that nothing was altered. Regulated
-enterprises (EU AI Act, SOC 2, ISO 27001, public procurement, UNECE WP.29)
-**need this proof** and have **no tool** that produces it today.
+Every AI agent runs on a machine. Nobody can prove what it did, when, or where.
+erebus generates a signed cryptographic receipt of every execution — automatically,
+in the background, with zero manual audit. Regulated enterprises (EU AI Act,
+SOC 2, ISO 27001, public procurement) **need this proof** and have **no tool**
+that produces it today.
 
 > **The real product is not packaging — it's the signed traceability chain.**
 > Packaging is the demo. The proof is the business.
 
-### The moat (not SISR)
+### The moat (not SISR, not packaging)
 
-SISR is commoditized (XetHub on HF, Ollama layers, Git LFS). Our moat is the
-**execution-attestation chain**: each `.erebus` + `.erebus.attest` forms a
-cryptographically verifiable offline proof. The bigger the registry grows, the
-richer the compliance history → natural lock-in.
+SISR is commoditized (XetHub on HF, Ollama layers, Git LFS). Packaging is
+commoditized (Docker, Nix, Spack). Our moat is the **execution-attestation
+chain**: each `.erebus` + `.erebus.attest` forms a cryptographically verifiable
+offline proof. The bigger the registry grows, the richer the compliance history
+→ natural lock-in.
+
+### YC alignment (Fall 2026)
+
+YC's Request for Startups for Fall 2026 explicitly names **"AI-Native
+Compliance Infrastructure"**: *"Most compliance work is monitoring regulatory
+changes, flagging anomalies, generating reports, and keeping audit trails...
+The companies that get this right will become essential infrastructure for any
+business operating globally."* erebus fits this RFS directly — we generate the
+compliance evidence that AI-native infrastructure needs.
 
 ### Product comparison
 
 | | erebus | ollama | llamafile | Docker |
 |---|---|---|---|---|
-| Distribution | one `.erebus` × 4 OS/arch | app store + models | single binary | images + daemons |
-| Registry | self-hostable | proprietary cloud | none | image registry |
-| Delta model updates (SISR) | ✅ content-defined | ❌ re-download | ❌ | ❌ (layers) |
-| Signed attestation | ✅ Ed25519 chain | ❌ | ❌ | ❌ |
+| Signed execution proof | ✅ Ed25519 chain | ❌ | ❌ | ❌ |
+| Compliance audit trail | ✅ in-toto attestations | ❌ | ❌ | ❌ |
+| Delta updates (SISR) | ✅ content-defined | ❌ re-download | ❌ | ❌ (layers) |
 | Offline-first | ✅ | ✅ | ✅ | ❌ |
-| Packaging | ✅ | ✅ | ✅ | ✅ |
+| Packaging | ✅ (mechanism, not value) | ✅ | ✅ | ✅ |
 
 **Target** : not a "Docker killer" — Docker stays for orchestration. The angle
 is execution traceability, where nothing exists today.
+
+---
+
+## 1.5. Demo flow (the 2-min proof)
+
+This is the demo that proves the product claim. Each step is annotated with
+current code status.
+
+```bash
+# 1. Generate signing keys
+erebus keygen                           # ✅ works
+
+# 2. Trust the public key (for verify)
+erebus trust ~/.local/share/erebus/keys/<fingerprint>.pub  # ✅ works
+
+# 3. Build the binary
+erebus build ./app -o agent.erebus      # ✅ works
+
+# 4. Sign it
+erebus sign agent.erebus --key ~/.local/share/erebus/keys/<fingerprint>.key  # ✅ works
+
+# 5. Verify the signature
+erebus verify agent.erebus              # ✅ works → "OK: signature verified"
+
+# 6. Generate attestation (auto or manual)
+#    With ERE_ATTEST_KEY set, the stub auto-generates .erebus.attest on run.
+#    Without it, use the manual CLI step.
+#    Auto: set ERE_ATTEST_KEY=~/.local/share/erebus/keys/<fingerprint>.key
+#          and run → .erebus.attest written before execvp
+erebus attest agent.erebus --key ~/.local/share/erebus/keys/<fingerprint>.key
+                            # ✅ works → agent.erebus.attest
+
+# 7. Verify the attestation
+erebus verify-attest agent.erebus.attest  # ✅ works → "OK: attestation verified"
+
+# 8. Tamper detection
+# Modify 1 byte → verify → should say "TAMPERED"
+printf '\x00' | dd of=agent.erebus bs=1 seek=3000000 count=1 conv=notrunc
+erebus verify agent.erebus              # ✅ says "TAMPERED: signature does not match"
+```
+
+**What blocks the demo:**
+1. ~~`verify-attest` not wired to CLI~~ ✅ Fixed (2026-09-10)
+2. ~~Stub auto-attestation not implemented~~ ✅ Fixed — implemented in
+   `erebus-stub/src/exec.rs:578-581` (`write_auto_attestation_if_requested`)
+   + `erebus-core/src/attest.rs:319-335` (`write_execution_attestation`),
+   opt-in via `ERE_ATTEST_KEY` env var.
+3. ~~Tamper message unclear~~ ✅ Fixed (2026-09-10)
+
+**The "agent, not app" demo (optional 3-min version)**: `examples/real-agent/`
+→ signed ELF with real GGUF model + llama.cpp, run → `POST /infer` returns real
+tokens inside the sandbox. Same crypto chain (verify → run → attest). Proven
+2026-09-10; needs `download_model.sh` + staged `.deps/llama/` first.
 
 ---
 
@@ -61,13 +125,15 @@ only the stub uses it (with `SAFETY` comments).
 | Universal binary `--universal` | 4 native slices in one 59 MB file, validated linux-x64 / arm64 (qemu) / win-x64 (Wine) |
 | Windows PE stub port | MapViewOfFile, CreateProcessW, ProcessPrng shim |
 | `erebus serve` | Multi-format engine resolution (`inference.rs`): GGUF → llama-server, safetensors/ONNX/TRT-LLM/MLX → vLLM; TinyLlama E2E |
+| Packaged LLM agent (E2E) | `examples/real-agent/`: signed 646 MB ELF = GGUF + llama.cpp + embedded Python; real tokens via `/infer` in sandbox (2026-09-10) |
 | Registry + `pull`/`publish` | stdlib server, SHA-256 verify, bearer tokens, quotas, orgs/RBAC, audit log, Stripe billing |
 | `Agentfile.yaml` | Same schema as `.erebus.toml`; CLI > file > detection |
 | GPU auto-detect + `--ngl` | `gpu.rs`, env `ERE_GPU`/`ERE_VRAM_MB`/`ERE_NGL`, pins never overridden |
 | Chat UI | ratatui TUI + browser UI (std-only proxy) |
 | SISR delta updates | FastCDC content-defined chunking, Ed25519-signed manifests, Merkle, fail-cold verify at boot |
 | Rollback + health gate | `.bak` snapshot, fork+waitpid supervisor, anti-loop quarantine |
-| `erebus attest` | `.erebus.attest` (signed JSON, machine hash never in plaintext) |
+|| `erebus attest` | `.erebus.attest` (signed JSON, machine hash never in plaintext) — CLI build-time attestation AND auto-attestation via `ERE_ATTEST_KEY` env var (opt-in, writes before execvp) |
+| `erebus verify-attest` | verifies detached `.erebus.attest` against trusted keys (wired 2026-09-10) |
 | `erebus audit` | compliance report: SBOM → **CycloneDX**, attestation → **in-toto** |
 | `erebus lifecycle` | policy-gated state machine: acquired → quarantined → trusted → revoked → deleted; only `trusted` served |
 | Fail-closed registry auth | scrypt, default-deny, mutations blocked without token |
@@ -96,6 +162,235 @@ Reproducible numbers: [`benchmarks/`](benchmarks/README.md).
 ---
 
 ## 3. What's left to do
+
+### 🔴 P0 — Attestation demo gaps (blocks YC demo + enterprise proof)
+
+The core claim of erebus is "we generate the cryptographic proof of what ran."
+The library (`erebus-core`) produces and verifies attestations, but the CLI
+workflow has gaps that break the demo flow:
+
+- [x] **`erebus verify-attest <file>`** — wired `verify_attestation()` from
+  `erebus-core/src/attest.rs:335` to new CLI subcommand. Fixed serialization
+  mismatch (`to_vec` → `to_vec_pretty`) that caused signature verification to
+  always fail. Tested end-to-end.
+- [x] **Stub auto-attestation** — implemented in
+  `erebus-stub/src/exec.rs:578-581` (`write_auto_attestation_if_requested`)
+  and `erebus-stub/src/exec.rs:807-835` (the function body), wired to
+  `erebus-core/src/attest.rs:319-335` (`write_execution_attestation`).
+  Opt-in via `ERE_ATTEST_KEY` env var; output to `ERE_ATTEST_OUT` or
+  `<bundle>.attest`. The stub writes a signed `.erebus.attest` before
+  `execvp` when the env var is set. The demo step `erebus attest` remains
+  available for manual attestation without the env var.
+- [x] **Tamper message clarity** — `verify` output now says `TAMPERED: signature
+  does not match any trusted key` instead of the generic message.
+- [x] **PEM key support** — `sign`/`attest` now accept raw 32-byte keys from
+  `erebus keygen` and also PEM format (`-----BEGIN PRIVATE KEY-----`)
+  via `ed25519_dalek::SigningKey::from_pem()`. Interoperability with
+  openssl/ssh-keygen confirmed.
+
+### 🔴 P0 — Attestation completeness (what "cryptographic proof of AI agent execution" must mean)
+
+For the claim "Cryptographic proof of AI agent execution" to be true, the
+attestation chain must cover more than the current build-time flow.
+
+**What the current attestation proves (v0.5.0):**
+- bundle_hash (SHA-256 of the full binary)
+- payload_hash, metadata_hash
+- format_version, flags (signed/encrypted/sisr)
+- builder ("erebus-cli v0.5.0"), author, license
+- layers (name, kind, sha256)
+- execution timestamp (ISO 8601 UTC)
+- machine_id_hash (SHA-256 of hostname+os+arch, **never in plaintext**)
+- os, arch
+- Signed Ed25519 over in-toto statement canonical bytes
+
+**What it does NOT yet prove (gaps):**
+
+1. **Per-execution behavior log (inputs/outputs hashed)** — the attestation
+   captures that *the bundle ran*, not *what the agent did*. For non-repudiation
+   of action (Level 3 of the 3 proof levels), you need to capture inputs received,
+   outputs produced, decisions made.
+   → P0: until a complete solution exists (agent hooks/standards interface),
+   capture at minimum an output_hash and input_hash in the attestation if
+   available, signed by the agent's key (not just the build key).
+
+2. **Attestation registry storage + queryable history** — attestations currently
+   land as `.erebus.attest` files on disk. An auditor cannot run
+   "show me all executions of agent X last week". For EU AI Act / SOC 2
+   compliance trails, attestations must be stored in the registry and queryable.
+   → P2: wire attestation upload to registry server (`/attestations`), store
+   in audit log, provide `erebus attest-history --query ...` CLI. This closes
+   the loop between runtime attestation and the hosted compliance trail.
+
+3. **TEE / zkML — higher proof levels** (out of scope for current ICP, keep as future option):
+
+   The "cryptographic proof of AI agent execution" problem spans 3 levels of
+   guarantee, not just one:
+
+   - **Level 1 — Binary/model integrity**: "this exact code/model ran, unmodified"
+     → hardware attestation + signature suffices. **erebus partially covered**
+     (SHA-256 + Ed25519 of the bundle, but no TEE hardware proof, no external
+     anchoring).
+
+   - **Level 2 — Execution integrity**: "this computation produced this output
+     from this input, correctly" → needs ZK (zkML) or TEE with remote
+     attestation. **erebus does NOT cover** — the sandbox isolates execution
+     but doesn't prove computation correctness.
+
+   - **Level 3 — Non-repudiation**: "this agent (identified by a key) produced
+     this action at this time" → signature + timestamp + agent identity +
+     hashed output. **erebus partially covered** (Ed25519 signature + timestamp,
+     but no agent identity or output capture).
+
+   Concrete technical approaches:
+
+   a) **TEE (Trusted Execution Environment) + remote attestation** — Intel
+      SGX/TDX, AMD SEV-SNP, AWS Nitro Enclaves. Hardware generates a signed
+      quote attesting enclave hash + execution state. For "this exact code ran
+      in an untampered isolated environment". Limit: trust the vendor +
+      certificate chain; SGX has side-channel history (Foreshadow, Plundervolt
+      — relevant given offensive profile). Nitro Enclaves is more pragmatic for
+      production AI agents (CPU only, no GPU inside).
+
+   b) **zkML (ZK proofs over inference)** — EZKL, Giza, Modulus Labs, Risc0
+      (generic zkVM). Arithmetic circuit of the forward pass → SNARK/STARK
+      proof that output = f(input, weights). Works for small models, impractical
+      for real LLMs in 2026 (proof cost too high). Alternative: prove only a
+      critical portion of the decision chain.
+
+   c) **Verifiable replay/journaling (pragmatic approach)** — Signed log of each
+      call: hashed input, hashed output, model/version, timestamp, agent key,
+      chained as Merkle log (Certificate Transparency / Sigstore Rekor style).
+      No proof of computation correctness, but proof of trace integrity and
+      non-repudiation. Much more feasible now, sufficient for most compliance
+      needs. **This is the recommended approach for erebus** in the current ICP
+      (EU AI Act, SOC 2).
+
+   d) **Multi-party / consensus** — Multiple independent executors (TEE or not)
+      run the same agent, compare outputs (optimistic verification, fraud
+      proofs). For on-chain agents. Cost = execution redundancy.
+
+   **Pragmatic recommendation for erebus (current ICP compliance):**
+   Start with **(c) + Ed25519 signature of each step + periodic anchoring of
+   Merkle root hash on a public blockchain or TSA (RFC 3161)**. Verifiable,
+   auditable, low cost, no hardware vendor dependency. TEE becomes interesting
+   only if you need to guarantee execution integrity itself against a malicious
+   operator (internal threat / untrusted cloud) — not the current ICP (defense
+   / air-gapped, industrial edge, EU AI Act startups under company control).
+
+   **Environments/support by proof level:**
+   - Level 1 (binary integrity): anywhere, erebus binary + signature
+   - Level 2 (TEE execution integrity): physical machine with SGX/SEV-SNP or
+     dedicated cloud instance (AWS Nitro, Azure Confidential, GCP Confidential)
+   - Level 2 (zkML): any machine for inference, proof generation separate
+     (RAM/CPU/GPU intensive)
+   - Level 3 (verifiable journaling): anywhere, key = signing key + external
+     anchoring (blockchain or TSA)
+
+5. **TEE hardware attestation in the stub** — optional, out of scope for current
+   ICP. If we want Level 2 (TEE), we would need: TEE detection → launch agent
+   in enclave → retrieve hardware quote → integrate into attestation.
+   **Not a priority** for current ICP.
+
+**Machines / environments the claim covers (v0.5.0):**
+- Linux x86_64 + aarch64: full sandbox (namespace + seccomp + landlock) +
+  attestation via `ERE_ATEST_KEY`
+- macOS ARM64: stub + codesign, attestation via `ERE_ATTEST_KEY` (different security model)
+- Windows x64: PE stub, minimal/no sandbox, attestation via `ERE_ATTEST_KEY`
+- Universal polyglot: 1 file, 4 slices, runs everywhere
+
+**What the claim DOESN'T cover:**
+- Healthcare (excluded ICP — Lattice Health / Parachute / Wedge lead)
+- Hobbyist / OSS devs (they don't pay)
+- Docker environments (the angle is "no Docker needed", not "anti-Docker")
+
+### 🔴 P0 — Real-agent packaging reality (validated 2026-09-10)
+
+We packaged a **real LLM agent** end-to-end, not a hello-world: `examples/real-agent/`
+→ one signed ELF (646 MB) containing GGUF weights (Qwen 0.8B), the full
+llama.cpp runtime, embedded Python + Flask. Runs in the pivot_root+seccomp
+sandbox; `POST /infer` returns real generated tokens. Verified:
+`signature verified` → run → infer OK. No llama of any kind on the host.
+
+Two runtime fixes had to land in the example source (were broken before):
+
+- [x] **Bundled runtime libs** — `llama-cli` links `libssl.so.3`,
+  `libcrypto.so.3`, `libstdc++.so.6`, `libgcc_s.so.1`, `libgomp.so.1`, which the
+  sandbox (pivot_root) does not expose. Now copied from build host into
+  `.deps/llama/` so `LD_LIBRARY_PATH` resolves them inside the sandbox.
+- [x] **`GGML_BACKEND_PATH`** (file path, NOT a directory) — this llama.cpp build
+  reads the env var as *one backend .so*. Its default discovery (scan near
+  `/proc/self/exe`) silently finds zero backends inside pivot_root. App now
+  points it at `libggml-cpu-x64.so`.
+
+**Model weights are NOT in git** (by design): `.gitignore` holds `*.gguf` +
+`examples/*/.deps/`. The `download_model.sh` + staged `.deps/llama/` are the
+reproducible fetch path; the **build bundles them into the payload** regardless.
+A fresh clone = run the download script → build → run.
+
+That hand-work is the product gap. To make "any agent, any harness, run
+anywhere" a product (not a hand-tuned example), we need:
+
+- [x] **`erebus init agent`** — scaffold that mounts llama.cpp runtime + fixes
+  (backend path, bundled libs) so a working agent builds in ~30 s, no
+  copy-paste of `.deps/llama/`. `erebus init agent [dir]` writes
+  Agentfile.yaml / app.py (GGML_BACKEND_PATH pinned, arch-aware) /
+  download_model.sh / requirements.txt / README.md / .gitignore, then stages
+  the llama runtime: `--runtime <dir>` (or `ERE_LLAMA_RUNTIME`) copies an
+  existing runtime, else downloads `llama-b{N}-bin-ubuntu-{arch}.zip`
+  (default b10636 = the runtime proven in examples/real-agent). Staging
+  preserves the `.so` version symlink chain (a `fs::copy` skip left the
+  loader unable to resolve `libllama-common.so.0`) and bundles the 5 host
+  glibc libs (`libssl`/`libcrypto`/`libstdc++`/`libgcc_s`/`libgomp`).
+  Validated end-to-end (2026-09-10): `init agent` → build signé 646 MB →
+  run sandbox → health ok → `POST /infer` returns real tokens +
+  `[erebus] attestation written`. `--no-runtime` scaffolds offline.
+- [x] **Auto-embed the engine in `build`** — `erebus build <app> --engine
+  <path|b<N>>` stages a llama runtime into the payload at `.deps/llama`
+  (replacing anything bundled), reusing the shared `engine.rs` staging (copy
+  with symlink chain preserved, or download `b<N>`; + 5 host glibc libs +
+  validation). `--engine` feeds the config fingerprint so the build cache
+  invalidates per engine. Validated end-to-end (2026-09-10): app without
+  `.deps` → `--engine b10636` runtime (65 files, `libggml-base.so -> .0 ->
+  .0.22.0` chain intact) → sandbox execs `llama-cli` (needs the
+  `LD_LIBRARY_PATH` pattern from the app, as real-agent/app.py sets — $ORIGIN
+  is unreliable in the sandbox). App dir without `.deps/` is now enough:
+  `erebus init agent --no-runtime` + `build --engine`. `ERE_REGISTRY` still
+  pending.
+- [x] **Portability caveat** — documented in the scaffold README (`erebus init
+  agent`) + this roadmap: the bundled libs carry the **build host's glibc ABI**
+  (same-or-newer glibc required on target; older hosts cannot exec the bundled
+  llama-cli). Fully static musl llama.cpp build = stretch goal to break the
+  tie. Arch is pinned too: `libggml-cpu-x64.so` vs aarch64 backend — build on
+  the target arch.
+- [x] **Package OpenCode itself** (experiment) — Go binary (`opencode` v1.18.30)
+  renamed `app` + `opencode.json` + Agentfile entrypoint `[/app/app, models]`
+  builds and RUNS inside the sandbox (isolation 2). Two hardenings were
+  required and shipped:
+  - **Pure-binary payloads get no glibc**: `/app/app` else `ENOENT` after pivot
+    (no `/lib64/ld-linux*`). CLI now bundles the host's base glibc
+    (`copy_base_glibc` → `lib64`/`usr/lib/<triple>`: ld-linux, libc, libm,
+    libpthread, libdl, librt) when `runtime_name == "binary"` and no embedded
+    interpreter. Had to run BEFORE payload creation (was inserted after — tar
+    had no lib64).
+  - **JS runtimes need `/dev` + `/proc`**: `opencode` re-execs an embedded Bun
+    (JSC) which opens `/dev/urandom` and `/proc/self/maps` at startup and
+    segfaults on its GC canary when absent. Stub now mounts a tmpfs `/dev`
+    with standard nodes (bind-mounted from host; `mknod` is blocked by kernel
+    hardening in unprivileged userns) + `/proc` before `pivot_root`. Fresh
+    procfs needs a PID namespace, so it falls back to a **read-only bind of
+    host `/proc`** with a warning — see hardening item below.
+  **Decision: API-key mode** (network is available in the sandbox by default;
+  the key is injected via env/`ERE_SECRET_*` at runtime and never baked into
+  the artifact — keeps the offline/attest story intact). Local-model mode
+  (llama-server + GGUF in-payload) is the heavier fallback, not pursued now.
+  Proof: `/tmp/opencode-sb.erebus` lists models over the network inside the
+  sandbox; no-sandbox control (`--isolation none`) works identically.
+- [ ] **Harden sandbox `/proc`** — today host `/proc` is bind-mounted
+  (read-only) because a fresh procfs requires entering a PID namespace
+  (`CLONE_NEWPID` + fork, so the mount runs as pid 1). Follow-up: extend
+  `namespace::enter_userns` + `exec_app` launch path accordingly (app becomes
+  pid 1; reap orphans); removes host process-metadata exposure.
 
 ### 🔴 P0 — Immediate fixes / uncommitted debt
 
@@ -159,11 +454,18 @@ All P2 items implemented in `erebus-core` **and wired to user-facing surfaces**:
   interop against real `ed25519_dalek` tokens). Tested: 5 tests.
 - **Provider integration** — OCI/LFS/S3/Bazel/HF frontends under
   `scripts/frontends/` (chaos exercises them).
-- **CVE scanning** — `erebus-core/src/cve.rs`: parses
+|- **CVE scanning** — `erebus-core/src/cve.rs`: parses
   requirements.txt/package.json/pyproject.toml, matches known-weak versions,
   findings feed `scan_results`. **Wired**: `erebus scan --cve
   [--json|--plain]` (verified end-to-end: flags `requests==2.25.0`, skips
   patched `urllib3==2.2.1`). Tested: 6 tests.
+- **Attestation registry storage + queryable history** — attestations currently
+  land as `.erebus.attest` files on disk (manual). For EU AI Act / SOC 2
+  compliance trails, attestations must be stored in the registry and queryable
+  ("show me all executions of agent X last week"). This closes the loop between
+  runtime attestation and the hosted compliance trail.
+  **Not wired**: requires server endpoint `/attestations` + client CLI
+  `erebus attest-history --query ...` + audit log integration.
 
 ### 🔵 P3 — Multi-protocol frontends (Shardline-like)
 
@@ -183,10 +485,11 @@ All P2 items implemented in `erebus-core` **and wired to user-facing surfaces**:
 - [ ] **Multi-node / cross-region replication** — high availability.
 - [x] **Webhooks** — `GET/POST/DELETE /webhooks` manages URLs; `record_audit()` dispatches promote/quarantine/delete events to all registered endpoints (fire-and-forget, 10s timeout) (`9485384`).
 
-### ⚪ Ideas / unexplored (IDEAS.md)
+### ⚪ Ideas / unexplored
 
 - First-principles: safety requires human audit + sandbox (seccomp/landlock).
-- Confirm a filmed real demo `build → sign → attest → run` for the launch comment.
+- Filmed 2-min demo: build → sign → run → attest → verify → tamper → "TAMPERED".
+- Fleet attestation dashboard: "show me all executions in Lagos last week".
 
 ---
 
@@ -212,11 +515,9 @@ paid in compliance and audit trail.
 
 ### The real ICP
 
-```
-🛡️ Defense / admin           air-gapped by regulation (AANSSI, public procurement)
-🏭 Industrial edge            retail kiosks, factories, vehicles — "500 machines, proof for the auditor"
-📦 AI startups subject to     EU AI Act high-risk — mandatory lifecycle documentation
-```
+- **Defense / admin** — air-gapped by regulation (AANSSI, public procurement)
+- **Industrial edge** — retail kiosks, factories, vehicles. "500 machines, proof for the auditor"
+- **AI startups subject to EU AI Act** — mandatory lifecycle documentation
 
 **Excluded**: healthcare (Lattice Health / Parachute / Wedge have the GTM lead),
 OSS / hobbyist devs (they don't pay). Cross-industry + air-gapped + signed
@@ -231,11 +532,45 @@ attestation chain = our differentiator.
 
 ### The one-line YC slide
 
-> *« We provide the cryptographic proof of what ran inside every AI agent, on
-> every machine, at every moment. Regulated enterprises need this traceability
-> to comply with the EU AI Act, SOC 2 and public procurement. Our binary format
-> generates this proof in the background — free in open source, paid when
-> hosted with compliance and audit trail. »*
+> *« AI agents run on thousands of machines. Nobody can prove what they did.
+> We generate the cryptographic proof — automatically, on every execution.
+> Regulated enterprises need this for EU AI Act, SOC 2, and public procurement.
+> Open-source MIT client, paid hosted compliance trail. »*
+
+**Claim scope clarification (v0.5.0):**
+
+The claim "Cryptographic proof of AI agent execution" covers:
+
+- **What is proven**: the specific signed binary executed on a specific machine
+  at a specific time, with verified integrity (SHA-256 + Ed25519), in a
+  kernel-level sandbox (namespace + seccomp + landlock on Linux), and the
+  attestation chain (builder, layers, machine_id_hash — never plaintext
+  hostname, timestamp) is cryptographically verifiable.
+
+- **What is NOT yet proven**: the agent's behavior during execution (outputs,
+  decisions, inputs consumed). The current attestation proves *the bundle ran*,
+  not *what the agent did*. Behavior capture is an open problem — approaches
+  include agent hooks/standards interface or proxy layer. The pitch must
+  acknowledge this scope: "We prove the execution happened, unaltered, on the
+  right machine" — not "We prove the agent did the right thing."
+
+- **What is NOT yet automatic (P0 closed, P2 open)**: the stub auto-attestation
+  is implemented (`ERE_ATTEST_KEY` env var → `write_execution_attestation`),
+  but it is opt-in — without the env var, the operator must run `erebus attest`
+  after execution. The registry attestation storage + queryable history is still
+  not wired.
+
+**Machines / environments the claim covers:**
+- Linux x86_64 + aarch64: full sandbox + attestation via `ERE_ATTEST_KEY`
+- macOS ARM64: codesign, attestation via `ERE_ATTEST_KEY` (different model)
+- Windows x64: PE stub, minimal/no sandbox, attestation via `ERE_ATTEST_KEY`
+- Universal polyglot: 1 file, 4 slices
+- Air-gapped / offline-first: mirror export/import (AES-256-GCM encrypted)
+
+**Excluded from the claim:**
+- Healthcare (ICP excluded — Lattice Health / Parachute / Wedge lead)
+- Hobbyist / OSS devs (they don't pay)
+- Docker environments (angle is "no Docker needed", not "anti-Docker")
 
 ### The business math
 
@@ -245,7 +580,7 @@ attestation chain = our differentiator.
 - **Expansion**: $50/node/yr for fleets → $25k/yr for 500 nodes
 - **Lock-in**: attestation history is the accumulated data (no GPU capex)
 
-### African context / Google Africa AI Lab
+### Edge / emerging markets (use case, not the pitch)
 
 - 8 GB on 4G ≈ $5–10 of data; erebus delta ≈ $0.05. Offline-first = works
   through outages. Data sovereignty (weights never leave the device).
@@ -254,31 +589,41 @@ attestation chain = our differentiator.
   fallback offline. Attestation covers both paths.
 - Flagship use case: Lagos fintech, anti-fraud agent on 500 PoS terminals, 50 MB
   delta per terminal, signed receipt per transaction, auditor verifies offline.
+- **This is an expansion market, not the ICP.** The ICP is enterprises under
+  EU AI Act / SOC 2 with $24k/yr budgets. Edge markets validate the
+  offline-first and data-sovereignty claims.
 
 ---
 
 ## 5. Condensed pitch (*Sign. Track. Prove.*)
 
-**The problem**: `docker run` / `python app.py` → **zero proof** of what
-executed. Updates = re-downloading 8 GB. No audit trail for EU AI Act / SOC 2 /
-African regulators.
+**The problem**: AI agents run on servers, factories, point-of-sale terminals.
+`docker run` / `python app.py` → **zero proof** of what executed. No audit
+trail for EU AI Act / SOC 2 / public procurement. Regulators are about to
+force companies to produce this proof — and no tool generates it.
 
-**The solution**: a self-contained binary + attestation chain. `erebus build
-./my-agent → my-agent.erebus (18 MB)`, SISR delta (8 GB → ~50 MB), Ed25519 +
-SHA-256 attestation + metadata, executes with seccomp/landlock sandbox, emits a
-signed `.erebus.attest`.
+**The solution**: a self-contained binary format that generates signed
+cryptographic receipts automatically. `erebus build ./my-agent → my-agent.erebus`,
+SISR delta (8 GB → ~50 MB), Ed25519 + SHA-256 attestation + metadata, executes
+with seccomp/landlock sandbox, emits a signed `.erebus.attest`. The binary
+format is open-source MIT. The hosted compliance trail is the business.
 
-**Why Africa, why now**: expensive bandwidth, unstable connectivity, data
-sovereignty, regulatory compliance, edge ARM64/x86/RISC-V.
+**Why now**: EU AI Act high-risk classification mandatory 2026. SOC 2 auditors
+increasingly require AI execution evidence. No existing tool produces
+cryptographic proof of AI agent execution.
 
-**Traction**: 3 Rust crates 0 unsafe core/CLI, 400+ tests, CSO audit 0 critical,
+**Traction**: 3 Rust crates, 0 unsafe core/CLI, 343+ tests, CSO audit 0 critical,
 universal 4-slices, 98.7% SISR benchmark, auth+quotas+MCP registry.
 
-**Live**: `cargo install erebus` → `erebus build ./agent --embed-gemma-2b -o agent.erebus`
+**Live**: `cargo install erebus` → `erebus build ./agent -o agent.erebus` →
+`erebus sign agent.erebus --key key.key` → run → `erebus attest agent.erebus`
+→ `erebus verify --attest agent.erebus.attest` → **VALID**
 
-**Final vision**: every AI agent execution leaves a cryptographic receipt. A
-fleet operator queries: "show me all anti-fraud-model executions in Accra last
-week". An auditor verifies offline. A regulator sees: zero tampering, offline
+**Current state (v0.5.0):** the stub auto-attests when `ERE_ATTEST_KEY` is set —
+a signed `.erebus.attest` is written before `execvp`. The "every execution leaves
+a cryptographic receipt" works locally. The hosted compliance trail (registry
+storage + queryable history) is the next step: an auditor can query "show me all
+model executions in Accra last week." A regulator sees: zero tampering, offline
 execution, data never left the device.
 
 ---
