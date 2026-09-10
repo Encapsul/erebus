@@ -386,11 +386,16 @@ anywhere" a product (not a hand-tuned example), we need:
   (llama-server + GGUF in-payload) is the heavier fallback, not pursued now.
   Proof: `/tmp/opencode-sb.erebus` lists models over the network inside the
   sandbox; no-sandbox control (`--isolation none`) works identically.
-- [ ] **Harden sandbox `/proc`** — today host `/proc` is bind-mounted
-  (read-only) because a fresh procfs requires entering a PID namespace
-  (`CLONE_NEWPID` + fork, so the mount runs as pid 1). Follow-up: extend
-  `namespace::enter_userns` + `exec_app` launch path accordingly (app becomes
-  pid 1; reap orphans); removes host process-metadata exposure.
+- [x] **Harden sandbox `/proc`** — done: `exec_app` now runs a supervisor fork
+  on the pivot path. `namespace::enter_newpid` (new `CLONE_NEWPID` unshare,
+  pivot path only) makes the executor child **PID 1** of a fresh namespace, so
+  `mount_dev_and_proc` mounts a **hermetic procfs** (host processes invisible;
+  verified: `/proc` in-sandbox lists only pid 1, `self_pid: 1`). The host
+  `/proc` bind survives only as a warned fallback when an outer container
+  denies `unshare(CLONE_NEWPID)`. Parent stub supervises the child, keeps the
+  health endpoint alive for the app's full life, and relays the child's exact
+  exit status/signal to its own caller. Sandbox session now reaps its own
+  orphans (app is pid 1).
 
 ### 🔴 P0 — Immediate fixes / uncommitted debt
 

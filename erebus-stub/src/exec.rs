@@ -598,9 +598,11 @@ fn mount_dev_and_proc(rootfs: &Path) -> io::Result<()> {
     let prs_c = crate::cstr(b"proc")?;
     let host_proc_c = crate::cstr(b"/proc")?;
     // SAFETY: mount(2) first tries a fresh procfs, then falls back to a
-    // read-only bind of the host /proc when the kernel blocks procfs (i.e.
-    // when the caller is not inside a new PID namespace). A fresh procfs
-    // mounts its own PID namespace; the bind exposes host process metadata.
+    // read-only bind of the host /proc when the kernel blocks procfs. When the
+    // pivot path killed a new PID namespace (`CLONE_NEWPID`), the fresh mount
+    // succeeds and hides all host process data; the bind is only reached when
+    // NEWPID was unavailable (restrictive outer containers) and exposes host
+    // process metadata — warned below so the tradeoff is visible.
     let rc = unsafe {
         libc::mount(
             prs_c.as_ptr(),
@@ -681,6 +683,36 @@ fn enter_pivot_sandbox(rootfs: &Path, meta: &Metadata) -> io::Result<()> {
     Ok(())
 }
 
+/// Wait for the executor child and terminate this (supervisor) process with
+/// the same status, so callers observe the app's real exit code/signal rather
+/// than a wrapper's PID. Blocks until the child exits.
+#[cfg(target_os = "linux")]
+fn relay_child_status(pid: libc::pid_t) -> io::Result<()> {
+    let mut status: libc::c_int = 0;
+    // SAFETY: waitpid(2) blocks until `pid` exits or is signaled; `status` is
+    // a valid pointer to a c_int, and the child is always ours.
+    unsafe {
+        libc::waitpid(pid, &mut status, 0);
+    }
+    if libc::WIFEXITED(status) {
+        let code = libc::WEXITSTATUS(status);
+        if code != 0 {
+            std::process::exit(code);
+        }
+        return Ok(());
+    }
+    if libc::WIFSIGNALED(status) {
+        let sig = libc::WTERMSIG(status);
+        // SAFETY: restoring the default disposition then raise(2) re-delivers
+        // the signal, so the parent dies with the same signal as the child.
+        unsafe {
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    }
+    std::process::exit(128 + 1)
+}
+
 /// Launch the app entrypoint. Blocks until the app exits (or never returns on
 /// successful execvp).
 pub fn exec_app(
@@ -733,15 +765,41 @@ pub fn exec_app(
     }
 
     enter_namespace_if_needed(meta.isolation)?;
+
+    // Supervisor fork for the pivot path: `CLONE_NEWPID` makes the next child
+    // PID 1 of a fresh namespace — the only context that may mount a hermetic
+    // procfs (one that hides all host process data). The parent supervises the
+    // executor child and relays its exit status, keeping the stub alive during
+    // the app's run so the health endpoint works. On hosts that deny
+    // `unshare(CLONE_NEWPID)`, warn and fall back to the host-`/proc` bind.
     #[cfg(target_os = "linux")]
     if use_pivot {
+        if let Err(e) = crate::namespace::enter_newpid() {
+            eprintln!(
+                "[erebus] warning: failed to enter PID namespace ({e}) — /proc falls back to a host bind"
+            );
+        }
+        // SAFETY: fork(2) creates the executor child (PID 1 when enter_newpid
+        // succeeded). The child mounts /dev + /proc, pivots root, then execs
+        // the payload; the parent supervises below.
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if pid != 0 {
+            crate::health_gate::maybe_start_health(meta);
+            return relay_child_status(pid);
+        }
+        // Child: fall through to the shared launch path below. This mounts the
+        // synthetic /dev and a fresh /proc, pivots root, and installs the
+        // seccomp/Landlock sandboxes.
         enter_pivot_sandbox(rootfs, meta)?;
     }
 
-    // Start the health-check thread AFTER entering the namespaces. A running
-    // native thread makes `unshare(CLONE_NEWUSER)` fail with EINVAL (a
-    // multi-threaded process cannot enter a user namespace), so spawning the
-    // HTTP server earlier silently broke the sandbox.
+    // Health server: spawn AFTER entering the namespaces — a live thread makes
+    // `unshare(CLONE_NEWUSER)` fail with EINVAL. On the pivot path this line
+    // runs in the executor child (its thread vanishes at exec, as before the
+    // supervisor fork); the parent already spawned its own inside the branch.
     crate::health_gate::maybe_start_health(meta);
 
     #[cfg(target_os = "macos")]

@@ -70,6 +70,25 @@ pub fn enter_userns() -> io::Result<()> {
     Ok(())
 }
 
+/// Enter a new PID namespace (`CLONE_NEWPID`).
+///
+/// Only the *children* of the calling process land in the new namespace, and
+/// the next child to be forked becomes PID 1 there. A fresh procfs can be
+/// mounted **only from inside** the new PID namespace, so callers must fork
+/// after this and do the `mount("proc")` in the child. Must run before any
+/// threads exist, like the user/mount unshares.
+#[cfg(target_os = "linux")]
+pub fn enter_newpid() -> io::Result<()> {
+    // SAFETY: unshare(2) with CLONE_NEWPID creates a new PID namespace for
+    // future children; permitted for a mapped root in an existing userns.
+    // Does not change the caller's own PID.
+    let rc = unsafe { libc::unshare(libc::CLONE_NEWPID) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Write a procfs file (`uid_map`/`gid_map`). Linux-only.
 #[cfg(target_os = "linux")]
 pub fn write_proc(path: &str, contents: &str) -> io::Result<()> {
