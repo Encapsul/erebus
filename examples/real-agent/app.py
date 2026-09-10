@@ -49,12 +49,22 @@ def run_inference(prompt: str, max_tokens: int = 512) -> str:
         if ngl.isdigit() and int(ngl) > 0:
             cmd += ["-ngl", ngl]
 
+        # Point ggml at the bundled CPU backend. Newer llama.cpp reads this
+        # env var as a path to ONE backend .so (not a dir); the default (scan
+        # near /proc/self/exe) fails inside the pivot_root sandbox where the
+        # interpreted path differs from the on-disk layout.
+        cmd_env = {
+            **os.environ,
+            "LD_LIBRARY_PATH": LLAMA_LIB + ":" + os.environ.get("LD_LIBRARY_PATH", ""),
+            "GGML_BACKEND_PATH": LLAMA_LIB + "/libggml-cpu-x64.so",
+        }
+
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             timeout=120,
-            env={**os.environ, "LD_LIBRARY_PATH": LLAMA_LIB + ":" + os.environ.get("LD_LIBRARY_PATH", "")},
+            env=cmd_env,
         )
         
         if result.returncode != 0:

@@ -484,7 +484,7 @@ fn run() -> io::Result<()> {
             if verbose {
                 eprintln!("[erebus] warm start: cache hit {}", hash);
             }
-            return exec::exec_app(&meta, &rootfs, &app_config);
+            return exec::exec_app(&meta, &rootfs, &app_config, &bin_path);
         }
 
         // Source changed since last extraction — fall through to cold path
@@ -628,7 +628,7 @@ fn run() -> io::Result<()> {
     if !meta.services.is_empty() {
         exec::supervise_services(&meta, &rootfs, &app_config)
     } else {
-        exec::exec_app(&meta, &rootfs, &app_config)
+        exec::exec_app(&meta, &rootfs, &app_config, &bin_path)
     }
 }
 
@@ -852,7 +852,7 @@ fn supervised_launch(
     }
     if pid == 0 {
         let result = if meta.services.is_empty() {
-            exec::exec_app(meta, rootfs, app_config)
+            exec::exec_app(meta, rootfs, app_config, bin_path)
         } else {
             exec::supervise_services(meta, rootfs, app_config)
         };

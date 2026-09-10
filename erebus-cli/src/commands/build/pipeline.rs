@@ -1,3 +1,4 @@
+use crate::commands::engine;
 use crate::remote_cache::remote_cache_from_args;
 use anyhow::{Context, Result};
 use erebus_core::detect;
@@ -6,7 +7,7 @@ use erebus_core::metadata::{BunFeatures, EmbeddedInterpreter};
 use erebus_core::paths::cache_dir;
 use erebus_core::pkgmgr;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::args::{config_fingerprint, parse_target, BuildArgs, BuildPlan};
@@ -303,6 +304,24 @@ pub(crate) fn build_single_target(
         }
     }
 
+    // ── Embed llama engine ─────────────────────────────────────────────
+    //
+    // AUTO-ENGINE: with `--engine`, drop a llama.cpp runtime into the payload
+    // at app/.deps/llama, replacing anything the app bundled there. This makes
+    // an AI agent build reproducibly from one flag instead of requiring a
+    // hand-staged `.deps/llama` in the app dir. Reuses the runtime + host-lib
+    // set proven in examples/real-agent.
+    if let Some(ref spec_str) = args.engine {
+        let engine_dest = rootfs.join("app").join(".deps").join("llama");
+        let spec = engine::parse_engine(spec_str)
+            .with_context(|| format!("invalid --engine value: {spec_str}"))?;
+        if verbose {
+            eprintln!("[erebus] embedding llama engine ({spec_str}) -> .deps/llama");
+        }
+        engine::stage_engine(&engine_dest, &spec)
+            .with_context(|| format!("failed to embed llama engine from '{spec_str}'"))?;
+    }
+
     // ── Embed interpreter ──────────────────────────────────
     //
     // CROSS-TARGET: CPython is copied verbatim from the *build host* plus its
@@ -382,6 +401,23 @@ pub(crate) fn build_single_target(
 
     if !interpreter_embedded && verbose && embedded_interpreter_str.is_some() {
         eprintln!("  (interpreter embedding skipped)");
+    }
+
+    // A pure-binary payload (`/app/app` exec'd directly) has no interpreter
+    // to pull glibc into the rootfs the way embedded python does. Without the
+    // dynamic loader + core libc the kernel cannot exec the (dynamic) binary
+    // at all — a pivot_root'd rootfs has no host /lib to fall back on. Bundle
+    // the host's minimal glibc base for binary runtimes only; interpreted
+    // payloads already get libc+friends from the interpreter embed.
+    if runtime_name == "binary"
+        && embedded_interpreter_str.is_none()
+        && !rootfs
+            .join("usr/lib")
+            .join(host_gnu_triple())
+            .join("libc.so.6")
+            .is_file()
+    {
+        copy_base_glibc(&rootfs, verbose)?;
     }
 
     // Clean up downloaded build tools. Only the tool's own cache dir is
@@ -927,4 +963,111 @@ pub(crate) fn build_single_target(
         })));
     }
     Ok(None)
+}
+
+/// GNU triplet of the build host, for locating glibc base libs and the
+/// `libggml-cpu-*` backend layout.
+fn host_gnu_triple() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "x86_64-linux-gnu",
+        "aarch64" => "aarch64-linux-gnu",
+        "riscv64" => "riscv64-linux-gnu",
+        other => other,
+    }
+}
+
+/// Copy the minimal glibc base (dynamic loader + core libc) from the build
+/// host into the rootfs, so a pure-binary payload can exec inside the sandbox.
+/// The loader finds these via its compiled-in default path (`/usr/lib/<triple>`),
+/// no `/etc/ld.so.cache` needed. Missing libs are only a warning — the bundle
+/// still builds but will not exec on distros where the target lacks the base.
+fn copy_base_glibc(rootfs: &Path, verbose: bool) -> Result<()> {
+    let triple = host_gnu_triple();
+    let (loader, loader_rel) = match std::env::consts::ARCH {
+        "x86_64" => (
+            "/lib64/ld-linux-x86-64.so.2",
+            PathBuf::from("lib64/ld-linux-x86-64.so.2"),
+        ),
+        "aarch64" => (
+            "/lib/ld-linux-aarch64.so.1",
+            PathBuf::from("lib/ld-linux-aarch64.so.1"),
+        ),
+        "riscv64" => (
+            "/lib/ld-linux-riscv64-lp64d.so.1",
+            PathBuf::from("lib/ld-linux-riscv64-lp64d.so.1"),
+        ),
+        other => anyhow::bail!("no known glibc loader layout for arch {other}"),
+    };
+    const LIBS: [&str; 5] = [
+        "libc.so.6",
+        "libm.so.6",
+        "libpthread.so.0",
+        "libdl.so.2",
+        "librt.so.1",
+    ];
+    let mut missing = Vec::new();
+
+    let loader_dst = rootfs.join(&loader_rel);
+    let loader_src = Path::new(loader);
+    if Path::new(loader).is_file() {
+        if let Some(parent) = loader_dst.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        std::fs::copy(loader_src, &loader_dst)
+            .with_context(|| format!("failed to bundle {}", loader))?;
+    } else {
+        missing.push(loader.to_string());
+    }
+
+    let lib_dst = rootfs.join("usr/lib").join(triple);
+    std::fs::create_dir_all(&lib_dst)
+        .with_context(|| format!("failed to create {}", lib_dst.display()))?;
+    let candidates = [
+        PathBuf::from("/usr/lib").join(triple),
+        PathBuf::from("/lib").join(triple),
+    ];
+    for name in LIBS {
+        if lib_dst.join(name).is_file() {
+            continue;
+        }
+        match candidates
+            .iter()
+            .map(|c| c.join(name))
+            .find(|p| p.is_file())
+        {
+            Some(src) => {
+                std::fs::copy(&src, lib_dst.join(name)).with_context(|| {
+                    format!(
+                        "failed to bundle {} from {} into rootfs",
+                        name,
+                        src.display()
+                    )
+                })?;
+            }
+            None => missing.push(name.to_string()),
+        }
+    }
+    if verbose {
+        let n = LIBS.len() + 1 - missing.len();
+        eprintln!("[erebus] bundled {n} glibc base files into rootfs for binary payload");
+    }
+    if !missing.is_empty() {
+        eprintln!(
+            "[erebus] warning: base glibc files not found on this host: {}",
+            missing.join(", ")
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_triple_is_sane() {
+        let triple = host_gnu_triple();
+        assert!(triple.contains("linux-gnu"), "triple: {triple}");
+    }
 }

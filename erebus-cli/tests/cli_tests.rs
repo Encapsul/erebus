@@ -708,3 +708,112 @@ fn test_mirror_help() {
         .stdout(predicate::str::contains("export"))
         .stdout(predicate::str::contains("import"));
 }
+
+#[test]
+fn test_init_agent_scaffold() {
+    let dir = tempdir().unwrap();
+    let target = dir.path().join("myagent");
+    erebus()
+        .args(["init", "agent", target.to_str().unwrap(), "--no-runtime"])
+        .assert()
+        .success();
+    for name in [
+        "Agentfile.yaml",
+        "app.py",
+        "requirements.txt",
+        "download_model.sh",
+        ".gitignore",
+        "README.md",
+    ] {
+        assert!(target.join(name).is_file(), "{name} must be scaffolded");
+    }
+    assert!(target.join("models").is_dir());
+    let app_py = std::fs::read_to_string(target.join("app.py")).unwrap();
+    assert!(app_py.to_lowercase().contains("ggml_backend_path"));
+    assert!(app_py.contains("libggml-cpu-"));
+}
+
+#[test]
+fn test_init_agent_copy_runtime_preserves_symlinks() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("runtime");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("llama-cli"), b"#!/bin/sh\n").unwrap();
+    std::fs::write(src.join("libllama-data.so.0.3.0"), b"ELF").unwrap();
+    std::fs::write(src.join("libggml-cpu-x64.so"), b"ELF").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("libllama-data.so.0.3.0", src.join("libllama-data.so.0")).unwrap();
+
+    let target = dir.path().join("agent");
+    erebus()
+        .args([
+            "init",
+            "agent",
+            target.to_str().unwrap(),
+            "--runtime",
+            src.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert!(target.join(".deps/llama/llama-cli").is_file());
+    assert!(target.join(".deps/llama/libllama-data.so.0.3.0").is_file());
+    assert!(target.join(".deps/llama/libggml-cpu-x64.so").is_file());
+    #[cfg(unix)]
+    assert!(
+        target.join(".deps/llama/libllama-data.so.0").is_symlink(),
+        "the .so version chain must survive runtime staging"
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        std::fs::read_link(target.join(".deps/llama/libllama-data.so.0")).unwrap(),
+        std::path::Path::new("libllama-data.so.0.3.0")
+    );
+}
+
+#[test]
+fn test_build_engine_embeds_runtime() {
+    let dir = tempdir().unwrap();
+    let app = dir.path().join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(app.join("app.py"), "print('hello engine')\n").unwrap();
+
+    let runtime = dir.path().join("runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::write(runtime.join("llama-cli"), b"#!/bin/sh\n").unwrap();
+    std::fs::write(runtime.join("libllama-data.so.0.3.0"), b"ELF").unwrap();
+    std::fs::write(runtime.join("libggml-cpu-x64.so"), b"ELF").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("libllama-data.so.0.3.0", runtime.join("libllama-data.so.0"))
+        .unwrap();
+
+    let out = dir.path().join("agent.erebus");
+    let plain = dir.path().join("plain.erebus");
+    erebus()
+        .args([
+            "build",
+            app.to_str().unwrap(),
+            "-o",
+            out.to_str().unwrap(),
+            "--engine",
+            runtime.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    erebus()
+        .args([
+            "build",
+            app.to_str().unwrap(),
+            "-o",
+            plain.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let with_engine = std::fs::metadata(&out).unwrap().len();
+    let without_engine = std::fs::metadata(&plain).unwrap().len();
+    assert!(
+        with_engine > without_engine,
+        "engine build ({with_engine} B) must be larger than plain ({without_engine} B)"
+    );
+}

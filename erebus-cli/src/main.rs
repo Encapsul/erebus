@@ -57,6 +57,14 @@ enum Commands {
     /// Execute a .erebus file
     Run(commands::run::RunArgs),
 
+    /// Scaffold a new project (AI agent, etc.)
+    ///
+    /// Examples:
+    ///   erebus init agent                       # my-agent/ with llama.cpp runtime
+    ///   erebus init agent ./twr --no-runtime    # scaffold only (offline)
+    ///   erebus init agent --runtime examples/real-agent/.deps/llama
+    Init(commands::init::InitArgs),
+
     /// Inspect a .erebus file's metadata
     Inspect(commands::inspect::InspectArgs),
 
@@ -131,6 +139,15 @@ enum Commands {
 
     /// Verify a .erebus file's signature
     Verify(commands::verify::VerifyArgs),
+
+    /// Verify a detached .erebus.attest attestation document
+    ///
+    /// Checks the Ed25519 signature on the attestation against trusted keys.
+    ///
+    /// Examples:
+    ///   erebus verify-attest agent.erebus.attest
+    ///   erebus verify-attest agent.erebus.attest --trusted-dir ~/.erebus/trusted-keys/
+    VerifyAttest(commands::verify_attest::VerifyAttestArgs),
 
     /// Trust a public key
     Trust(commands::trust::TrustArgs),
@@ -272,6 +289,7 @@ fn main() -> ExitCode {
 
     let result = match cli.command {
         Commands::Build(args) => commands::build::run(*args, effective_verbose),
+        Commands::Init(args) => commands::init::run(args),
         Commands::Run(mut args) => {
             if cli.verbose {
                 args.verbose = true;
@@ -312,6 +330,7 @@ fn main() -> ExitCode {
             }
             commands::verify::run(args)
         }
+        Commands::VerifyAttest(args) => commands::verify_attest::run(args),
         Commands::Lifecycle(mut args) => {
             if cli.quiet {
                 args.quiet = true;

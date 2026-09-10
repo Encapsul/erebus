@@ -122,7 +122,7 @@ pub fn run(args: VerifyArgs) -> Result<()> {
         });
         write_json_output(&info, args.output.as_deref())?;
     } else if !verified {
-        anyhow::bail!("signature does not match any trusted key");
+        anyhow::bail!("TAMPERED: signature does not match any trusted key");
     } else if !args.quiet {
         eprintln!("OK: signature verified");
     }

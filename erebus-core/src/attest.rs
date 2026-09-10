@@ -308,6 +308,32 @@ pub fn generate_attestation(
     Ok(attestation)
 }
 
+/// Write a signed execution attestation for `bundle_path` to `out_path`.
+///
+/// Loads the Ed25519 signing key from `key_path` (a raw 32-byte seed, the
+/// same format `erebus keygen` writes), attests `bundle_path` and persists the
+/// pretty-printed JSON. This is the "every execution leaves a proof" hook: the
+/// launcher stub calls it right before spawning the payload, so each run
+/// produces a fresh detached `.erebus.attest` an auditor can verify against
+/// the trusted public key.
+pub fn write_execution_attestation(
+    bundle_path: &Path,
+    key_path: &Path,
+    out_path: &Path,
+) -> Result<Attestation, anyhow::Error> {
+    let key_bytes = std::fs::read(key_path)
+        .map_err(|e| anyhow::anyhow!("failed to read attestation key: {e}"))?;
+    let key = SigningKey::from_bytes(key_bytes.as_slice().try_into().map_err(|_| {
+        anyhow::anyhow!("attestation key must be 32 bytes, got {}", key_bytes.len())
+    })?);
+    let attestation = generate_attestation(bundle_path, &key)?;
+    let json = serde_json::to_vec_pretty(&attestation)
+        .map_err(|e| anyhow::anyhow!("failed to serialize attestation: {e}"))?;
+    std::fs::write(out_path, json)
+        .map_err(|e| anyhow::anyhow!("failed to write attestation: {e}"))?;
+    Ok(attestation)
+}
+
 /// ISO 8601 UTC timestamp.
 fn utc_now_iso8601() -> String {
     let now = std::time::SystemTime::now()
@@ -336,7 +362,8 @@ pub fn verify_attestation(
     attestation: &Attestation,
     trusted_keys: &[VerifyingKey],
 ) -> Result<VerifyingKey, anyhow::Error> {
-    let doc_bytes = serde_json::to_vec(&attestation.statement)
+    // Must match generate_attestation which signs `to_vec_pretty` bytes.
+    let doc_bytes = serde_json::to_vec_pretty(&attestation.statement)
         .map_err(|e| anyhow::anyhow!("failed to serialize statement: {e}"))?;
 
     let sig_bytes = hex::decode(&attestation.signature.signature_hex)
@@ -494,8 +521,8 @@ mod tests {
             },
         };
 
-        // Sign the statement's canonical bytes.
-        let doc_bytes = serde_json::to_vec(&attestation.statement).unwrap();
+        // Sign the statement's canonical bytes (must match verify_attestation: pretty).
+        let doc_bytes = serde_json::to_vec_pretty(&attestation.statement).unwrap();
         let sig = key.sign(&doc_bytes);
         attestation.signature.signature_hex = hex::encode(sig.to_bytes());
 
@@ -539,7 +566,7 @@ mod tests {
             },
         };
 
-        let doc_bytes = serde_json::to_vec(&attestation.statement).unwrap();
+        let doc_bytes = serde_json::to_vec_pretty(&attestation.statement).unwrap();
         let sig = key.sign(&doc_bytes);
         attestation.signature.signature_hex = hex::encode(sig.to_bytes());
 
@@ -589,5 +616,70 @@ mod tests {
         assert_eq!(parsed.provenance.layers.len(), 1);
         assert_eq!(parsed.provenance.layers[0].kind, "runtime");
         assert_eq!(parsed.statement.statement_type, INTOTO_STATEMENT_TYPE);
+    }
+
+    #[test]
+    fn write_execution_attestation_roundtrip() {
+        use crate::format::Footer;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let key_path = dir.path().join("key");
+        let bundle_path = dir.path().join("bundle.erebus");
+        let out_path = dir.path().join("bundle.erebus.attest");
+
+        std::fs::write(&key_path, [7u8; 32]).unwrap();
+
+        // Minimal valid v3 bundle: stub + payload + metadata + packed footer.
+        let payload = b"hello payload";
+        let meta = br#"{"name":"test","runtime":"binary"}"#;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0u8; 8]); // placeholder stub
+        let payload_offset = bytes.len() as u64;
+        bytes.extend_from_slice(payload);
+        let meta_offset = bytes.len() as u64;
+        bytes.extend_from_slice(meta);
+        let footer = Footer {
+            format_version: 3,
+            arch: 0,
+            flags: 0,
+            payload_offset,
+            payload_csize: payload.len() as u64,
+            payload_usize: payload.len() as u64,
+            payload_sha256: [0u8; 32],
+            meta_offset,
+            meta_size: meta.len() as u64,
+            sig_offset: 0,
+        };
+        bytes.extend_from_slice(&footer.pack_full());
+        std::fs::write(&bundle_path, &bytes).unwrap();
+
+        let att = write_execution_attestation(&bundle_path, &key_path, &out_path).unwrap();
+
+        // The artifact hashes match the on-disk bundle.
+        assert_eq!(att.artifact.bundle_hash, sha256_hex(&bytes));
+        assert_eq!(att.artifact.payload_hash, sha256_hex(payload));
+        assert_eq!(att.artifact.format_version, 3);
+
+        // The persisted JSON verifies against the key's public half.
+        let json = std::fs::read_to_string(&out_path).unwrap();
+        let parsed: Attestation = serde_json::from_str(&json).unwrap();
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        verify_attestation(&parsed, &[key.verifying_key()]).unwrap();
+    }
+
+    #[test]
+    fn write_execution_attestation_rejects_bad_key_len() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let key_path = dir.path().join("badkey");
+        std::fs::write(&key_path, [1u8; 16]).unwrap();
+        let err = write_execution_attestation(
+            &dir.path().join("nope.erebus"),
+            &key_path,
+            &dir.path().join("out.attest"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("must be 32 bytes"));
     }
 }

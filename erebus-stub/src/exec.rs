@@ -519,6 +519,118 @@ fn bind_mount_gui_devices(rootfs: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Provision a minimal `/dev` (tmpfs + standard char devices) and a
+/// read-only `/proc` inside the rootfs, before `pivot_root`.
+///
+/// Statically-linked payloads and Go use `getrandom(2)` directly, but JS
+/// runtimes (Bun, Node) open `/dev/urandom` and `/proc/self/maps` at startup;
+/// without them the exec succeeds yet the runtime crashes first thing (Bun
+/// segfaults on its GC canary). Host paths become unreachable after
+/// `pivot_root`, so apps can only ever see this synthetic device set.
+/// Device nodes are bind-mounted (creating them via `mknod` is blocked by
+/// kernel hardening in unprivileged user namespaces); bind failures warn
+/// instead of aborting so payloads that never touch `/dev` keep the previous
+/// behaviour.
+#[cfg(target_os = "linux")]
+fn mount_dev_and_proc(rootfs: &Path) -> io::Result<()> {
+    let dev_dir = rootfs.join("dev");
+    std::fs::create_dir_all(&dev_dir)?;
+    let dev_c = crate::cstr(dev_dir.as_os_str().as_bytes())?;
+    let fs_c = crate::cstr(b"tmpfs")?;
+    // SAFETY: mount(2) overlays a fresh, empty tmpfs on the rootfs /dev.
+    let rc = unsafe {
+        libc::mount(
+            fs_c.as_ptr(),
+            dev_c.as_ptr(),
+            fs_c.as_ptr(),
+            libc::MS_NOSUID | libc::MS_NOEXEC,
+            std::ptr::null(),
+        )
+    };
+    if rc != 0 {
+        eprintln!(
+            "[erebus] warning: failed to mount tmpfs on /dev: {}",
+            io::Error::last_os_error()
+        );
+        return Ok(());
+    }
+
+    // Standard char devices every runtime expects. `mknod` is blocked for
+    // device nodes in unprivileged user namespaces (kernel hardening since
+    // 4.18), so bind-mount the host's nodes instead — the same trick the GUI
+    // path uses for /dev/dri. The bind is a 1:1 alias of an existing node,
+    // so it is permitted and no new device is exposed.
+    let host_dev = Path::new("/dev");
+    let nodes: &[&str] = &[
+        "null", "zero", "full", "random", "urandom", "tty", "console",
+    ];
+    for name in nodes {
+        let host_node = host_dev.join(name);
+        let dest = dev_dir.join(name);
+        if !host_node.exists() {
+            continue;
+        }
+        std::fs::write(&dest, []).ok();
+        let src_c = crate::cstr(host_node.to_str().unwrap_or(name).as_bytes())?;
+        let dest_c = crate::cstr(dest.as_os_str().as_bytes())?;
+        // SAFETY: mount(2) with MS_BIND aliases an existing host device node
+        // into the rootfs /dev; source and destination are valid paths.
+        let rc = unsafe {
+            libc::mount(
+                src_c.as_ptr(),
+                dest_c.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND,
+                std::ptr::null(),
+            )
+        };
+        if rc != 0 {
+            eprintln!(
+                "[erebus] warning: failed to bind /dev/{name}: {}",
+                io::Error::last_os_error()
+            );
+        }
+    }
+
+    let proc_dir = rootfs.join("proc");
+    std::fs::create_dir_all(&proc_dir)?;
+    let proc_c = crate::cstr(proc_dir.as_os_str().as_bytes())?;
+    let prs_c = crate::cstr(b"proc")?;
+    let host_proc_c = crate::cstr(b"/proc")?;
+    // SAFETY: mount(2) first tries a fresh procfs, then falls back to a
+    // read-only bind of the host /proc when the kernel blocks procfs (i.e.
+    // when the caller is not inside a new PID namespace). A fresh procfs
+    // mounts its own PID namespace; the bind exposes host process metadata.
+    let rc = unsafe {
+        libc::mount(
+            prs_c.as_ptr(),
+            proc_c.as_ptr(),
+            prs_c.as_ptr(),
+            libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            std::ptr::null(),
+        )
+    };
+    if rc == 0 {
+        return Ok(());
+    }
+    eprintln!(
+        "[erebus] warning: procfs mount not available (no PID namespace) — binding host /proc read-only: {}",
+        io::Error::last_os_error()
+    );
+    if Path::new("/proc").is_dir() {
+        let _ = unsafe {
+            libc::mount(
+                host_proc_c.as_ptr(),
+                proc_c.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND | libc::MS_REC,
+                std::ptr::null(),
+            )
+        };
+    }
+    Ok(())
+}
+
 /// Enters the `pivot_root` isolation and installs the requested sandboxes.
 ///
 /// Landlock rules anchor to the rootfs inode, so the `O_PATH` fd is opened
@@ -539,6 +651,8 @@ fn enter_pivot_sandbox(rootfs: &Path, meta: &Metadata) -> io::Result<()> {
     } else {
         None
     };
+
+    mount_dev_and_proc(rootfs)?;
 
     if meta.gui {
         bind_mount_gui_devices(rootfs)?;
@@ -569,7 +683,17 @@ fn enter_pivot_sandbox(rootfs: &Path, meta: &Metadata) -> io::Result<()> {
 
 /// Launch the app entrypoint. Blocks until the app exits (or never returns on
 /// successful execvp).
-pub fn exec_app(meta: &Metadata, rootfs: &Path, app_config: &AppConfig) -> io::Result<()> {
+pub fn exec_app(
+    meta: &Metadata,
+    rootfs: &Path,
+    app_config: &AppConfig,
+    bin_path: &Path,
+) -> io::Result<()> {
+    // Auto-attestation (opt-in): with `ERE_ATTEST_KEY` set, write a signed
+    // `.erebus.attest` right before launch. Done pre-pivot so host paths for
+    // key and bundle still resolve; failures warn but never block the run.
+    write_auto_attestation_if_requested(bin_path);
+
     // Single source of truth for the argv template: the layer system when
     // `entrypoint_layer` is set, the flat field for legacy binaries.
     let entrypoint = meta.effective_entrypoint();
@@ -791,6 +915,36 @@ pub fn exec_app(meta: &Metadata, rootfs: &Path, app_config: &AppConfig) -> io::R
         let child = spawn_app_windows(meta, rootfs, app_config)?;
         let code = crate::win::wait(&child)?;
         exit(code);
+    }
+}
+
+/// Best-effort auto-attestation hook: when `ERE_ATTEST_KEY` is set, write a
+/// fresh signed execution attestation for the launched bundle.
+///
+/// Output path: `ERE_ATTEST_OUT` if set, else `<bundle>.attest`. A failure to
+/// attest (missing key, read-only dir) is logged loudly but never blocks the
+/// launch — the app must run; the operator's duty is to make the proof write
+/// succeed.
+fn write_auto_attestation_if_requested(bin_path: &Path) {
+    let Some(key_os) = std::env::var_os("ERE_ATTEST_KEY") else {
+        return;
+    };
+    let key_path = PathBuf::from(&key_os);
+    let out_path = std::env::var_os("ERE_ATTEST_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let mut p = bin_path.to_path_buf();
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            p.set_file_name(format!("{name}.attest"));
+            p
+        });
+
+    match erebus_core::attest::write_execution_attestation(bin_path, &key_path, &out_path) {
+        Ok(_) => eprintln!("[erebus] attestation written: {}", out_path.display()),
+        Err(e) => eprintln!("[erebus] warning: failed to write execution attestation: {e}"),
     }
 }
 

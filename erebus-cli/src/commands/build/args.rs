@@ -236,6 +236,14 @@ pub(crate) fn config_fingerprint(args: &BuildArgs, plan: &BuildPlan) -> String {
     if let Some(p) = &args.interpreter_path {
         canonical.push(format!("interpreter_path={p}"));
     }
+    if let Some(engine) = &args.engine {
+        let spec = crate::commands::engine::parse_engine(engine)
+            .unwrap_or_else(|_| crate::commands::engine::EngineSpec::Local(PathBuf::from(engine)));
+        canonical.push(format!(
+            "engine={engine}:{}",
+            crate::commands::engine::engine_fingerprint(&spec)
+        ));
+    }
     if let Some(ep) = &args.otel_endpoint {
         canonical.push(format!("otel={ep}/{}", args.otel_protocol));
     }
@@ -458,6 +466,12 @@ pub struct BuildArgs {
     /// 16 MiB for efficient SISR delta updates on multi-GB model payloads.
     #[arg(long)]
     pub embed_model: Option<PathBuf>,
+
+    /// Embedded llama.cpp runtime for AI agents: a path to an existing runtime
+    /// dir, or `b<N>` to download llama.cpp release build N. Staged into the
+    /// payload as `.deps/llama` (replaces any `.deps/llama` bundled by the app).
+    #[arg(long, value_name = "PATH|b<N>")]
+    pub engine: Option<String>,
 
     /// GPU offload policy baked into the payload: "off" (force CPU), a fixed
     /// layer count (e.g., "33"), or unset (stub auto-detects VRAM at launch
@@ -901,6 +915,7 @@ mod tests {
             quiet: false,
             embed_model: None,
             entrypoint: Vec::new(),
+            engine: None,
             ngl: None,
         }
     }
