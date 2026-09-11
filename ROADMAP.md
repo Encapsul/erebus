@@ -124,7 +124,7 @@ only the stub uses it (with `SAFETY` comments).
 |---|---|
 | Universal binary `--universal` | 4 native slices in one 59 MB file, validated linux-x64 / arm64 (qemu) / win-x64 (Wine) |
 | Windows PE stub port | MapViewOfFile, CreateProcessW, ProcessPrng shim |
-| `erebus serve` | Multi-format engine resolution (`inference.rs`): GGUF → llama-server, safetensors/ONNX/TRT-LLM/MLX → vLLM; TinyLlama E2E |
+| `erebus serve` | Multi-format engine resolution (`inference.rs`): GGUF → llama-server, safetensors/ONNX/TRT-LLM/MLX → vLLM; TinyLlama E2E; graceful SIGTERM/SIGINT engine reap (`signal-hook` flag + Drop, port freed ~100 ms) |
 | Packaged LLM agent (E2E) | `examples/real-agent/`: signed 646 MB ELF = GGUF + llama.cpp + embedded Python; real tokens via `/infer` in sandbox (2026-09-10) |
 | Registry + `pull`/`publish` | stdlib server, SHA-256 verify, bearer tokens, quotas, orgs/RBAC, audit log, Stripe billing |
 | `Agentfile.yaml` | Same schema as `.erebus.toml`; CLI > file > detection |
@@ -132,7 +132,7 @@ only the stub uses it (with `SAFETY` comments).
 | Chat UI | ratatui TUI + browser UI (std-only proxy) |
 | SISR delta updates | FastCDC content-defined chunking, Ed25519-signed manifests, Merkle, fail-cold verify at boot |
 | Rollback + health gate | `.bak` snapshot, fork+waitpid supervisor, anti-loop quarantine |
-|| `erebus attest` | `.erebus.attest` (signed JSON, machine hash never in plaintext) — CLI build-time attestation AND auto-attestation via `ERE_ATTEST_KEY` env var (opt-in, writes before execvp) |
+| `erebus attest` | `.erebus.attest` (signed JSON, machine hash never in plaintext) — CLI build-time attestation AND auto-attestation via `ERE_ATTEST_KEY` env var (opt-in, writes before execvp) |
 | Behavior capture (spec 1.1) | `input_hash`/`output_hash`/`exit_code` in the attestation, signed by the execution key — supervisor tee + post-run rewrite (Linux pivot builds) |
 | `erebus verify-attest` | verifies detached `.erebus.attest` against trusted keys (wired 2026-09-10) |
 | `erebus audit` | compliance report: SBOM → **CycloneDX**, attestation → **in-toto** |
@@ -140,7 +140,7 @@ only the stub uses it (with `SAFETY` comments).
 | Fail-closed registry auth | scrypt, default-deny, mutations blocked without token |
 | MCP server registry | `/mcp`, `/mcp/<name>`, `/mcp/<name>/install` |
 | SISR benchmarks | 100 MB payload, 1% change → 1.28 MB delta (**98.7%** measured through the real engine) |
-| Security | zeroization, ANSSI, 2 chaos harnesses **SURVIVED** (30 corruptions + 10 SIGKILLs) |
+| Security | zeroization, ANSSI, 4 chaos harnesses **SURVIVED** (30 corruptions + 10 SIGKILLs + concurrent mixed-protocol load + restart durability) |
 
 Reproducible numbers: [`benchmarks/`](benchmarks/README.md).
 
@@ -158,7 +158,7 @@ Reproducible numbers: [`benchmarks/`](benchmarks/README.md).
 - Commands: `erebus build/run/serve/chat/pull/publish/swap/inspect/layer/
   keygen/sign/verify/trust/attest/audit/lifecycle/dashboard/doctor/scan/env/
   clean/selftest/upgrade/migrate/completion/man`.
-- Chaos: `scripts/chaos_monkey.sh 30` + `scripts/chaos_registry_serve.sh` (must print **SURVIVED**).
+- Chaos: `scripts/chaos_monkey.sh`, `chaos_business.sh`, `chaos_registry_serve.sh`, `chaos_frontends.sh` (all must print **SURVIVED**; frontends includes concurrent mixed-protocol load + restart durability checks).
 
 ---
 

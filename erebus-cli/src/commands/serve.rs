@@ -11,6 +11,8 @@ use sha2::Digest;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::commands::build::NglPolicy;
@@ -62,6 +64,81 @@ pub(crate) struct EngineHandle {
     pub child: std::process::Child,
     pub base_url: String,
     pub model_label: String,
+}
+
+impl Drop for EngineHandle {
+    fn drop(&mut self) {
+        // Never exit while the engine is still alive: an orphan would squat
+        // the bind port until killed by hand. Covers error/early-return paths
+        // in `run()` (failed health wait, wait errors) plus `bail!` unwinds.
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+/// Latched stop signal shared by the wait loops. On unix, SIGTERM/SIGINT
+/// handlers flip the flag instead of letting the default disposition kill the
+/// process instantly — that would orphan the engine and leak the port. The
+/// loops poll the flag, reap the child, and only then let `serve` exit.
+struct StopSignals {
+    flag: Arc<AtomicBool>,
+    #[cfg(unix)]
+    ids: Vec<signal_hook::SigId>,
+}
+
+impl StopSignals {
+    fn install() -> Result<Self> {
+        #[cfg(unix)]
+        let stop = {
+            let flag = Arc::new(AtomicBool::new(false));
+            let ids = install_unix_handlers(&flag)?;
+            StopSignals { flag, ids }
+        };
+        #[cfg(not(unix))]
+        // No signals to forward without a unix kernel: the flag can never
+        // fire, so cleanup is left to EngineHandle's Drop on process exit.
+        let stop = StopSignals::dormant();
+        Ok(stop)
+    }
+
+    /// A stop that can never fire; used by callers that install no handlers
+    /// (`chat`) — identical to the historical wait-forever behaviour.
+    fn dormant() -> Self {
+        StopSignals {
+            flag: Arc::new(AtomicBool::new(false)),
+            #[cfg(unix)]
+            ids: Vec::new(),
+        }
+    }
+
+    fn signaled(&self) -> bool {
+        self.flag.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(unix)]
+fn install_unix_handlers(flag: &Arc<AtomicBool>) -> Result<Vec<signal_hook::SigId>> {
+    // `flag::register` swaps the default SIGTERM/SIGINT disposition for one
+    // that only latches the shared flag, so the process survives the signal
+    // long enough to kill the engine instead of dying and orphaning it.
+    let mut ids = Vec::new();
+    for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
+        let id = signal_hook::flag::register(sig, Arc::clone(flag))
+            .with_context(|| format!("cannot install signal handler for {sig}"))?;
+        ids.push(id);
+    }
+    Ok(ids)
+}
+
+impl Drop for StopSignals {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        for id in &self.ids {
+            signal_hook::low_level::unregister(*id);
+        }
+    }
 }
 
 /// Verify + extract + resolve + launch the bundle's engine (shared by
@@ -336,6 +413,9 @@ pub fn run(args: ServeArgs) -> Result<()> {
         .file
         .canonicalize()
         .context("failed to open bundle file")?;
+    // Reap the engine on SIGTERM/SIGINT instead of the default handler killing
+    // us instantly and orphaning the child (which has the bind port).
+    let stop = StopSignals::install()?;
     let mut eng = start_engine(
         &file,
         &args.host,
@@ -347,11 +427,13 @@ pub fn run(args: ServeArgs) -> Result<()> {
         args.llama_server.as_deref(),
         false,
     )?;
-    wait_healthy(&eng.base_url, &mut eng.child)?;
+    wait_healthy(&eng.base_url, &mut eng.child, &stop)?;
     print_banner(&eng.base_url, Path::new(&eng.model_label));
 
-    let status = eng.child.wait().context("failed to wait for engine")?;
-    if !status.success() {
+    let status = wait_engine(&mut eng.child, &stop)?;
+    // A SIGTERM-initiated teardown kills the engine, so a non-success status
+    // there is expected; only treat a spontaneous engine exit as an error.
+    if !status.success() && !stop.signaled() {
         bail!("engine exited with {status}");
     }
     Ok(())
@@ -469,12 +551,29 @@ fn resolve_ngl(raw: Option<&str>, model_mb: u64) -> u32 {
 
 /// Public alias so `chat` reuses the exact same readiness contract.
 pub(crate) fn wait_healthy_pub(base_url: &str, child: &mut std::process::Child) -> Result<()> {
-    wait_healthy(base_url, child)
+    wait_healthy(base_url, child, &StopSignals::dormant())
+}
+
+/// Block until the engine exits, polling `try_wait` instead of a blocking
+/// `wait()` so a latched stop signal wakes us up to kill the child promptly.
+fn wait_engine(
+    child: &mut std::process::Child,
+    stop: &StopSignals,
+) -> Result<std::process::ExitStatus> {
+    loop {
+        if stop.signaled() {
+            let _ = child.kill();
+        }
+        match child.try_wait()? {
+            Some(status) => return Ok(status),
+            None => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
 }
 
 /// Poll `/health` until llama-server reports ready. Aborts early if the
 /// child dies while we wait (typo in args, missing model, port conflict).
-fn wait_healthy(base_url: &str, child: &mut std::process::Child) -> Result<()> {
+fn wait_healthy(base_url: &str, child: &mut std::process::Child, stop: &StopSignals) -> Result<()> {
     let health = format!("{base_url}/health");
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(2))
@@ -482,6 +581,9 @@ fn wait_healthy(base_url: &str, child: &mut std::process::Child) -> Result<()> {
         .context("failed to build HTTP client")?;
     let start = Instant::now();
     loop {
+        if stop.signaled() {
+            bail!("interrupted by SIGTERM/SIGINT during startup");
+        }
         if child.try_wait()?.is_some() {
             bail!("llama-server exited before becoming healthy (see its output above)");
         }
@@ -511,4 +613,63 @@ fn print_banner(base_url: &str, model: &Path) {
     eprintln!("    -H 'Content-Type: application/json' \\");
     eprintln!(r#"    -d '{{"model":"local","messages":[{{"role":"user","content":"Hello"}}]}}'"#);
     eprintln!();
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    /// Fake engine: a python one-liner that binds `port` and sits on it.
+    fn spawn_fake_engine(port: u16) -> std::process::Child {
+        let script = format!(
+            "import socket,time; s=socket.socket(); \
+             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); \
+             s.bind(('127.0.0.1',{port})); s.listen(1); time.sleep(60)"
+        );
+        std::process::Command::new("python3")
+            .arg("-c")
+            .arg(&script)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    fn wait_until_listening(port: u16) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    /// SIGTERM must wake the blocked wait loop, kill the engine child, and
+    /// free the port it held — the exact failure the chaos harness flagged.
+    #[test]
+    fn sigterm_reaps_engine_and_frees_port() {
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let mut child = spawn_fake_engine(port);
+        assert!(
+            wait_until_listening(port),
+            "fake engine never bound the port"
+        );
+
+        let stop = StopSignals::install().unwrap();
+        // Deliver a real SIGTERM to this process; our handler latches `stop`.
+        let _ = signal_hook::low_level::raise(signal_hook::consts::SIGTERM);
+        let status = wait_engine(&mut child, &stop).unwrap();
+
+        assert!(status.code().is_none(), "engine should die from our kill");
+        assert!(
+            std::net::TcpStream::connect(("127.0.0.1", port)).is_err(),
+            "engine port {port} still bound after SIGTERM"
+        );
+    }
 }
