@@ -291,6 +291,10 @@ pub struct BuildArgs {
     #[arg(short, long, default_value = "app.erebus")]
     pub output: PathBuf,
 
+    /// Overwrite an existing output file instead of refusing (or use --update)
+    #[arg(short, long)]
+    pub force: bool,
+
     /// Signing key path
     #[arg(short, long)]
     pub key: Option<PathBuf>,
@@ -874,6 +878,7 @@ mod tests {
         BuildArgs {
             app: PathBuf::from("."),
             output: PathBuf::from("app.erebus"),
+            force: false,
             target: None,
             universal: false,
             isolation: "sandbox".into(),

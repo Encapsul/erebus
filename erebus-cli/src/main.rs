@@ -19,6 +19,7 @@ use std::process::ExitCode;
 #[command(
     name = "erebus",
     version,
+    propagate_version = true,
     about = "Package any app into a single self-extracting binary",
     long_about = "erebus packages any application into a single self-extracting ELF binary.\n\nSupported runtimes: Python, Node.js, Go, and static binaries.\nBuild, sign, attest, and serve AI agent bundles from one file.\n\nExamples:\n  erebus build ./myapp -o myapp.erebus\n  erebus run myapp.erebus\n  erebus inspect myapp.erebus\n  erebus keygen\n  erebus sign myapp.erebus --key ~/.erebus/keys/*.key\n  erebus verify myapp.erebus\n  erebus attest myapp.erebus --key ~/.erebus/keys/*.key\n  erebus audit myapp.erebus\n  erebus doctor\n  erebus scan .\n  erebus serve agent.erebus --port 8080\n  erebus chat agent.erebus\n  erebus completion bash >> ~/.bashrc\n  erebus completion zsh >> ~/.zshrc\n  erebus completion fish > ~/.config/fish/completions/erebus.fish\n\nDocumentation: https://github.com/Tednoob17/erebus\nReport bugs: https://github.com/Tednoob17/erebus/issues\n\nUninstall: rm $(which erebus) && rm -rf ~/.cache/erebus ~/.local/share/erebus"
 )]
@@ -50,6 +51,8 @@ enum Commands {
     ///   erebus build ./myapp --encrypt --key ~/.erebus/keys/*.key
     ///     (--encrypt is obfuscation-only: the decryption key is embedded in
     ///      the metadata, so a determined attacker can always extract the app)
+    ///   erebus build ./myapp --force       # overwrite existing output
+    ///   erebus build ./myapp --update      # incremental rebuild (no guard)
     ///   erebus build ./myapp --health-port 8081
     ///   erebus build ./myapp --persist --env-file .env
     Build(Box<commands::build::BuildArgs>),

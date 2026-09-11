@@ -923,7 +923,7 @@ pub(crate) fn build_single_target(
             if verbose {
                 eprintln!("Signing...");
             }
-            crate::commands::sign::sign_file(output, key_path, !verbose)?;
+            crate::commands::sign::sign_file(output, key_path, !verbose, false)?;
         }
     }
 

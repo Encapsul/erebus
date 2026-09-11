@@ -176,7 +176,7 @@ fn post_swap_cleanup(out_path: &Path, footer: &format::Footer, key: &Option<Path
     if footer.is_signed() {
         match key {
             Some(k) => {
-                if let Err(e) = super::sign::sign_file(&out_path.to_path_buf(), k, true) {
+                if let Err(e) = super::sign::sign_file(&out_path.to_path_buf(), k, true, false) {
                     eprintln!("[erebus] warning: re-signing failed: {e}");
                 }
             }

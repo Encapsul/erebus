@@ -20,7 +20,7 @@ pub struct SignArgs {
     #[arg(short, long)]
     pub quiet: bool,
 
-    /// Force overwrite without confirmation
+    /// Re-sign an already-signed file (key rotation) without confirmation
     #[arg(short, long)]
     pub force: bool,
 
@@ -62,7 +62,7 @@ pub fn run(args: SignArgs) -> Result<()> {
         }
     }
 
-    sign_file(&args.file, &key_path, args.quiet)?;
+    sign_file(&args.file, &key_path, args.quiet, args.force)?;
 
     if args.json {
         let info = serde_json::json!({
@@ -84,9 +84,15 @@ fn is_interactive() -> bool {
 /// Sign a `.erebus` file in-place with the given key. Used by both `erebus sign`
 /// and `erebus build --key`.
 ///
+/// When `force` is true an already-signed file is re-signed — the old signature
+/// block is discarded and a fresh one covers the same payload and metadata with
+/// the new key. Enables key rotation; without `--force` a signed file is left
+/// untouched (re-signing must be explicit, or an attacker could silently swap
+/// the trust anchor).
+///
 /// Write is atomic: a temp file is created in the same directory and
 /// renamed over the source only after the new content is fully flushed.
-pub fn sign_file(file: &PathBuf, key_path: &PathBuf, quiet: bool) -> Result<()> {
+pub fn sign_file(file: &PathBuf, key_path: &PathBuf, quiet: bool, force: bool) -> Result<()> {
     let key_bytes = Zeroizing::new(
         std::fs::read(key_path)
             .with_context(|| format!("failed to read signing key at {}", key_path.display()))?,
@@ -104,8 +110,8 @@ pub fn sign_file(file: &PathBuf, key_path: &PathBuf, quiet: bool) -> Result<()> 
     let mut cursor = std::io::Cursor::new(&original);
     let mut footer = Footer::read_from(&mut cursor).context("failed to read erebus footer")?;
 
-    if footer.is_signed() {
-        anyhow::bail!("file is already signed");
+    if footer.is_signed() && !force {
+        anyhow::bail!("file is already signed (pass --force to re-sign with a different key)");
     }
     if footer.has_sisr() {
         // `--enable-sisr` already signs the delta manifest with `--key`;

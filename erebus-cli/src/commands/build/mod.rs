@@ -106,6 +106,19 @@ pub fn run(args: BuildArgs, verbose: bool) -> Result<()> {
         return Ok(());
     }
 
+    // clig.dev: destructive overwrite requires explicit consent. Refuse to
+    // clobber an existing artifact unless `--force` was given; `--update` is
+    // the sanctioned in-place path (it reads the existing file's hashes).
+    if !args.force && !args.update {
+        if let Some(existing) = plan.outputs.iter().find(|p| p.exists()) {
+            anyhow::bail!(
+                "output {} already exists (pass --force to overwrite, or --update \
+                 for an incremental rebuild)",
+                existing.display()
+            );
+        }
+    }
+
     // Universal mode replaces the per-target artifact loop: one polyglot
     // file containing a slice per matrix entry.
     if args.universal {
