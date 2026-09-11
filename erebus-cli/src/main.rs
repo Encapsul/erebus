@@ -81,6 +81,13 @@ enum Commands {
     /// plaintext — only a SHA-256 hash is recorded.
     Attest(commands::attest::AttestArgs),
 
+    /// Query your execution attestation trail from a registry
+    ///
+    /// Examples:
+    ///   erebus attest-history --registry <http://host:8080> --token "$TOKEN"
+    ///   erebus attest-history --query 'bundle=sha256:abc…,until=2026-09-30'
+    AttestHistory(commands::attest_history::AttestHistoryArgs),
+
     /// Generate or verify a signed compliance audit report
     ///
     /// Aggregates attestations, SBOM, and integrity info into a single
@@ -315,6 +322,7 @@ fn main() -> ExitCode {
             }
             commands::attest::run(args)
         }
+        Commands::AttestHistory(args) => commands::attest_history::run(args),
         Commands::Audit(mut args) => {
             if cli.quiet {
                 args.quiet = true;

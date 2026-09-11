@@ -303,6 +303,68 @@ def upload_known(url: str, auth: str) -> None:
         raise SystemExit(f"differential seed upload failed: {code} {resp[:80]}")
 
 
+def attest_roundtrip(url: str, auth: str) -> list[str]:
+    anomalies = []
+    # fuzz_registry.http raises on 4xx; the hostile probes below expect a 400,
+    # so wrap calls that may legitimately fail.
+    def try_http(*a, **k):
+        try:
+            return http(*a, **k)
+        except urllib.error.HTTPError as e:
+            return e.code, e.read()
+
+    att = {
+        "spec_version": "0.5", "attestation_type": "erebus-execution",
+        "artifact": {"bundle_hash": "sha256:aa", "payload_hash": "sha256:bb",
+                     "metadata_hash": "sha256:cc", "format_version": 5, "flags": ["signed"]},
+        "provenance": {"builder": "erebus", "layers": []},
+        "execution": {"attested_at": "2026-09-11T00:00:00+00:00",
+                      "machine_id_hash": "sha256:mm", "os": "linux", "arch": "x86_64"},
+        "statement": {"_type": "https://in-toto.io/Statement/v1",
+                      "predicateType": "https://slsa.dev/provenance/v1",
+                      "subject": [{"name": "x", "digest": {"sha256": "aa"}}]},
+        "signature": {"algorithm": "ed25519", "key_fingerprint": "fp",
+                      "signature_hex": "0" * 128},
+    }
+    code, resp = http(url + "/attestations", data=json.dumps(att).encode(),
+                      headers={"Content-Type": "application/json", "Authorization": auth})
+    if code not in (200, 201):
+        anomalies.append(f"attest publish failed: {code} {resp[:80]}")
+        return anomalies
+    code, resp = http(url + "/attestations?bundle=sha256:aa",
+                      headers={"Authorization": auth})
+    if code != 200:
+        anomalies.append(f"attest query failed: {code}")
+    else:
+        try:
+            page = json.loads(resp)
+        except ValueError:
+            anomalies.append("attest query returned non-JSON")
+            page = {}
+        if not page.get("total"):
+            anomalies.append("attest query for known bundle returned 0 records")
+    code, resp = http(url + "/attestations?bundle=sha256:nope",
+                      headers={"Authorization": auth})
+    if code == 200:
+        try:
+            page = json.loads(resp)
+        except ValueError:
+            return anomalies
+        if page.get("total"):
+            anomalies.append("attest query leaked a non-matching record")
+    bad = dict(att)
+    del bad["artifact"]
+    code, resp = try_http(url + "/attestations", data=json.dumps(bad).encode(),
+                          headers={"Content-Type": "application/json", "Authorization": auth})
+    if code != 400:
+        anomalies.append(f"attest accepted a malformed document: {code}")
+    code, resp = try_http(url + "/attestations", data=b"not json",
+                          headers={"Content-Type": "application/json", "Authorization": auth})
+    if code != 400:
+        anomalies.append(f"attest accepted a junk body: {code}")
+    return anomalies
+
+
 def check_range(url: str, spec: str, auth: str | None = None) -> list[str]:
     anomalies = []
     data = KNOWN["body"]
@@ -487,6 +549,7 @@ def storm(seconds: int, workers_n: int, port: int) -> list[str]:
             return ANOMALIES
         auth = f"Bearer {token}"
         upload_known(url, auth)
+        ANOMALIES.extend(attest_roundtrip(url, auth))
         counts = [0]
         threads = []
         for _ in range(max(1, workers_n - 4)):

@@ -504,8 +504,10 @@ class Store:
         self.webhooks_path = os.path.join(root, "webhooks.json")
         self.usage_dir = os.path.join(root, "usage")
         self.mcp_dir = os.path.join(root, "mcp")
-        for d in (self.pkg_dir, self.meta_dir, self.usage_dir, self.mcp_dir):
+        self.attest_dir = os.path.join(root, "attestations")
+        for d in (self.pkg_dir, self.meta_dir, self.usage_dir, self.mcp_dir, self.attest_dir):
             os.makedirs(d, exist_ok=True)
+        self.attest_path = os.path.join(self.attest_dir, "attestations.jsonl")
         self.users_path = os.path.join(root, "users.json")
         self.stats_path = os.path.join(root, "stats.json")
         self.waitlist_path = os.path.join(root, "waitlist.txt")
@@ -876,6 +878,16 @@ class Store:
                 raw = f.read()
         except OSError:
             return out
+        for line in raw.splitlines():
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue  # torn tail write from a crashed process
+            if actor is not None and rec.get("actor") == actor and "org" not in rec:
+                out.append(rec)
+            elif org is not None and rec.get("org") == org:
+                out.append(rec)
+        return out
 
     def add_webhook(self, url: str) -> None:
         with self.lock:
@@ -893,16 +905,116 @@ class Store:
     def list_webhooks(self) -> list[str]:
         with self.lock:
             return self._load(self.webhooks_path, [])
-        for line in raw.splitlines():
+
+    # ---- attestations -----------------------------------------------------
+    def record_attestation(self, owner: str, att: dict) -> tuple[bool, str, bool]:
+        """Append one execution attestation to the append-only journal.
+
+        Validate the in-toto shape fail-closed, derive a content id, and write
+        idempotently (a re-post of the same attestation returns the same id).
+        Returns (ok, id_or_err, already_recorded).
+        """
+        if not isinstance(att, dict):
+            return False, "attestation must be a JSON object", False
+        sig = att.get("signature")
+        art = att.get("artifact")
+        exe = att.get("execution")
+        if not (isinstance(sig, dict) and isinstance(art, dict) and isinstance(exe, dict)):
+            return False, "attestation missing signature/artifact/execution object", False
+        if not (sig.get("signature_hex") and sig.get("key_fingerprint")):
+            return False, "signature.signature_hex and key_fingerprint are required", False
+        att_id = att.get("attestation_id") or att.get("id") or ""
+        bundle = str(art.get("bundle_hash") or "")
+        machine = str(exe.get("machine_id_hash") or "")
+        if not bundle:
+            return False, "artifact.bundle_hash is required", False
+        if not machine:
+            return False, "execution.machine_id_hash is required", False
+        if not att_id:
+            att_id = hashlib.sha256(json.dumps(att, sort_keys=True).encode()).hexdigest()[:16]
+        rec = {
+            "id": att_id,
+            "owner": owner,
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "bundle": bundle,
+            "machine": machine,
+            "os": str(exe.get("os") or ""),
+            "arch": str(exe.get("arch") or ""),
+            "attested_at": str(exe.get("attested_at") or ""),
+            "key_fp": str(sig.get("key_fingerprint") or ""),
+            "attestation": att,
+        }
+        with self.lock:
+            if self._attestation_exists(att_id):
+                return True, att_id, True
+            data = json.dumps(rec).encode() + b"\n"
+            with open(self.attest_path, "ab") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                try:
+                    f.write(data)
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        self.record_audit(owner, "attestation_published", att_id)
+        self.record_replication_event("upsert_attestation", att_id, {
+            "bundle": bundle,
+            "machine": machine,
+            "attested_at": rec["attested_at"],
+            "owner": owner,
+        })
+        return True, att_id, False
+
+    def _attestation_exists(self, att_id: str) -> bool:
+        try:
+            with open(self.attest_path, "rb") as f:
+                content = f.read()
+        except OSError:
+            return False
+        for line in content.splitlines():
+            if not line.strip():
+                continue
+            try:
+                if json.loads(line).get("id") == att_id:
+                    return True
+            except ValueError:
+                continue  # torn tail write from a crashed process
+        return False
+
+    def query_attestations(self, owner: str, filters: dict, limit: int, skip: int) -> tuple[int, list[dict]]:
+        """Chronological page of <owner>'s attestations matching AND-ed filters.
+
+        Filters are bundle, machine, since, until. Only the caller's own
+        records are ever returned — fail-closed personal trail. Attested-at
+        ISO timestamps compare lexicographically as long as every producer
+        emits the same timezone-aware format (the stub/CLI do).
+        """
+        total = 0
+        page: list[dict] = []
+        try:
+            with open(self.attest_path, "rb") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            return total, page
+        for line in lines:
+            if not line.strip():
+                continue
             try:
                 rec = json.loads(line)
             except ValueError:
                 continue  # torn tail write from a crashed process
-            if actor is not None and rec.get("actor") == actor and "org" not in rec:
-                out.append(rec)
-            elif org is not None and rec.get("org") == org:
-                out.append(rec)
-        return out
+            if rec.get("owner") != owner:
+                continue
+            if filters.get("bundle") and rec.get("bundle") != filters["bundle"]:
+                continue
+            if filters.get("machine") and rec.get("machine") != filters["machine"]:
+                continue
+            if filters.get("since") and rec.get("attested_at") < filters["since"]:
+                continue
+            if filters.get("until") and rec.get("attested_at") > filters["until"]:
+                continue
+            total += 1
+            if total > skip and len(page) < limit:
+                page.append(rec)
+        return total, page
 
     # ---- packages ---------------------------------------------------------
     def set_meta(self, fname: str, owner: str | None, private: bool, deleted: bool = False, deleted_at: str | None = None):
@@ -1620,6 +1732,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._replicate_index()
         if path.startswith("/replicate/blob/"):
             return self._replicate_blob(path[len("/replicate/blob/"):])
+        if path == "/attestations":
+            return self._attest_query()
         if path == "/stats":
             return self.send_json(self.store.stats())
         if path == "/index.json":
@@ -2137,6 +2251,9 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             body = self.read_body(2048)
             return self._org_member_add(urllib.parse.unquote(m.group(1)), body)
+        if path == "/attestations":
+            body = self.read_body(1_000_000)
+            return self._attest_publish(body)
         if path == "/" or path.startswith("/packages/"):
             return self._upload()
         self.send_json({"error": "not found"}, 404)
@@ -2174,6 +2291,41 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": msg}, 400)
         self.store.record_audit(username, "register")
         return self.send_json({"username": username, "token": msg})
+
+    # ---- attestations echo ------------------------------------------------
+    def _attest_publish(self, raw: bytes | None):
+        # Fail-closed: attestation uploads require a valid token and a well-
+        # formed in-toto document. Idempotent re-posts return the same id.
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        att = self._read_json(raw)
+        if att is None:
+            return self.send_json({"error": "invalid json"}, 400)
+        ok, id_or_err, already = self.store.record_attestation(user, att)
+        if not ok:
+            return self.send_json({"error": id_or_err}, 400)
+        return self.send_json({"id": id_or_err, "recorded": not already}, 200 if already else 201)
+
+    def _attest_query(self):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        qs = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+        try:
+            limit = min(int((qs.get("limit") or ["100"])[0]), 1000)
+            skip = max(0, int((qs.get("skip") or ["0"])[0]))
+        except ValueError:
+            return self.send_json({"error": "limit/skip must be integers"}, 400)
+        filters = {}
+        for key in ("bundle", "machine", "since", "until"):
+            vals = qs.get(key)
+            if vals:
+                filters[key] = vals[0]
+        # Personal trail: a caller may only read back what they published.
+        # Other accounts' trails stay invisible (default-deny compliance trail).
+        total, page = self.store.query_attestations(user, filters, limit, skip)
+        return self.send_json({"owner": user, "total": total, "records": page})
 
     # ---- json body helper ---------------------------------------------------
     def _read_json(self, raw: bytes | None) -> dict | None:

@@ -214,13 +214,16 @@ attestation chain must cover more than the current build-time flow.
    capture at minimum an output_hash and input_hash in the attestation if
    available, signed by the agent's key (not just the build key).
 
-2. **Attestation registry storage + queryable history** — attestations currently
-   land as `.erebus.attest` files on disk. An auditor cannot run
-   "show me all executions of agent X last week". For EU AI Act / SOC 2
-   compliance trails, attestations must be stored in the registry and queryable.
-   → P2: wire attestation upload to registry server (`/attestations`), store
-   in audit log, provide `erebus attest-history --query ...` CLI. This closes
-   the loop between runtime attestation and the hosted compliance trail.
+- [x] **Attestation registry storage + queryable history** — attestations land
+   as `.erebus.attest` files on disk; an auditor can now run "show me all
+   executions of agent X last week" against the hosted registry. For EU AI Act /
+   SOC 2 compliance trails, attestations are stored append-only and queryable.
+   Wired end-to-end: server `POST/GET /attestations` (append-only JSONL under
+   the user's own dir, idempotent re-post → 200, owner-scoped fail-closed
+   queries), `erebus attest --push` (sign + upload), `erebus attest-history
+   --query 'bundle=sha256:…,machine=…,since=…,until=…' --registry --token`, and
+   audit-log entries with replication. Tested: server live (201/200/401/400 +
+   filters), CLI integration tests against an HTTP stub, fuzz storm round-trip.
 
 3. **TEE / zkML — higher proof levels** (out of scope for current ICP, keep as future option):
 
@@ -464,13 +467,14 @@ All P2 items implemented in `erebus-core` **and wired to user-facing surfaces**:
   findings feed `scan_results`. **Wired**: `erebus scan --cve
   [--json|--plain]` (verified end-to-end: flags `requests==2.25.0`, skips
   patched `urllib3==2.2.1`). Tested: 6 tests.
-- **Attestation registry storage + queryable history** — attestations currently
-  land as `.erebus.attest` files on disk (manual). For EU AI Act / SOC 2
-  compliance trails, attestations must be stored in the registry and queryable
-  ("show me all executions of agent X last week"). This closes the loop between
-  runtime attestation and the hosted compliance trail.
-  **Not wired**: requires server endpoint `/attestations` + client CLI
-  `erebus attest-history --query ...` + audit log integration.
+- [x] **Attestation registry storage + queryable history** — attestations land
+  as `.erebus.attest` files on disk and are now pushable to the hosted registry
+  (EU AI Act / SOC 2 compliance trails: "show me all executions of agent X last
+  week"). **Wired**: server `/attestations` (append-only JSONL, idempotent
+  re-post, owner-scoped fail-closed queries), client `erebus attest --push`
+  + `erebus attest-history --query bundle=…|machine=…|since=…|until=…`
+  + audit log integration with replication. Tested: server live, CLI
+  integration tests vs HTTP stub, fuzz storm round-trip.
 
 ### 🔵 P3 — Multi-protocol frontends (Shardline-like)
 
@@ -559,11 +563,11 @@ The claim "Cryptographic proof of AI agent execution" covers:
   acknowledge this scope: "We prove the execution happened, unaltered, on the
   right machine" — not "We prove the agent did the right thing."
 
-- **What is NOT yet automatic (P0 closed, P2 open)**: the stub auto-attestation
+- **What is NOT yet automatic (P0 closed, P2 closed)**: the stub auto-attestation
   is implemented (`ERE_ATTEST_KEY` env var → `write_execution_attestation`),
   but it is opt-in — without the env var, the operator must run `erebus attest`
-  after execution. The registry attestation storage + queryable history is still
-  not wired.
+  after execution. The registry attestation storage + queryable history is now
+  wired (`erebus attest --push` + `erebus attest-history`).
 
 **Machines / environments the claim covers:**
 - Linux x86_64 + aarch64: full sandbox + attestation via `ERE_ATTEST_KEY`

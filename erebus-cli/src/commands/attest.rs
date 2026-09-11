@@ -19,6 +19,22 @@ pub struct AttestArgs {
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 
+    /// Push the attestation to a registry (needs --registry + a token)
+    #[arg(long)]
+    pub push: bool,
+
+    /// Registry base URL (for --push)
+    #[arg(long, env = "ERE_REGISTRY")]
+    pub registry: Option<String>,
+
+    /// Bearer token sent to the registry (prefer --token-file for secrets)
+    #[arg(long, env = "ERE_TOKEN")]
+    pub token: Option<String>,
+
+    /// Path to a file containing the bearer token (preferred over --token)
+    #[arg(long)]
+    pub token_file: Option<PathBuf>,
+
     /// Quiet output
     #[arg(short, long)]
     pub quiet: bool,
@@ -74,6 +90,47 @@ pub fn run(args: AttestArgs) -> Result<()> {
         eprintln!("  key:    {}", key_path.display());
     }
 
+    if args.push {
+        let registry = args.registry.clone().ok_or_else(|| {
+            anyhow::anyhow!("--push requires --registry (or ERE_REGISTRY env var)")
+        })?;
+        let registry = registry.trim_end_matches('/').to_string();
+        let token = resolve_token(args.token.as_deref(), args.token_file.as_deref())?;
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .context("failed to build HTTP client")?;
+        let mut req = client
+            .post(format!("{registry}/attestations"))
+            .header("Content-Type", "application/json")
+            .body(json_bytes.clone());
+        if let Some(ref t) = token {
+            req = req.header("Authorization", format!("Bearer {t}"));
+        }
+        let resp = req
+            .send()
+            .context("failed to reach registry")?
+            .error_for_status()
+            .with_context(|| format!("registry rejected attestation at {registry}"))?;
+        let status = resp.status();
+        let body: serde_json::Value = resp.json().context("invalid registry response")?;
+        let id = body.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+        if args.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "id": id,
+                    "status": status.as_u16(),
+                    "recorded": body.get("recorded"),
+                }))?
+            );
+        } else if !args.quiet {
+            eprintln!("Pushed attestation to {registry}");
+            eprintln!("  id:      {}", id);
+            eprintln!("  status:  {}", status);
+        }
+    }
+
     Ok(())
 }
 
@@ -99,4 +156,18 @@ fn resolve_key_path(key: &Option<PathBuf>) -> Result<PathBuf> {
             dir.display()
         )
     }
+}
+
+fn resolve_token(
+    token: Option<&str>,
+    token_file: Option<&std::path::Path>,
+) -> Result<Option<String>> {
+    if let Some(path) = token_file {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read token file {}", path.display()))?;
+        return Ok(Some(content.trim().to_string()));
+    }
+    Ok(token
+        .map(String::from)
+        .or_else(|| std::env::var("ERE_TOKEN").ok()))
 }

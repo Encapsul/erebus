@@ -1,4 +1,5 @@
 pub mod attest;
+pub mod attest_history;
 pub mod audit;
 pub mod audit_log;
 pub mod backup;

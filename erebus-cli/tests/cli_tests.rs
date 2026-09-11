@@ -817,3 +817,73 @@ fn test_build_engine_embeds_runtime() {
         "engine build ({with_engine} B) must be larger than plain ({without_engine} B)"
     );
 }
+
+fn attest_http_stub(payload: &str) -> (u16, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let body = payload.to_string();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let n = stream.read(&mut buf).unwrap();
+        let request = String::from_utf8_lossy(&buf[..n]).to_string();
+        assert!(
+            request.contains("GET /attestations?")
+                && request
+                    .to_lowercase()
+                    .contains("authorization: bearer s3cr3t"),
+            "unexpected request: {request}"
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+    (port, handle)
+}
+
+#[test]
+fn test_attest_history_query() {
+    let payload = r#"{"owner":"alice","total":2,"records":[{"id":"ec7408c48f595fed","attested_at":"2026-09-11T00:00:00Z","bundle":"sha256:aa","machine":"sha256:mm","os":"linux","arch":"x86_64","key_fp":"fp","attestation":{"spec_version":"0.5"}},{"id":"bee5","attested_at":"2026-09-10T00:00:00Z","bundle":"sha256:bb","machine":"sha256:mm","os":"linux","arch":"x86_64","key_fp":"fp","attestation":{"spec_version":"0.5"}}]}"#;
+    let (port, handle) = attest_http_stub(payload);
+    erebus()
+        .args([
+            "attest-history",
+            "--registry",
+            &format!("http://127.0.0.1:{port}"),
+            "--token",
+            "s3cr3t",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2 attestation(s)"))
+        .stdout(predicate::str::contains("ec7408c48f595fed"));
+    handle.join().unwrap();
+}
+
+#[test]
+fn test_attest_history_rejects_unknown_query_key() {
+    erebus()
+        .args([
+            "attest-history",
+            "--registry",
+            "http://127.0.0.1:1",
+            "--query",
+            "package=foo",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown query key"));
+}
+
+#[test]
+fn test_attest_history_requires_registry() {
+    erebus()
+        .args(["attest-history"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--registry"));
+}
