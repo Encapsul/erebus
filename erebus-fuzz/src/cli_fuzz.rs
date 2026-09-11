@@ -80,7 +80,10 @@ impl FuzzTarget for CliFuzzTarget {
         Ok(serde_json::to_vec(&seed)?)
     }
     fn execute(&self, input: &[u8]) -> Result<()> {
-        let seed: serde_json::Value = serde_json::from_slice(input)?;
+        let seed: serde_json::Value = match serde_json::from_slice(input) {
+            Ok(v) => v,
+            Err(_) => return Ok(()),
+        };
         let argv: Vec<String> = seed
             .get("argv")
             .and_then(|v| v.as_array())

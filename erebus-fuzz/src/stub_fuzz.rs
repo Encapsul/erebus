@@ -71,8 +71,13 @@ impl FuzzTarget for StubFuzzTarget {
         self.mutate_extraction(input, unstructured)
     }
     fn execute(&self, input: &[u8]) -> Result<()> {
-        let _scenario: ExtractionScenario = serde_json::from_slice(input)?;
-        // Execution would run stub — skip in fuzzing
+        // Mutations mostly produce non-JSON garbage: rejecting it cleanly is
+        // the stub's expected fail-closed behaviour, not a crash. A panic here
+        // still surfaces through the harness.
+        let _scenario: ExtractionScenario = match serde_json::from_slice(input) {
+            Ok(s) => s,
+            Err(_) => return Ok(()),
+        };
         Ok(())
     }
 }

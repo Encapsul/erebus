@@ -416,6 +416,10 @@ async fn worker_loop(
             Ok(Ok(Err(e))) => {
                 global_stats.record_crash(&format!("{}:{}", target_name, e));
             }
+            Ok(Err(e)) if e.is_panic() => {
+                global_stats.record_panic();
+                global_stats.record_crash(&format!("{}:panic", target_name));
+            }
             Ok(Err(e)) => {
                 global_stats.record_crash(&format!("{}:join error:{}", target_name, e));
             }

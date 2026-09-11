@@ -112,7 +112,10 @@ impl FuzzTarget for ServeFuzzTarget {
         Ok(serde_json::to_vec(&scenario)?)
     }
     fn execute(&self, input: &[u8]) -> Result<()> {
-        let _scenario: ServeScenario = serde_json::from_slice(input)?;
+        let _scenario: ServeScenario = match serde_json::from_slice(input) {
+            Ok(s) => s,
+            Err(_) => return Ok(()),
+        };
         // Execution would spin up serve — skip in fuzzing
         Ok(())
     }

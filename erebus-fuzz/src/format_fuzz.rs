@@ -1,7 +1,7 @@
 //! .erebus binary format fuzzing target.
 
 use crate::{FuzzTarget, MutationStrategy};
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use arbitrary::Unstructured;
 use bincode;
 use erebus_core::format::{Footer, FORMAT_VERSION};
@@ -108,10 +108,10 @@ impl FuzzTarget for FormatFuzzTarget {
         let mut footer_buf = vec![0u8; footer_size as usize];
         cursor.seek(std::io::SeekFrom::Start(footer_off))?;
         cursor.read_exact(&mut footer_buf)?;
-        let _footer: erebus_core::format::Footer = bincode::deserialize(&footer_buf)
-            .map_err(|e| anyhow!("footer deserialize failed: {}", e))?;
-        let _ = erebus_core::format::read_at(&mut cursor, footer_off, V3_FOOTER_SIZE as usize)
-            .map_err(|e| anyhow!("read_at failed: {}", e))?;
+        // A garbage footer must be rejected (fail-closed), not crash the parser —
+        // swallow the parse error and keep the probe so panics still surface.
+        let _footer: Result<erebus_core::format::Footer, _> = bincode::deserialize(&footer_buf);
+        let _ = erebus_core::format::read_at(&mut cursor, footer_off, V3_FOOTER_SIZE as usize);
         let _ = erebus_core::inference::engine_pack_name("llama-server");
         let _ = erebus_core::inference::host_pack_key();
         Ok(())

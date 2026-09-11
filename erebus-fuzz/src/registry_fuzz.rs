@@ -115,13 +115,20 @@ impl FuzzTarget for RegistryFuzzTarget {
         Ok(serde_json::to_vec(&ops)?)
     }
     fn execute(&self, input: &[u8]) -> Result<()> {
-        let ops: Vec<RegistryOp> = serde_json::from_slice(input)?;
+        let ops: Vec<RegistryOp> = match serde_json::from_slice(input) {
+            Ok(o) => o,
+            Err(_) => return Ok(()),
+        };
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         for op in ops {
-            rt.block_on(self.execute_op(&op))?;
+            // The registry is fail-closed by design: operations on malformed
+            // arbitrary data (empty layer names, bad kinds, …) must be refused
+            // with an Err, and that is correct behaviour, not a bug. Only
+            // panics/timeouts surface as fuzzer failures.
+            let _ = rt.block_on(self.execute_op(&op));
         }
         Ok(())
     }

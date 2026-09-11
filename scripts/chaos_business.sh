@@ -60,7 +60,7 @@ done
 check "wrong password consistently 401 (x3)" $?
 
 echo "── [2/7] private packages"
-AUTH="Authorization: Bearer alice:$ALICE_TOKEN"
+AUTH="Authorization: Bearer $ALICE_TOKEN"
 timeout 60 env ERE_REGISTRY="$R" ERE_TOKEN="$ALICE_TOKEN" "$ERE" publish "$WORK/tiny.erebus" >"$WORK/pub.log" 2>&1 || {
   echo "    [publish stderr]"; tail -2 "$WORK/pub.log" | sed 's/^/      /'
 }
@@ -73,7 +73,7 @@ check "anonymous pull of private → 401" $?
 rm -f "$WORK/p1.erebus"
 timeout 60 env ERE_REGISTRY="$R" ERE_TOKEN="$ALICE_TOKEN" "$ERE" pull tiny -o "$WORK/p1.erebus" >/dev/null 2>&1
 cmp -s "$WORK/tiny.erebus" "$WORK/p1.erebus"; check "pull with bare token byte-identical" $?
-expect_code 401 -H "Authorization: Bearer alice:deadbeef$ALICE_TOKEN" "$R/packages/tiny.erebus"
+expect_code 401 -H "Authorization: Bearer deadbeef$ALICE_TOKEN" "$R/packages/tiny.erebus"
 check "corrupted bearer token → 401" $?
 
 echo "── [3/7] quota exhaustion (quota = 77 MB, tiny bundle ≈ 18.3 MB)"
@@ -119,7 +119,7 @@ def upload(i):
            + payload + f"\r\n--{b}--\r\n".encode()
     req = urllib.request.Request(reg+"/", data=body, method="POST",
         headers={"Content-Type": f"multipart/form-data; boundary={b}",
-                 "Authorization": f"Bearer alice:{TOK}"})
+                 "Authorization": f"Bearer {TOK}"})
     try:
         with urllib.request.urlopen(req, timeout=120) as r:
             ok = (r.status == 200)
@@ -173,7 +173,7 @@ def churn():
                + payload + f"\r\n--{b}--\r\n".encode()
         req = urllib.request.Request(reg+"/", data=body, method="POST",
             headers={"Content-Type": f"multipart/form-data; boundary={b}",
-                     "Authorization": f"Bearer alice:{TOK}"})
+                     "Authorization": f"Bearer {TOK}"})
         try: urllib.request.urlopen(req, timeout=60)
         except Exception: pass
 threading.Thread(target=churn, daemon=True).start()
@@ -183,7 +183,7 @@ valid = set()
 for i in range(12):
     try:
         req_read = urllib.request.Request(reg+"/packages/churn.erebus",
-            headers={"Authorization": f"Bearer alice:{TOK}",
+            headers={"Authorization": f"Bearer {TOK}",
                      "Range": "bytes=0-1023"})
         data = urllib.request.urlopen(req_read, timeout=60).read()
         valid.add(hashlib.sha256(data).hexdigest())

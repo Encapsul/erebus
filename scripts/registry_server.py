@@ -911,14 +911,21 @@ class Store:
                 os.path.join(self.meta_dir, fname + ".json"),
                 json.dumps({"owner": owner, "private": private, "deleted": deleted, "deleted_at": deleted_at}).encode(),
             )
-            # Replication event
+            # Replication event. The package file may be missing (meta-only or
+            # half-created upload); tolerate it rather than leaking an OSError.
+            pkg_path = os.path.join(self.pkg_dir, fname)
+            if os.path.isfile(pkg_path):
+                pkg_sha = self.sha256_cached(pkg_path)
+                pkg_size = os.path.getsize(pkg_path)
+            else:
+                pkg_sha, pkg_size = "", 0
             meta = self.get_meta(fname)
             self.record_replication_event(
                 "upsert_artifact",
                 fname,
                 {
-                    "sha256": self.sha256_cached(os.path.join(self.pkg_dir, fname)),
-                    "size": os.path.getsize(os.path.join(self.pkg_dir, fname)),
+                    "sha256": pkg_sha,
+                    "size": pkg_size,
                     "at": datetime.now(timezone.utc).isoformat(),
                     "private": private,
                     "deleted": deleted,
