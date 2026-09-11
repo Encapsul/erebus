@@ -29,6 +29,16 @@ expect_fail() { # command must exit non-zero
   if "$@" >/dev/null 2>&1; then return 1; else return 0; fi
 }
 
+# SIGKILL a background job and its whole subtree (children first). A bare
+# `kill -9 $pid` orphans the spawned engine, which then keeps the serve port
+# bound forever. Works whether the shell gives each job its own process group
+# (job control on) or all jobs share the harness pgrp (job control off).
+desc_kill() {
+  local pid=$1 c
+  for c in $(ps -o pid= --ppid "$pid" 2>/dev/null); do desc_kill "$c"; done
+  kill -9 "$pid" 2>/dev/null || true
+}
+
 echo "── [0/6] fixtures: bundle + fake engine + two registries"
 APP="$WORK/app"; mkdir -p "$APP"
 printf 'print("x")\n' > "$APP/app.py"
@@ -47,7 +57,7 @@ ThreadingHTTPServer(('127.0.0.1', port), H).serve_forever()
 EOF
 chmod +x "$WORK/fake-engine"
 mkdir -p "$WORK/reg/packages"
-setsid python3 "$HERE/registry_server.py" --dir "$WORK/reg" --host 127.0.0.1 --port $REG_PORT \
+python3 "$HERE/registry_server.py" --dir "$WORK/reg" --host 127.0.0.1 --port $REG_PORT \
   --allow-anon-uploads \
   > "$WORK/reg.log" 2>&1 < /dev/null &
 sleep 1.5
@@ -97,7 +107,7 @@ FULL_SIZE=$(stat -c%s "$WORK/tiny.erebus")
 cat > "$WORK/static/index.json" <<EOF
 {"packages":[{"name":"tiny","file":"tiny.erebus","sha256":"$TRUNC_SHA","size":$FULL_SIZE}]}
 EOF
-(cd "$WORK/static" && setsid python3 -m http.server $STATIC_PORT >/dev/null 2>&1 < /dev/null &)
+python3 -m http.server $STATIC_PORT --directory "$WORK/static" >/dev/null 2>&1 < /dev/null &
 sleep 1
 rm -f "$WORK/lying.erebus"
 expect_fail timeout 60 env ERE_REGISTRY="http://127.0.0.1:$STATIC_PORT" "$ERE" pull tiny -o "$WORK/lying.erebus"
@@ -154,8 +164,8 @@ printf 'GGUF' > "$WORK/m/fake.gguf"
   > "$WORK/heal.log" 2>&1 < /dev/null &
 SRV=$!
 sleep 2
-kill -9 $SRV 2>/dev/null || true
-wait $SRV 2>/dev/null || true
+desc_kill "$SRV" # serve + engine; the engine holds 8124, not just the serve
+wait "$SRV" 2>/dev/null || true
 timeout 60 "$ERE" serve "$WORK/model-bundle.erebus" --port 8124 --llama-server "$WORK/fake-engine" \
   > "$WORK/heal2.log" 2>&1 &
 SRV2=$!
@@ -164,8 +174,12 @@ for i in $(seq 1 40); do
   curl -sf http://127.0.0.1:8124/v1/models >/dev/null 2>&1 && HEALED=0 && break
   sleep 1
 done
+# The banner only prints AFTER wait_healthy() passes — an orphaned engine
+# from the SIGKILL'd run would answer the curl probe above even though the
+# second serve failed with EADDRINUSE. Require serve#2 itself to be up.
+grep -q "OpenAI-compatible endpoint ready" "$WORK/heal2.log" 2>/dev/null || HEALED=1
 check "serve works after SIGKILL mid-extraction (no poisoned .ready)" $HEALED
-kill $SRV2 2>/dev/null || true
+desc_kill "$SRV2" # reap serve#2's engine too, no leak
 tail -3 "$WORK/heal.log" 2>/dev/null | sed 's/^/      [heal1] /'
 tail -3 "$WORK/heal2.log" 2>/dev/null | sed 's/^/      [heal2] /' 
 
