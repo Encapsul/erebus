@@ -260,9 +260,33 @@ enum Shell {
     PowerShell,
 }
 
+/// Wrap human-panic's crash reporting so a closed output pipe exits quietly.
+///
+/// `erebus verify | head -1` closes stdout/stderr once enough lines have been
+/// read; `println!`/`eprintln!` then panic with "Broken pipe", which would
+/// normally produce human-panic's crash report and a core dump. Unix tools
+/// instead die silently on SIGPIPE, so we map that panic to a conventional
+/// exit (128 + SIGPIPE). Genuine panics still reach the wrapped hook.
+fn wrap_panic_handler() {
+    human_panic::setup_panic!();
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(ToString::to_string)
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        if message.contains("Broken pipe") {
+            std::process::exit(141);
+        }
+        previous(info);
+    }));
+}
+
 fn main() -> ExitCode {
     // Hide source locations in panic messages for security (no file/line info leakage)
-    human_panic::setup_panic!();
+    wrap_panic_handler();
 
     // clig.dev: "When `myapp` requires arguments to function and is run
     // with no arguments, display concise help text."
