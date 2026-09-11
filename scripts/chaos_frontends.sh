@@ -28,7 +28,7 @@ FAILURES=0
 
 cleanup() {
   kill $(jobs -p) 2>/dev/null || true
-  echo "WORK=$WORK"
+  [ "${KEEP:-0}" = "1" ] || rm -rf "$WORK"
 }
 trap cleanup EXIT
 
