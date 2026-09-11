@@ -459,6 +459,9 @@ mod tests {
                 machine_id_hash: "sha256:ddd".to_string(),
                 os: "linux".to_string(),
                 arch: "x86_64".to_string(),
+                input_hash: None,
+                output_hash: None,
+                exit_code: None,
             },
             statement: crate::intoto::InTotoStatement {
                 statement_type: crate::intoto::INTOTO_STATEMENT_TYPE.to_string(),

@@ -11,6 +11,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::exit;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::config::AppConfig;
 use crate::Metadata;
@@ -694,6 +695,13 @@ fn relay_child_status(pid: libc::pid_t) -> io::Result<()> {
     unsafe {
         libc::waitpid(pid, &mut status, 0);
     }
+    relay_exit_status(status)
+}
+
+/// Terminate the current (supervisor) process with the child's exit status:
+/// non-zero code → exit(code); signaled → re-raise the signal; else 129.
+#[cfg(target_os = "linux")]
+fn relay_exit_status(status: libc::c_int) -> io::Result<()> {
     if libc::WIFEXITED(status) {
         let code = libc::WEXITSTATUS(status);
         if code != 0 {
@@ -713,6 +721,222 @@ fn relay_child_status(pid: libc::pid_t) -> io::Result<()> {
     std::process::exit(128 + 1)
 }
 
+/// Whether behavior capture is requested (opt-in) via `ERE_ATTEST_KEY`.
+fn attest_capture_enabled() -> bool {
+    std::env::var_os("ERE_ATTEST_KEY").is_some()
+}
+
+/// Guard flag: the capture fork re-enters `exec_app` for the standard launch;
+/// this prevents that inner call from recursing into `exec_app_captured`.
+static CAPTURE_CHILD: AtomicBool = AtomicBool::new(false);
+
+/// Canonical launch vector (entrypoint ++ runtime args) used for the input hash.
+#[cfg(target_os = "linux")]
+fn launch_vector_for_hash(meta: &Metadata) -> Vec<String> {
+    let mut v: Vec<String> = meta.effective_entrypoint().to_vec();
+    for part in std::env::args_os().skip(1) {
+        v.push(part.to_string_lossy().into_owned());
+    }
+    v
+}
+
+/// Resolve the attestation key + output paths from the environment.
+///
+/// `None` when `ERE_ATTEST_KEY` is unset — the caller then does nothing.
+fn attest_paths(bin_path: &Path) -> Option<(PathBuf, PathBuf)> {
+    let key_path = PathBuf::from(std::env::var_os("ERE_ATTEST_KEY")?);
+    let out_path = std::env::var_os("ERE_ATTEST_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let mut p = bin_path.to_path_buf();
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            p.set_file_name(format!("{name}.attest"));
+            p
+        });
+    Some((key_path, out_path))
+}
+
+/// Create a pipe pair (read, write).
+#[cfg(target_os = "linux")]
+fn unix_pipe() -> io::Result<(libc::c_int, libc::c_int)> {
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: pipe(2) writes the read/write ends into `fds` on success.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((fds[0], fds[1]))
+}
+
+/// Drain a pipe into a SHA-256 hasher while teeing the bytes to `tee_fd` so the
+/// user still sees the payload's output verbatim. Returns the stream digest.
+#[cfg(target_os = "linux")]
+fn read_pipe_to_hash(fd: libc::c_int, tee_fd: libc::c_int) -> io::Result<String> {
+    let mut hasher = erebus_core::attest::StreamHasher::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        // SAFETY: `fd` is a valid pipe read end owned by this process and `buf`
+        // is a writable buffer of exactly `buf.len()` bytes.
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        if n <= 0 {
+            if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            break;
+        }
+        let chunk = &buf[..n as usize];
+        hasher.update(chunk);
+        // SAFETY: `tee_fd` is the preserved original stream fd (dup'd before the
+        // child redirected its 1/2 into the pipes); partial writes are resumed.
+        let mut off = 0usize;
+        while off < chunk.len() {
+            let w = unsafe {
+                libc::write(
+                    tee_fd,
+                    chunk[off..].as_ptr() as *const libc::c_void,
+                    chunk.len() - off,
+                )
+            };
+            if w <= 0 {
+                break;
+            }
+            off += w as usize;
+        }
+    }
+    // SAFETY: `fd` is owned by this thread and no longer needed.
+    unsafe { libc::close(fd) };
+    Ok(hasher.finish_hex())
+}
+
+/// Normalize a wait status into the payload's exit code (128 + signal when the
+/// payload was killed by a signal).
+#[cfg(target_os = "linux")]
+fn exit_code_from_status(status: libc::c_int) -> Option<i32> {
+    if libc::WIFEXITED(status) {
+        Some(libc::WEXITSTATUS(status) as i32)
+    } else if libc::WIFSIGNALED(status) {
+        Some(128 + libc::WTERMSIG(status) as i32)
+    } else {
+        None
+    }
+}
+
+/// Launch the app with behavior capture (Linux pivot path only).
+///
+/// The stub forks a supervisor that redirects the payload's stdout/stderr into
+/// pipes, hashes everything while teeing it to the preserved originals, then —
+/// once the whole nested launch tree exits — rewrites the signed attestation
+/// with `output_hash` + `exit_code`. The inner re-entry of `exec_app` performs
+/// the real isolation + payload exec with the standard flow, so the two launch
+/// paths cannot drift.
+///
+/// Caveat if a daemonized grandchild keeps a pipe write end open: the tee
+/// threads only see EOF when every holder exits, so the supervisor can wait for
+/// it. That is the price of capturing output for interactive/daemon apps, and
+/// capture is opt-in.
+#[cfg(target_os = "linux")]
+fn exec_app_captured(
+    meta: &Metadata,
+    rootfs: &Path,
+    app_config: &AppConfig,
+    bin_path: &Path,
+) -> io::Result<()> {
+    let input_hash = Some(erebus_core::attest::launch_vector_hash(
+        &launch_vector_for_hash(meta),
+    ));
+
+    let (out_r, out_w) = unix_pipe()?;
+    let (err_r, err_w) = unix_pipe()?;
+    // SAFETY: dup(2) stores a private copy of the current stdout/stderr fds in
+    // the supervisor so the tee threads can write through while the payload's
+    // 1/2 point at the pipes. The originals stay valid across the child's exec
+    // chain because `dup` new fds are process-private to the parent.
+    let orig_out = unsafe { libc::dup(1) };
+    let orig_err = unsafe { libc::dup(2) };
+
+    // SAFETY: fork(2) creates the capture child. The child re-runs `exec_app` on
+    // the normal path (its stdout/stderr already redirected); the parent below
+    // supervises, hashes, and writes the completion attestation.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if pid == 0 {
+        // SAFETY: dup2 points the standard streams at the pipe write ends; the
+        // read ends and preserved originals are closed to avoid leaking fds
+        // into the payload through the subsequent fork/exec chain.
+        unsafe {
+            libc::dup2(out_w, 1);
+            libc::dup2(err_w, 2);
+            libc::close(out_r);
+            libc::close(err_r);
+            libc::close(out_w);
+            libc::close(err_w);
+            libc::close(orig_out);
+            libc::close(orig_err);
+        }
+        CAPTURE_CHILD.store(true, Ordering::SeqCst);
+        let _ = exec_app(meta, rootfs, app_config, bin_path);
+        // exec_app's pivot path relays the payload's exit status by exiting the
+        // nested process; returning `Ok` here means the payload exited 0, so
+        // mirror that and let the outer supervisor see a 0 status.
+        std::process::exit(0);
+    }
+
+    // Parent: close the write ends the child no longer needs, then start the
+    // reader threads immediately so the pipes never fill while the payload runs.
+    // SAFETY: these write ends are owned by the child's 1/2 now.
+    unsafe {
+        libc::close(out_w);
+        libc::close(err_w);
+    }
+    let out_thread = std::thread::spawn(move || read_pipe_to_hash(out_r, orig_out));
+    let err_thread = std::thread::spawn(move || read_pipe_to_hash(err_r, orig_err));
+
+    // SAFETY: waitpid(2) blocks until the capture child (and, through it, the
+    // nested launch tree that relays the payload status) exits.
+    let mut status: libc::c_int = 0;
+    unsafe {
+        libc::waitpid(pid, &mut status, 0);
+    }
+
+    let out_digest = out_thread
+        .join()
+        .map_err(|_| io::Error::new(io::ErrorKind::Other, "stdout capture thread panicked"))??;
+    let err_digest = err_thread
+        .join()
+        .map_err(|_| io::Error::new(io::ErrorKind::Other, "stderr capture thread panicked"))??;
+    let output_hash = Some(erebus_core::attest::combined_output_hash(
+        &out_digest,
+        &err_digest,
+    ));
+    let exit_code = exit_code_from_status(status);
+
+    if let Some((key_path, out_path)) = attest_paths(bin_path) {
+        match erebus_core::attest::write_captured_execution_attestation(
+            bin_path,
+            &key_path,
+            &out_path,
+            input_hash,
+            output_hash,
+            exit_code,
+        ) {
+            Ok(_) => eprintln!(
+                "[erebus] attestation updated: {} (exit {})",
+                out_path.display(),
+                exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "?".to_string())
+            ),
+            Err(e) => eprintln!("[erebus] warning: failed to update execution attestation: {e}"),
+        }
+    }
+
+    relay_exit_status(status)
+}
+
 /// Launch the app entrypoint. Blocks until the app exits (or never returns on
 /// successful execvp).
 pub fn exec_app(
@@ -721,6 +945,23 @@ pub fn exec_app(
     app_config: &AppConfig,
     bin_path: &Path,
 ) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    let use_pivot = meta.isolation >= 2;
+    #[cfg(all(unix, not(target_os = "linux")))]
+    let use_pivot = false;
+
+    // Behavior capture (opt-in): on the pivot path with `ERE_ATTEST_KEY` set,
+    // the supervisor tees the payload's stdout/stderr into a hash, records the
+    // launch vector, and — once the payload exits — rewrites the signed
+    // attestation with `output_hash` + `exit_code`. Only the pivot path has the
+    // fork supervisor this needs; elsewhere we fall back to the plain
+    // pre-launch attestation. The guard flag stops the nested re-entry (the
+    // capture fork reverts to the normal exec_app path) from recursing.
+    #[cfg(target_os = "linux")]
+    if use_pivot && attest_capture_enabled() && !CAPTURE_CHILD.load(Ordering::Relaxed) {
+        return exec_app_captured(meta, rootfs, app_config, bin_path);
+    }
+
     // Auto-attestation (opt-in): with `ERE_ATTEST_KEY` set, write a signed
     // `.erebus.attest` right before launch. Done pre-pivot so host paths for
     // key and bundle still resolve; failures warn but never block the run.
@@ -738,10 +979,6 @@ pub fn exec_app(
 
     #[cfg(unix)]
     let orig_cwd = std::env::current_dir().ok();
-    #[cfg(target_os = "linux")]
-    let use_pivot = meta.isolation >= 2;
-    #[cfg(all(unix, not(target_os = "linux")))]
-    let use_pivot = false;
 
     // Sandbox flags only take effect on the pivot_root path (isolation >= 2).
     // Warn on the non-pivot path instead of silently ignoring the request —
@@ -984,21 +1221,15 @@ pub fn exec_app(
 /// launch — the app must run; the operator's duty is to make the proof write
 /// succeed.
 fn write_auto_attestation_if_requested(bin_path: &Path) {
-    let Some(key_os) = std::env::var_os("ERE_ATTEST_KEY") else {
+    // Inside the capture child, the outer supervisor rewrites the attestation
+    // with output+exit at the end; writing an intermediate one here would leak
+    // a launcher line into the captured stderr stream.
+    if CAPTURE_CHILD.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some((key_path, out_path)) = attest_paths(bin_path) else {
         return;
     };
-    let key_path = PathBuf::from(&key_os);
-    let out_path = std::env::var_os("ERE_ATTEST_OUT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let mut p = bin_path.to_path_buf();
-            let name = p
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            p.set_file_name(format!("{name}.attest"));
-            p
-        });
 
     match erebus_core::attest::write_execution_attestation(bin_path, &key_path, &out_path) {
         Ok(_) => eprintln!("[erebus] attestation written: {}", out_path.display()),
@@ -1443,7 +1674,7 @@ pub fn wait_for_port(port: u16, timeout_secs: u64) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicUsize};
 
 /// Maximum number of child PIDs the signal handler can forward to.
 /// Fixed-size array avoids heap allocation and Mutex in signal context.

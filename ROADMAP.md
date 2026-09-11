@@ -133,6 +133,7 @@ only the stub uses it (with `SAFETY` comments).
 | SISR delta updates | FastCDC content-defined chunking, Ed25519-signed manifests, Merkle, fail-cold verify at boot |
 | Rollback + health gate | `.bak` snapshot, fork+waitpid supervisor, anti-loop quarantine |
 || `erebus attest` | `.erebus.attest` (signed JSON, machine hash never in plaintext) — CLI build-time attestation AND auto-attestation via `ERE_ATTEST_KEY` env var (opt-in, writes before execvp) |
+| Behavior capture (spec 1.1) | `input_hash`/`output_hash`/`exit_code` in the attestation, signed by the execution key — supervisor tee + post-run rewrite (Linux pivot builds) |
 | `erebus verify-attest` | verifies detached `.erebus.attest` against trusted keys (wired 2026-09-10) |
 | `erebus audit` | compliance report: SBOM → **CycloneDX**, attestation → **in-toto** |
 | `erebus lifecycle` | policy-gated state machine: acquired → quarantined → trusted → revoked → deleted; only `trusted` served |
@@ -181,6 +182,16 @@ workflow has gaps that break the demo flow:
   `<bundle>.attest`. The stub writes a signed `.erebus.attest` before
   `execvp` when the env var is set. The demo step `erebus attest` remains
   available for manual attestation without the env var.
+- [x] **Behavior capture (spec 1.1)** — the stub now records *what the agent
+  did*, not just *that it ran*: with `ERE_ATTEST_KEY` set on a Linux pivot
+  build, payload stdout/stderr are hashed in-flight by supervisor tee threads
+  (output passes through unchanged) and the attestation is rewritten post-run
+  with `input_hash` (canonical launch vector), `output_hash`
+  (supplier-determined stdout‖stderr digest), and `exit_code`, all signed by
+  the execution key. Implemented in `erebus-stub/src/exec.rs`
+  (`exec_app_captured`) + `erebus-core/src/attest.rs`
+  (`generate_attestation_with_capture`/`write_captured_execution_attestation`).
+  Tested e2e (exit 0/3, hash determinism, passthrough) + workspace tests.
 - [x] **Tamper message clarity** — `verify` output now says `TAMPERED: signature
   does not match any trusted key` instead of the generic message.
 - [x] **PEM key support** — `sign`/`attest` now accept raw 32-byte keys from
@@ -206,13 +217,16 @@ attestation chain must cover more than the current build-time flow.
 
 **What it does NOT yet prove (gaps):**
 
-1. **Per-execution behavior log (inputs/outputs hashed)** — the attestation
-   captures that *the bundle ran*, not *what the agent did*. For non-repudiation
-   of action (Level 3 of the 3 proof levels), you need to capture inputs received,
-   outputs produced, decisions made.
-   → P0: until a complete solution exists (agent hooks/standards interface),
-   capture at minimum an output_hash and input_hash in the attestation if
-   available, signed by the agent's key (not just the build key).
+- [x] **Per-execution behavior capture (inputs/outputs hashed)** — when
+  `ERE_ATTEST_KEY` is set, the stub captures a signed, replayable proof of what
+  the agent actually did. On Linux pivot builds (`isolation >= 2`), the payload
+  stdout/stderr pass through unchanged while the stub hashes both streams via a
+  tee thread pair, then rewrites the pre-existing attestation with
+  `input_hash`, `output_hash`, and `exit_code` before relay. Signed by the
+  execution key (not just the build key), so both build integrity and runtime
+  behavior are attested. **Spec 1.1** (additive optional fields, fully
+  backward-compatible). Tested: e2e capture (exit 0 + exit 3, sha256
+  determinism, tee passthrough), `cargo test --workspace`, storm fuzz.
 
 - [x] **Attestation registry storage + queryable history** — attestations land
    as `.erebus.attest` files on disk; an auditor can now run "show me all

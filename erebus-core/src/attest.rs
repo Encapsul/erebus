@@ -17,7 +17,7 @@ use time::format_description::well_known::Iso8601;
 use time::OffsetDateTime;
 
 /// Current attestation spec version.
-pub const ATTESTATION_SPEC_VERSION: &str = "1.0";
+pub const ATTESTATION_SPEC_VERSION: &str = "1.1";
 
 /// Marker string identifying this as an erebus execution attestation.
 pub const ATTESTATION_TYPE: &str = "erebus-execution";
@@ -67,6 +67,20 @@ pub struct ExecutionInfo {
     pub machine_id_hash: String,
     pub os: String,
     pub arch: String,
+    /// SHA-256 over the canonical launch vector (entrypoint + runtime args,
+    /// NUL-joined), captured by the stub before launching the payload. `None`
+    /// when the launcher did not capture it (e.g. `erebus attest` run offline).
+    #[serde(default)]
+    pub input_hash: Option<String>,
+    /// SHA-256 over `sha256_hex(stdout) + ":" + sha256_hex(stderr)`, captured
+    /// by the launcher supervisor while the payload ran. `None` for runs that
+    /// are still in flight or whose output could not be observed.
+    #[serde(default)]
+    pub output_hash: Option<String>,
+    /// Exit code of the payload (128 + signal when signal-delivered). `None`
+    /// when unknown.
+    #[serde(default)]
+    pub exit_code: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +96,55 @@ pub struct SignatureInfo {
 pub fn sha256_hex(data: &[u8]) -> String {
     let hash = Sha256::digest(data);
     format!("sha256:{}", hex::encode(hash))
+}
+
+/// Incremental SHA-256 hasher that streams into a prefixed hex digest.
+///
+/// Used by the launcher supervisor to hash payload output without buffering
+/// the whole stream in memory.
+#[derive(Default)]
+pub struct StreamHasher {
+    inner: Sha256,
+}
+
+impl StreamHasher {
+    /// New hasher initialized to the empty SHA-256 state.
+    pub fn new() -> Self {
+        StreamHasher::default()
+    }
+
+    /// Fold `data` into the hash state.
+    pub fn update(&mut self, data: &[u8]) {
+        self.inner.update(data);
+    }
+
+    /// Finalize and return `sha256:<hex>`.
+    pub fn finish_hex(self) -> String {
+        format!("sha256:{}", hex::encode(self.inner.finalize()))
+    }
+}
+
+/// Hash of the canonical launch vector: `entrypoint` ++ runtime args, parts
+/// NUL-joined so a part boundary can never be confused with embedded spaces.
+pub fn launch_vector_hash(vector: &[String]) -> String {
+    let mut joined =
+        Vec::with_capacity(vector.iter().map(|s| s.len()).sum::<usize>() + vector.len());
+    for (i, part) in vector.iter().enumerate() {
+        if i > 0 {
+            joined.push(0);
+        }
+        joined.extend_from_slice(part.as_bytes());
+    }
+    sha256_hex(&joined)
+}
+
+/// Combine separate stdout/stderr digests into one deterministic hash so the
+/// result does not depend on interleaving order between the two streams.
+pub fn combined_output_hash(stdout_digest: &str, stderr_digest: &str) -> String {
+    let mut combined = stdout_digest.as_bytes().to_vec();
+    combined.push(b':');
+    combined.extend_from_slice(stderr_digest.as_bytes());
+    sha256_hex(&combined)
 }
 
 /// Compute the machine identity hash: SHA-256(hostname + os + arch).
@@ -124,6 +187,20 @@ pub fn flag_names(flags: u8) -> Vec<String> {
 pub fn generate_attestation(
     bundle_path: &Path,
     signing_key: &SigningKey,
+) -> Result<Attestation, anyhow::Error> {
+    generate_attestation_with_capture(bundle_path, signing_key, None, None, None)
+}
+
+/// Like [`generate_attestation`], but records behavior-hook fields captured by
+/// a supervising launcher: the canonical input vector hashed at launch and the
+/// payload's observed output hash + exit code once the run completes. Passing
+/// `None` keeps the field absent so offline attestations stay schema-identical.
+pub fn generate_attestation_with_capture(
+    bundle_path: &Path,
+    signing_key: &SigningKey,
+    input_hash: Option<String>,
+    output_hash: Option<String>,
+    exit_code: Option<i32>,
 ) -> Result<Attestation, anyhow::Error> {
     let bundle_bytes =
         std::fs::read(bundle_path).map_err(|e| anyhow::anyhow!("failed to read bundle: {e}"))?;
@@ -234,6 +311,9 @@ pub fn generate_attestation(
         machine_id_hash: machine_id_hash(),
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
+        input_hash,
+        output_hash,
+        exit_code,
     };
 
     let statement = InTotoStatement {
@@ -271,6 +351,9 @@ pub fn generate_attestation(
                 "machine_id_hash": execution.machine_id_hash,
                 "os": execution.os,
                 "arch": execution.arch,
+                "input_hash": execution.input_hash.clone(),
+                "output_hash": execution.output_hash.clone(),
+                "exit_code": execution.exit_code,
             },
             "artifact": {
                 "metadata_hash": artifact.metadata_hash,
@@ -321,17 +404,47 @@ pub fn write_execution_attestation(
     key_path: &Path,
     out_path: &Path,
 ) -> Result<Attestation, anyhow::Error> {
+    let key = load_signing_key(key_path)?;
+    let attestation = generate_attestation(bundle_path, &key)?;
+    persist_attestation(&attestation, out_path)?;
+    Ok(attestation)
+}
+
+/// Write a signed execution attestation including behavior-hook captures.
+///
+/// The launcher stub calls this once at launch (input only) and again once the
+/// supervised payload exits (plus `output_hash`/`exit_code`); each write is a
+/// self-contained, self-signed document and the second overwrites the first.
+pub fn write_captured_execution_attestation(
+    bundle_path: &Path,
+    key_path: &Path,
+    out_path: &Path,
+    input_hash: Option<String>,
+    output_hash: Option<String>,
+    exit_code: Option<i32>,
+) -> Result<Attestation, anyhow::Error> {
+    let key = load_signing_key(key_path)?;
+    let attestation =
+        generate_attestation_with_capture(bundle_path, &key, input_hash, output_hash, exit_code)?;
+    persist_attestation(&attestation, out_path)?;
+    Ok(attestation)
+}
+
+/// Load a raw 32-byte Ed25519 seed (the `erebus keygen` format).
+fn load_signing_key(key_path: &Path) -> Result<SigningKey, anyhow::Error> {
     let key_bytes = std::fs::read(key_path)
         .map_err(|e| anyhow::anyhow!("failed to read attestation key: {e}"))?;
     let key = SigningKey::from_bytes(key_bytes.as_slice().try_into().map_err(|_| {
         anyhow::anyhow!("attestation key must be 32 bytes, got {}", key_bytes.len())
     })?);
-    let attestation = generate_attestation(bundle_path, &key)?;
-    let json = serde_json::to_vec_pretty(&attestation)
+    Ok(key)
+}
+
+/// Serialize an attestation as pretty JSON and write it to `out_path`.
+fn persist_attestation(attestation: &Attestation, out_path: &Path) -> Result<(), anyhow::Error> {
+    let json = serde_json::to_vec_pretty(attestation)
         .map_err(|e| anyhow::anyhow!("failed to serialize attestation: {e}"))?;
-    std::fs::write(out_path, json)
-        .map_err(|e| anyhow::anyhow!("failed to write attestation: {e}"))?;
-    Ok(attestation)
+    std::fs::write(out_path, json).map_err(|e| anyhow::anyhow!("failed to write attestation: {e}"))
 }
 
 /// ISO 8601 UTC timestamp.
@@ -421,6 +534,9 @@ mod tests {
                     machine_id_hash: machine_hash,
                     os,
                     arch,
+                    input_hash: None,
+                    output_hash: None,
+                    exit_code: None,
                 },
                 statement: sample_statement(),
                 signature: SignatureInfo {
@@ -509,6 +625,9 @@ mod tests {
                 machine_id_hash: "sha256:abc123".to_string(),
                 os: "linux".to_string(),
                 arch: "x86_64".to_string(),
+                input_hash: None,
+                output_hash: None,
+                exit_code: None,
             },
             statement: sample_statement(),
             signature: SignatureInfo {
@@ -557,6 +676,9 @@ mod tests {
                 machine_id_hash: "sha256:abc123".to_string(),
                 os: "linux".to_string(),
                 arch: "x86_64".to_string(),
+                input_hash: None,
+                output_hash: None,
+                exit_code: None,
             },
             statement: sample_statement(),
             signature: SignatureInfo {
@@ -598,9 +720,12 @@ mod tests {
             },
             execution: ExecutionInfo {
                 attested_at: "2026-09-15T14:32:00Z".to_string(),
-                machine_id_hash: "sha256:eee".to_string(),
+                machine_id_hash: "sha256:abc123".to_string(),
                 os: "linux".to_string(),
                 arch: "x86_64".to_string(),
+                input_hash: None,
+                output_hash: None,
+                exit_code: None,
             },
             statement: sample_statement(),
             signature: SignatureInfo {
@@ -681,5 +806,149 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("must be 32 bytes"));
+    }
+
+    #[test]
+    fn launch_vector_hash_distinguishes_inputs() {
+        let a = launch_vector_hash(&["python3".to_string(), "/app/app.py".to_string()]);
+        let b = launch_vector_hash(&[
+            "python3".to_string(),
+            "/app/app.py".to_string(),
+            "x".to_string(),
+        ]);
+        let c = launch_vector_hash(&[
+            "python3/".to_string(),
+            "/app/app.py".to_string(),
+            "x".to_string(),
+        ]);
+        assert_eq!(
+            a,
+            launch_vector_hash(&["python3".to_string(), "/app/app.py".to_string()])
+        );
+        assert_ne!(a, b, "extra runtime arg must change the hash");
+        assert_ne!(a, c, "NUL-joining must keep element boundaries distinct");
+    }
+
+    #[test]
+    fn combined_output_hash_is_deterministic_and_distinct() {
+        let out = sha256_hex(b"stdout bytes");
+        let err = sha256_hex(b"stderr bytes");
+        assert_eq!(
+            combined_output_hash(&out, &err),
+            combined_output_hash(&out, &err)
+        );
+        assert_ne!(
+            combined_output_hash(&out, &err),
+            combined_output_hash(&err, &out),
+            "stream order must matter (which stream produced what)"
+        );
+        assert!(combined_output_hash(&out, &err).starts_with("sha256:"));
+    }
+
+    #[test]
+    fn stream_hasher_matches_sha256_hex() {
+        let mut h = StreamHasher::new();
+        h.update(b"hello ");
+        h.update(b"world");
+        assert_eq!(h.finish_hex(), sha256_hex(b"hello world"));
+    }
+
+    #[test]
+    fn legacy_attestation_without_capture_fields_parses() {
+        // A v1.0 document (no input/output/exit fields) must still parse, and
+        // the new fields default to None.
+        let legacy = r#"{
+            "spec_version": "1.0",
+            "attestation_type": "erebus-execution",
+            "artifact": {"bundle_hash": "sha256:aa", "payload_hash": "sha256:bb",
+                         "metadata_hash": "sha256:cc", "format_version": 3, "flags": []},
+            "provenance": {"builder": "b", "author": null, "license": null, "layers": []},
+            "execution": {"attested_at": "2026-01-01T00:00:00Z",
+                          "machine_id_hash": "sha256:mm", "os": "linux", "arch": "x86_64"},
+            "statement": {"_type": "https://in-toto.io/Statement/v1",
+                          "subject": [], "predicate_type": "https://slsa.dev/provenance/v1",
+                          "predicate": {}},
+            "signature": {"algorithm": "ed25519", "key_fingerprint": "sha256:fp",
+                          "signature_hex": "00"}
+        }"#;
+        let parsed: Attestation = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.execution.input_hash, None);
+        assert_eq!(parsed.execution.output_hash, None);
+        assert_eq!(parsed.execution.exit_code, None);
+        assert_eq!(parsed.spec_version, "1.0");
+    }
+
+    #[test]
+    fn captured_attestation_roundtrip_and_signature_cover_capture_fields() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let key_path = dir.path().join("key");
+        let bundle_path = dir.path().join("bundle.erebus");
+        let out_path = dir.path().join("bundle.erebus.attest");
+        std::fs::write(&key_path, [9u8; 32]).unwrap();
+
+        let payload = b"payload";
+        let meta = br#"{"name":"t","runtime":"binary"}"#;
+        let mut bytes = vec![0u8; 8];
+        let payload_offset = bytes.len() as u64;
+        bytes.extend_from_slice(payload);
+        let meta_offset = bytes.len() as u64;
+        bytes.extend_from_slice(meta);
+        let footer = Footer {
+            format_version: 3,
+            arch: 0,
+            flags: 0,
+            payload_offset,
+            payload_csize: payload.len() as u64,
+            payload_usize: payload.len() as u64,
+            payload_sha256: [0u8; 32],
+            meta_offset,
+            meta_size: meta.len() as u64,
+            sig_offset: 0,
+        };
+        bytes.extend_from_slice(&footer.pack_full());
+        std::fs::write(&bundle_path, &bytes).unwrap();
+
+        let input_hash = Some("sha256:in".to_string());
+        let output_hash = Some("sha256:out".to_string());
+        let att = write_captured_execution_attestation(
+            &bundle_path,
+            &key_path,
+            &out_path,
+            input_hash,
+            output_hash,
+            Some(42),
+        )
+        .unwrap();
+        assert_eq!(att.execution.input_hash.as_deref(), Some("sha256:in"));
+        assert_eq!(att.execution.output_hash.as_deref(), Some("sha256:out"));
+        assert_eq!(att.execution.exit_code, Some(42));
+        assert_eq!(att.spec_version, "1.1");
+
+        let json = std::fs::read_to_string(&out_path).unwrap();
+        let parsed: Attestation = serde_json::from_str(&json).unwrap();
+        let key = SigningKey::from_bytes(&[9u8; 32]);
+        verify_attestation(&parsed, &[key.verifying_key()]).unwrap();
+
+        // The signed predicate carries the capture fields.
+        let predicate = parsed
+            .statement
+            .predicate
+            .as_object()
+            .unwrap()
+            .get("execution")
+            .unwrap();
+        assert_eq!(
+            predicate.get("input_hash").and_then(|v| v.as_str()),
+            Some("sha256:in")
+        );
+        assert_eq!(
+            predicate.get("output_hash").and_then(|v| v.as_str()),
+            Some("sha256:out")
+        );
+        assert_eq!(
+            predicate.get("exit_code").and_then(|v| v.as_i64()),
+            Some(42)
+        );
     }
 }
