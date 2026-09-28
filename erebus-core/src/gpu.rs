@@ -132,6 +132,7 @@ mod tests {
         assert_eq!(auto_ngl(24_000, 0), 999);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn meminfo_parser_extracts_memtotal() {
         let info = "MemTotal:       8038200 kB\nMemFree:        123456 kB\n";

@@ -4,14 +4,17 @@ This file provides guidance to Claude Code when working with the x.bin codebase.
 
 ## Project Overview
 
-x.bin packages any application into a single self-extracting ELF binary. Detects runtime (Python, Node.js, Deno, Java, Ruby, .NET/C#, Go, PHP, Perl, Hugo, Binary), bundles with your code, produces standalone executable.
+erebus is the proof layer for AI execution: it packages an agent into a single
+self-extracting, sandboxed binary and emits a signed, hash-chained receipt of
+every execution. Runtimes detected: Python and native Binary only.
+**Read `ROADMAP.md` §0–§3 first** — priorities are strict (P0 proof chain),
+everything in §4 is frozen.
 
 ## Architecture
 
-- `erebus-core/` — Core library (format, detect, compress, encrypt, integrity, verify, assembly)
-- `erebus-cli/` — CLI tool (clap-based, 12 commands)
-- `erebus-stub/` — ELF launcher (unsafe FFI, mmap, fork, exec)
-- `cli/` — Legacy Python CLI (being replaced by Rust)
+- `erebus-core/` — Core library (format, detect, compress, encrypt, attest + attest_log, SISR, assembly)
+- `erebus-cli/` — CLI tool (clap-based; proof commands: keygen/sign/verify/trust/attest/verify-attest/attest-history/audit)
+- `erebus-stub/` — Launcher (ELF/Mach-O/PE; the only crate with `unsafe`)
 
 ## Build Commands
 
@@ -28,10 +31,9 @@ make fmt          # Auto-format all code
 
 Before finishing any code change, run:
 1. `cargo fmt --check`
-2. `cargo clippy --all-targets -- -D warnings`
-3. `cargo test --workspace`
-4. `cd cli && ruff check erebus/ && black --check erebus/ && python3 -m pytest tests/ -q`
-5. `erebus build examples/hello-web -o /tmp/test.erebus && erebus inspect /tmp/test.erebus`
+2. `cargo clippy -p erebus-core --all-targets -- -D warnings` (then `erebus-cli`, `erebus-stub`)
+3. `cargo test --workspace` (on macOS hosts the stub e2e / engine tests need a Linux stub and `llama-server`; the attestation suites `attest*`, `attest_log`, `tests/attest_e2e.rs` must always pass)
+4. `erebus build examples/hello-web -o /tmp/test.erebus && erebus inspect /tmp/test.erebus`
 
 ## Claude Code Architecture (Command → Agent → Skill)
 

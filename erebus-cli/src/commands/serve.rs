@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::commands::attest_proxy::CallRecorder;
 use crate::commands::build::NglPolicy;
 
 /// How long to wait for llama-server's /health before giving up. Cold start
@@ -57,6 +58,21 @@ pub struct ServeArgs {
     /// Run in non-interactive mode (no browser auto-open)
     #[arg(long)]
     pub no_input: bool,
+
+    /// Ed25519 signing key: turns serve into an attesting reverse proxy that
+    /// appends one signed, hash-chained receipt per POST to the trail
+    #[arg(long, env = "ERE_ATTEST_KEY", value_name = "KEY")]
+    pub attest_key: Option<PathBuf>,
+
+    /// Trail directory for call receipts (default: <bundle>.attest.d, shared
+    /// with `erebus run` / `erebus attest`)
+    #[arg(
+        long,
+        env = "ERE_ATTEST_LOG",
+        value_name = "DIR",
+        requires = "attest_key"
+    )]
+    pub attest_log: Option<PathBuf>,
 }
 
 /// Everything `chat` and `serve` need to talk to a launched engine.
@@ -416,10 +432,11 @@ pub fn run(args: ServeArgs) -> Result<()> {
     // Reap the engine on SIGTERM/SIGINT instead of the default handler killing
     // us instantly and orphaning the child (which has the bind port).
     let stop = StopSignals::install()?;
+    let (recorder, engine_host, engine_port) = engine_endpoint(&args, &file)?;
     let mut eng = start_engine(
         &file,
-        &args.host,
-        args.port,
+        &engine_host,
+        engine_port,
         args.ngl.as_deref(),
         args.ctx_size,
         args.threads,
@@ -428,7 +445,12 @@ pub fn run(args: ServeArgs) -> Result<()> {
         false,
     )?;
     wait_healthy(&eng.base_url, &mut eng.child, &stop)?;
-    print_banner(&eng.base_url, Path::new(&eng.model_label));
+
+    let mut public_url = eng.base_url.clone();
+    if let Some(rec) = recorder {
+        public_url = start_proxy(&args.host, args.port, engine_port, rec, &stop)?;
+    }
+    print_banner(&public_url, Path::new(&eng.model_label));
 
     let status = wait_engine(&mut eng.child, &stop)?;
     // A SIGTERM-initiated teardown kills the engine, so a non-success status
@@ -437,6 +459,80 @@ pub fn run(args: ServeArgs) -> Result<()> {
         bail!("engine exited with {status}");
     }
     Ok(())
+}
+
+/// Where the engine binds. With `--attest-key` it hides on a loopback port
+/// and the proxy owns the public one. The bundle is hashed *before* a
+/// multi-GB engine launches so a bad key path fails fast.
+fn engine_endpoint(
+    args: &ServeArgs,
+    file: &Path,
+) -> Result<(Option<Arc<CallRecorder>>, String, u16)> {
+    let recorder = args
+        .attest_key
+        .as_deref()
+        .map(|key| build_recorder(file, key, args.attest_log.as_deref()))
+        .transpose()?;
+    match recorder {
+        Some(rec) => Ok((Some(rec), "127.0.0.1".to_string(), free_loopback_port()?)),
+        None => Ok((None, args.host.clone(), args.port)),
+    }
+}
+
+/// Load the signing key, hash the bundle once, open the trail.
+fn build_recorder(
+    file: &Path,
+    key_path: &Path,
+    log_dir: Option<&Path>,
+) -> Result<Arc<CallRecorder>> {
+    let key = erebus_core::attest::load_signing_key(key_path)
+        .with_context(|| format!("cannot load attestation key {}", key_path.display()))?;
+    let template = erebus_core::attest::AttestationTemplate::from_bundle(file)
+        .context("cannot hash bundle for attestation")?;
+    let dir = log_dir.map_or_else(|| default_serve_trail(file), Path::to_path_buf);
+    let log = erebus_core::attest_log::AttestationLog::open(&dir)
+        .with_context(|| format!("cannot open trail {}", dir.display()))?;
+    eprintln!("[erebus] attesting proxy: receipts → {}", dir.display());
+    Ok(Arc::new(CallRecorder::new(template, key, log)))
+}
+
+/// Same trail the stub uses for `erebus run`: `<bundle>.attest.d`.
+fn default_serve_trail(file: &Path) -> PathBuf {
+    let mut receipt = file.as_os_str().to_owned();
+    receipt.push(".attest");
+    erebus_core::attest_log::default_log_dir(Path::new(&receipt))
+}
+
+/// Bind the public port and relay to the engine on a background thread.
+fn start_proxy(
+    host: &str,
+    port: u16,
+    engine_port: u16,
+    recorder: Arc<CallRecorder>,
+    stop: &StopSignals,
+) -> Result<String> {
+    let listener = std::net::TcpListener::bind((host, port))
+        .with_context(|| format!("cannot bind attesting proxy on {host}:{port}"))?;
+    let upstream: std::net::SocketAddr = format!("127.0.0.1:{engine_port}")
+        .parse()
+        .context("engine address")?;
+    let flag = Arc::clone(&stop.flag);
+    std::thread::spawn(move || {
+        if let Err(e) =
+            crate::commands::attest_proxy::serve_proxy(listener, upstream, recorder, flag)
+        {
+            eprintln!("[erebus] proxy stopped: {e:#}");
+        }
+    });
+    Ok(format!("http://{host}:{port}"))
+}
+
+/// Ask the kernel for a free loopback port. Racy by nature (another process
+/// may grab it before the engine binds) — acceptable for a local sidecar.
+fn free_loopback_port() -> Result<u16> {
+    let probe =
+        std::net::TcpListener::bind("127.0.0.1:0").context("no free loopback port for engine")?;
+    Ok(probe.local_addr()?.port())
 }
 
 /// Probe helpers kept as fns so the pre-flight stays testable and so a

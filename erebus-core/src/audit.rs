@@ -462,6 +462,9 @@ mod tests {
                 input_hash: None,
                 output_hash: None,
                 exit_code: None,
+                prev_attestation_hash: None,
+                request: None,
+                rootfs_root: None,
             },
             statement: crate::intoto::InTotoStatement {
                 statement_type: crate::intoto::INTOTO_STATEMENT_TYPE.to_string(),

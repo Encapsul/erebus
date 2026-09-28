@@ -487,6 +487,443 @@ def _ed25519_verify(public_key: bytes, message: bytes, signature: bytes) -> bool
     return _ed_scalarmult(_ED_B, s) == _ed_add(r, _ed_scalarmult(a, k))
 
 
+def _ed_point_encode(p) -> bytes:
+    """Compress an Edwards point to 32 bytes (RFC 8032 §5.1.2)."""
+    x, y = p
+    return (y | ((x & 1) << 255)).to_bytes(32, "little")
+
+
+def _ed25519_public_key(seed: bytes) -> bytes:
+    """Public half of a 32-byte seed (RFC 8032 §5.1.5)."""
+    h = hashlib.sha512(seed).digest()
+    a = int.from_bytes(h[:32], "little")
+    a &= (1 << 254) - 8
+    a |= 1 << 254
+    return _ed_point_encode(_ed_scalarmult(_ED_B, a))
+
+
+def _ed25519_sign(seed: bytes, message: bytes) -> bytes:
+    """Ed25519 signature (RFC 8032 §5.1.6). Pure Python, stdlib only.
+
+    Only the transparency-log checkpoint is signed with this (a few times a
+    minute at most), so the naive big-int arithmetic is fast enough. The
+    output verifies under `ed25519_dalek::verify_strict` on the CLI side.
+    """
+    h = hashlib.sha512(seed).digest()
+    a = int.from_bytes(h[:32], "little")
+    a &= (1 << 254) - 8
+    a |= 1 << 254
+    prefix = h[32:]
+    pub = _ed_point_encode(_ed_scalarmult(_ED_B, a))
+    r = int.from_bytes(hashlib.sha512(prefix + message).digest(), "little") % _ED_L
+    r_enc = _ed_point_encode(_ed_scalarmult(_ED_B, r))
+    k = int.from_bytes(hashlib.sha512(r_enc + pub + message).digest(), "little") % _ED_L
+    s = (r + k * a) % _ED_L
+    return r_enc + s.to_bytes(32, "little")
+
+
+# ---- Merkle hash tree (RFC 6962 / RFC 9162, SHA-256) ------------------------
+# Mirrors `erebus-core/src/merkle.rs` byte for byte; both are pinned to the
+# RFC 9162 test vectors so a proof produced here verifies in the CLI offline.
+def _mt_leaf(data: bytes) -> bytes:
+    return hashlib.sha256(b"\x00" + data).digest()
+
+
+def _mt_node(left: bytes, right: bytes) -> bytes:
+    return hashlib.sha256(b"\x01" + left + right).digest()
+
+
+def _mt_split(n: int) -> int:
+    k = 1
+    while k * 2 < n:
+        k *= 2
+    return k
+
+
+def _mt_root(leaves) -> bytes:
+    n = len(leaves)
+    if n == 0:
+        return hashlib.sha256(b"").digest()
+    if n == 1:
+        return leaves[0]
+    k = _mt_split(n)
+    return _mt_node(_mt_root(leaves[:k]), _mt_root(leaves[k:]))
+
+
+def _mt_inclusion(leaves, index: int) -> list[bytes]:
+    """Audit path for leaves[index], leaf-to-root (RFC 6962 §2.1.1)."""
+    n = len(leaves)
+    if n <= 1:
+        return []
+    k = _mt_split(n)
+    if index < k:
+        return _mt_inclusion(leaves[:k], index) + [_mt_root(leaves[k:])]
+    return _mt_inclusion(leaves[k:], index - k) + [_mt_root(leaves[:k])]
+
+
+def _mt_consistency(leaves, first: int, complete: bool = True) -> list[bytes]:
+    """Consistency proof from the first `first` leaves (RFC 6962 §2.1.2)."""
+    n = len(leaves)
+    if first == n:
+        return [] if complete else [_mt_root(leaves)]
+    k = _mt_split(n)
+    if first <= k:
+        return _mt_consistency(leaves[:k], first, complete) + [_mt_root(leaves[k:])]
+    return _mt_consistency(leaves[k:], first - k, False) + [_mt_root(leaves[:k])]
+
+
+def _mt_verify_inclusion(leaf: bytes, index: int, size: int, proof, root: bytes) -> bool:
+    """RFC 9162 §2.1.3.2 — used by the self-test and the chaos battery."""
+    if index >= size:
+        return False
+    fn, sn, r = index, size - 1, leaf
+    for p in proof:
+        if sn == 0:
+            return False
+        if fn & 1 or fn == sn:
+            r = _mt_node(p, r)
+            while not (fn & 1) and fn != 0:
+                fn >>= 1
+                sn >>= 1
+        else:
+            r = _mt_node(r, p)
+        fn >>= 1
+        sn >>= 1
+    return sn == 0 and r == root
+
+
+# ---- RFC 3161 time-stamp requests (DER by hand, stdlib only) ----------------
+_TSA_SHA256_ALGID = bytes.fromhex("300d06096086480165030402010500")
+
+
+def _der_len(n: int) -> bytes:
+    if n < 0x80:
+        return bytes([n])
+    body = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    return bytes([0x80 | len(body)]) + body
+
+
+def _der(tag: int, body: bytes) -> bytes:
+    return bytes([tag]) + _der_len(len(body)) + body
+
+
+def _der_int(n: int) -> bytes:
+    body = n.to_bytes(max(1, (n.bit_length() + 8) // 8), "big")
+    return _der(0x02, body)
+
+
+def tsa_build_request(digest: bytes, nonce: int | None = None) -> bytes:
+    """TimeStampReq over a SHA-256 imprint with certReq=TRUE (RFC 3161 §2.4.1)."""
+    imprint = _der(0x30, _TSA_SHA256_ALGID + _der(0x04, digest))
+    body = _der_int(1) + imprint
+    if nonce is None:
+        nonce = int.from_bytes(secrets.token_bytes(8), "big")
+    body += _der_int(nonce) + _der(0x01, b"\xff")
+    return _der(0x30, body)
+
+
+def _der_read(buf: bytes, pos: int) -> tuple[int, int, int]:
+    """(tag, content_start, content_end) of the TLV at `pos`."""
+    tag = buf[pos]
+    length = buf[pos + 1]
+    pos += 2
+    if length & 0x80:
+        nbytes = length & 0x7F
+        length = int.from_bytes(buf[pos:pos + nbytes], "big")
+        pos += nbytes
+    return tag, pos, pos + length
+
+
+def tsa_parse_response(resp: bytes, digest: bytes) -> dict:
+    """Structural check of a TimeStampResp: status granted, imprint present.
+
+    Cryptographic validation of the CMS signature needs the TSA chain and is
+    delegated to `openssl ts -verify` on the verifier side; here we only make
+    sure the TSA answered *this* digest and expose genTime for display.
+    """
+    try:
+        tag, start, end = _der_read(resp, 0)
+        if tag != 0x30:
+            return {"ok": False, "error": "not a SEQUENCE"}
+        stag, sstart, send = _der_read(resp, start)
+        itag, istart, iend = _der_read(resp, sstart)
+        if stag != 0x30 or itag != 0x02:
+            return {"ok": False, "error": "malformed PKIStatusInfo"}
+        status = int.from_bytes(resp[istart:iend], "big")
+    except (IndexError, ValueError):
+        return {"ok": False, "error": "truncated response"}
+    if status not in (0, 1):
+        return {"ok": False, "error": f"TSA status {status}"}
+    token = resp[send:end]
+    if digest not in token:
+        return {"ok": False, "error": "token does not cover the requested digest"}
+    gen_time = None
+    m = re.search(rb"\x18[\x0f-\x18]((?:19|20)\d{12}(?:\.\d+)?Z)", token)
+    if m:
+        gen_time = m.group(1).decode()
+    return {"ok": True, "gen_time": gen_time, "token": token}
+
+
+class TransparencyLog:
+    """Append-only Merkle log of execution receipts (ROADMAP P0-5).
+
+    Storage is a single SQLite file (stdlib `sqlite3`, WAL mode): one row per
+    receipt with the exact bytes the client posted, so the leaf hash
+    `SHA-256(0x00 ‖ body)` is reproducible offline from the receipt file.
+    Leaf hashes are mirrored in memory; the tree head is recomputed on demand
+    and signed with the registry's Ed25519 log key. Checkpoints can be
+    anchored at an RFC 3161 TSA so the registry operator cannot backdate.
+    """
+
+    CHECKPOINT_PREFIX = "erebus-log-checkpoint/v1"
+
+    def __init__(self, db_path: str, seed: bytes, origin: str,
+                 tsa_url: str | None = None, anchor_every: int = 0):
+        import sqlite3
+        self.lock = threading.RLock()
+        self.seed = seed
+        self.public_key = _ed25519_public_key(seed)
+        self.key_id = "sha256:" + hashlib.sha256(self.public_key).hexdigest()
+        self.origin = origin
+        self.tsa_url = tsa_url
+        self.anchor_every = anchor_every
+        self.conn = sqlite3.connect(db_path, check_same_thread=False, isolation_level=None)
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=FULL")
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS attestations ("
+            " seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,"
+            " owner TEXT NOT NULL, bundle TEXT NOT NULL, machine TEXT NOT NULL,"
+            " os TEXT, arch TEXT, attested_at TEXT, key_fp TEXT, ts TEXT NOT NULL,"
+            " leaf_hash TEXT UNIQUE NOT NULL, body BLOB NOT NULL)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS att_owner_time ON attestations(owner, attested_at)"
+        )
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS anchors ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT, size INTEGER NOT NULL,"
+            " root TEXT NOT NULL, ts TEXT NOT NULL, tsa_url TEXT NOT NULL,"
+            " gen_time TEXT, token BLOB NOT NULL)"
+        )
+        rows = self.conn.execute("SELECT leaf_hash FROM attestations ORDER BY seq").fetchall()
+        self.leaves: list[bytes] = [bytes.fromhex(r[0]) for r in rows]
+        # seq is AUTOINCREMENT: gaps would break seq-1 == leaf index, so the
+        # in-memory list is the authority and seq is only a display id.
+
+    # -- writes -----------------------------------------------------------
+    def append(self, rec: dict, body: bytes) -> tuple[int, str, bool]:
+        """Insert one receipt. Returns (leaf_index, leaf_hash_hex, already)."""
+        leaf = _mt_leaf(body)
+        leaf_hex = leaf.hex()
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT seq, leaf_hash FROM attestations WHERE id = ? OR leaf_hash = ?",
+                (rec["id"], leaf_hex),
+            ).fetchone()
+            if row:
+                return self.leaves.index(bytes.fromhex(row[1])), row[1], True
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                self.conn.execute(
+                    "INSERT INTO attestations (id, owner, bundle, machine, os, arch,"
+                    " attested_at, key_fp, ts, leaf_hash, body)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (rec["id"], rec["owner"], rec["bundle"], rec["machine"], rec["os"],
+                     rec["arch"], rec["attested_at"], rec["key_fp"], rec["ts"],
+                     leaf_hex, body),
+                )
+                self.conn.execute("COMMIT")
+            except Exception:
+                self.conn.execute("ROLLBACK")
+                raise
+            self.leaves.append(leaf)
+            index = len(self.leaves) - 1
+        if self.tsa_url and self.anchor_every and (index + 1) % self.anchor_every == 0:
+            try:
+                self.anchor()
+            except Exception as e:  # never fail a publish because the TSA is down
+                print(f"[registry] TSA anchoring failed: {e}", file=sys.stderr)
+        return index, leaf_hex, False
+
+    def exists(self, att_id: str) -> bool:
+        with self.lock:
+            return self.conn.execute(
+                "SELECT 1 FROM attestations WHERE id = ?", (att_id,)
+            ).fetchone() is not None
+
+    def query(self, owner: str, filters: dict, limit: int, skip: int) -> tuple[int, list[dict]]:
+        clauses, params = ["owner = ?"], [owner]
+        if filters.get("bundle"):
+            clauses.append("bundle = ?")
+            params.append(filters["bundle"])
+        if filters.get("machine"):
+            clauses.append("machine = ?")
+            params.append(filters["machine"])
+        if filters.get("since"):
+            clauses.append("attested_at >= ?")
+            params.append(filters["since"])
+        if filters.get("until"):
+            clauses.append("attested_at <= ?")
+            params.append(filters["until"])
+        where = " AND ".join(clauses)
+        with self.lock:
+            total = self.conn.execute(
+                f"SELECT COUNT(*) FROM attestations WHERE {where}", params
+            ).fetchone()[0]
+            rows = self.conn.execute(
+                f"SELECT seq, id, owner, ts, bundle, machine, os, arch, attested_at,"
+                f" key_fp, leaf_hash, body FROM attestations WHERE {where}"
+                f" ORDER BY seq LIMIT ? OFFSET ?",
+                params + [limit, skip],
+            ).fetchall()
+        page = []
+        for r in rows:
+            try:
+                att = json.loads(r[11])
+            except ValueError:
+                att = None
+            page.append({
+                "id": r[1], "owner": r[2], "ts": r[3], "bundle": r[4], "machine": r[5],
+                "os": r[6], "arch": r[7], "attested_at": r[8], "key_fp": r[9],
+                "leaf_index": r[0] - 1, "leaf_hash": "sha256:" + r[10], "attestation": att,
+            })
+        return total, page
+
+    # -- tree heads ---------------------------------------------------------
+    def size(self) -> int:
+        with self.lock:
+            return len(self.leaves)
+
+    def root(self, size: int | None = None) -> bytes:
+        with self.lock:
+            n = len(self.leaves) if size is None else size
+            return _mt_root(self.leaves[:n])
+
+    def checkpoint_bytes(self, size: int, root: bytes, ts: str) -> bytes:
+        return (f"{self.CHECKPOINT_PREFIX}\n{self.origin}\n{size}\n{root.hex()}\n{ts}\n").encode()
+
+    def checkpoint(self) -> dict:
+        """Signed tree head over the current size."""
+        with self.lock:
+            size = len(self.leaves)
+            root = _mt_root(self.leaves)
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        sig = _ed25519_sign(self.seed, self.checkpoint_bytes(size, root, ts))
+        return {
+            "origin": self.origin,
+            "size": size,
+            "root": "sha256:" + root.hex(),
+            "timestamp": ts,
+            "key_id": self.key_id,
+            "public_key_hex": self.public_key.hex(),
+            "signature_hex": sig.hex(),
+        }
+
+    def inclusion(self, leaf_hex: str, size: int | None = None) -> dict | None:
+        with self.lock:
+            try:
+                index = self.leaves.index(bytes.fromhex(leaf_hex))
+            except ValueError:
+                return None
+            n = len(self.leaves) if size is None else size
+            if index >= n or n > len(self.leaves):
+                return None
+            path = _mt_inclusion(self.leaves[:n], index)
+            root = _mt_root(self.leaves[:n])
+        return {
+            "leaf_index": index,
+            "leaf_hash": "sha256:" + leaf_hex,
+            "tree_size": n,
+            "root": "sha256:" + root.hex(),
+            "inclusion_proof": [p.hex() for p in path],
+        }
+
+    def consistency(self, first: int, second: int) -> dict | None:
+        with self.lock:
+            if not (0 < first <= second <= len(self.leaves)):
+                return None
+            proof = _mt_consistency(self.leaves[:second], first)
+            return {
+                "first": first,
+                "second": second,
+                "first_root": "sha256:" + _mt_root(self.leaves[:first]).hex(),
+                "second_root": "sha256:" + _mt_root(self.leaves[:second]).hex(),
+                "consistency_proof": [p.hex() for p in proof],
+            }
+
+    # -- anchoring ----------------------------------------------------------
+    def anchor(self, tsa_url: str | None = None) -> dict:
+        """Timestamp the current checkpoint at an RFC 3161 TSA and store it.
+
+        The imprint is SHA-256 over the canonical checkpoint bytes *without*
+        the timestamp line (the TSA's genTime is the authoritative time).
+        """
+        url = tsa_url or self.tsa_url
+        if not url:
+            raise RuntimeError("no TSA configured (--tsa-url)")
+        with self.lock:
+            size = len(self.leaves)
+            root = _mt_root(self.leaves)
+        digest = hashlib.sha256(self.anchor_bytes(size, root)).digest()
+        req = urllib.request.Request(
+            url, data=tsa_build_request(digest), method="POST",
+            headers={"Content-Type": "application/timestamp-query",
+                     "Accept": "application/timestamp-reply"},
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            body = resp.read()
+        parsed = tsa_parse_response(body, digest)
+        if not parsed["ok"]:
+            raise RuntimeError(f"TSA rejected the request: {parsed['error']}")
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO anchors (size, root, ts, tsa_url, gen_time, token)"
+                " VALUES (?,?,?,?,?,?)",
+                (size, "sha256:" + root.hex(), ts, url, parsed["gen_time"], body),
+            )
+        return self._anchor_dict(size, "sha256:" + root.hex(), ts, url, parsed["gen_time"], body)
+
+    def anchor_bytes(self, size: int, root: bytes) -> bytes:
+        return f"{self.CHECKPOINT_PREFIX}\n{self.origin}\n{size}\n{root.hex()}\n".encode()
+
+    @staticmethod
+    def _anchor_dict(size, root, ts, url, gen_time, token) -> dict:
+        return {
+            "size": size, "root": root, "requested_at": ts, "tsa_url": url,
+            "gen_time": gen_time, "token_b64": base64.b64encode(token).decode(),
+        }
+
+    def latest_anchor(self) -> dict | None:
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT size, root, ts, tsa_url, gen_time, token FROM anchors"
+                " ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return self._anchor_dict(*row) if row else None
+
+    def key_info(self) -> dict:
+        return {"algorithm": "ed25519", "key_id": self.key_id,
+                "public_key_hex": self.public_key.hex(), "origin": self.origin}
+
+
+def load_or_create_log_key(path: str) -> bytes:
+    """32-byte Ed25519 seed, `erebus keygen` format, created 0600 if absent."""
+    try:
+        with open(path, "rb") as f:
+            seed = f.read()
+        if len(seed) != 32:
+            raise SystemExit(f"log key {path} must be exactly 32 bytes")
+        return seed
+    except FileNotFoundError:
+        seed = secrets.token_bytes(32)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(seed)
+        return seed
+
+
 def base64url_decode(s: str) -> bytes:
     """Decode unpadded (or padded) base64url without raising on garbage."""
     s = s.rstrip("=")
@@ -497,7 +934,9 @@ class Store:
     """All mutable state, guarded by an in-process RLock + per-file flock."""
 
     def __init__(self, root: str, quota_bytes: int, upload_cap: int,
-                 require_auth: bool = False, allow_anon_uploads: bool = False):
+                 require_auth: bool = False, allow_anon_uploads: bool = False,
+                 log_key: str | None = None, log_origin: str | None = None,
+                 tsa_url: str | None = None, anchor_every: int = 0):
         self.root = root
         self.pkg_dir = os.path.join(root, "packages")
         self.meta_dir = os.path.join(root, "meta")
@@ -508,6 +947,14 @@ class Store:
         for d in (self.pkg_dir, self.meta_dir, self.usage_dir, self.mcp_dir, self.attest_dir):
             os.makedirs(d, exist_ok=True)
         self.attest_path = os.path.join(self.attest_dir, "attestations.jsonl")
+        self.log = TransparencyLog(
+            os.path.join(self.attest_dir, "log.sqlite"),
+            load_or_create_log_key(log_key or os.path.join(root, "log.key")),
+            log_origin or "erebus-registry",
+            tsa_url=tsa_url,
+            anchor_every=anchor_every,
+        )
+        self._migrate_attestation_jsonl()
         self.users_path = os.path.join(root, "users.json")
         self.stats_path = os.path.join(root, "stats.json")
         self.waitlist_path = os.path.join(root, "waitlist.txt")
@@ -907,12 +1354,46 @@ class Store:
             return self._load(self.webhooks_path, [])
 
     # ---- attestations -----------------------------------------------------
-    def record_attestation(self, owner: str, att: dict) -> tuple[bool, str, bool]:
-        """Append one execution attestation to the append-only journal.
+    def _migrate_attestation_jsonl(self) -> None:
+        """One-shot import of the pre-P0-5 JSONL journal into the Merkle log.
+
+        The old journal stored re-serialized JSON, so imported leaves hash the
+        canonical form (`sort_keys`) — older receipts get an inclusion proof
+        but cannot be re-derived from the client file byte-for-byte. The file
+        is renamed, not deleted.
+        """
+        if not os.path.isfile(self.attest_path) or self.log.size() > 0:
+            return
+        imported = 0
+        with open(self.attest_path, "rb") as f:
+            for line in f.read().splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue  # torn tail write from a crashed process
+                body = json.dumps(rec.get("attestation"), sort_keys=True).encode()
+                try:
+                    self.log.append(rec, body)
+                    imported += 1
+                except (KeyError, TypeError):
+                    continue
+        os.replace(self.attest_path, self.attest_path + ".migrated")
+        if imported:
+            print(f"[registry] migrated {imported} attestations into the Merkle log",
+                  file=sys.stderr)
+
+    def record_attestation(self, owner: str, att: dict,
+                           raw: bytes | None = None) -> tuple[bool, str, bool]:
+        """Append one execution attestation to the Merkle transparency log.
 
         Validate the in-toto shape fail-closed, derive a content id, and write
         idempotently (a re-post of the same attestation returns the same id).
-        Returns (ok, id_or_err, already_recorded).
+        `raw` is the exact body the client sent — it becomes the leaf preimage
+        so the client can recompute the leaf hash from its receipt file.
+        Returns (ok, id_or_err, already_recorded); the log position is
+        available afterwards via `log_position(id)`.
         """
         if not isinstance(att, dict):
             return False, "attestation must be a JSON object", False
@@ -944,16 +1425,10 @@ class Store:
             "key_fp": str(sig.get("key_fingerprint") or ""),
             "attestation": att,
         }
-        with self.lock:
-            if self._attestation_exists(att_id):
-                return True, att_id, True
-            data = json.dumps(rec).encode() + b"\n"
-            with open(self.attest_path, "ab") as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                try:
-                    f.write(data)
-                finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        body = raw if raw is not None else json.dumps(att, sort_keys=True).encode()
+        _index, _leaf, already = self.log.append(rec, body)
+        if already:
+            return True, att_id, True
         self.record_audit(owner, "attestation_published", att_id)
         self.record_replication_event("upsert_attestation", att_id, {
             "bundle": bundle,
@@ -964,20 +1439,24 @@ class Store:
         return True, att_id, False
 
     def _attestation_exists(self, att_id: str) -> bool:
-        try:
-            with open(self.attest_path, "rb") as f:
-                content = f.read()
-        except OSError:
-            return False
-        for line in content.splitlines():
-            if not line.strip():
-                continue
-            try:
-                if json.loads(line).get("id") == att_id:
-                    return True
-            except ValueError:
-                continue  # torn tail write from a crashed process
-        return False
+        return self.log.exists(att_id)
+
+    def log_position(self, att_id: str) -> dict | None:
+        """Inclusion proof + signed checkpoint for a stored receipt."""
+        with self.log.lock:
+            row = self.log.conn.execute(
+                "SELECT leaf_hash FROM attestations WHERE id = ?", (att_id,)
+            ).fetchone()
+            if not row:
+                return None
+            proof = self.log.inclusion(row[0])
+            checkpoint = self.log.checkpoint()
+        if proof is None:
+            return None
+        anchor = self.log.latest_anchor()
+        proof["checkpoint"] = checkpoint
+        proof["anchor"] = anchor if anchor and anchor["size"] == checkpoint["size"] else None
+        return proof
 
     def query_attestations(self, owner: str, filters: dict, limit: int, skip: int) -> tuple[int, list[dict]]:
         """Chronological page of <owner>'s attestations matching AND-ed filters.
@@ -987,34 +1466,7 @@ class Store:
         ISO timestamps compare lexicographically as long as every producer
         emits the same timezone-aware format (the stub/CLI do).
         """
-        total = 0
-        page: list[dict] = []
-        try:
-            with open(self.attest_path, "rb") as f:
-                lines = f.read().splitlines()
-        except OSError:
-            return total, page
-        for line in lines:
-            if not line.strip():
-                continue
-            try:
-                rec = json.loads(line)
-            except ValueError:
-                continue  # torn tail write from a crashed process
-            if rec.get("owner") != owner:
-                continue
-            if filters.get("bundle") and rec.get("bundle") != filters["bundle"]:
-                continue
-            if filters.get("machine") and rec.get("machine") != filters["machine"]:
-                continue
-            if filters.get("since") and rec.get("attested_at") < filters["since"]:
-                continue
-            if filters.get("until") and rec.get("attested_at") > filters["until"]:
-                continue
-            total += 1
-            if total > skip and len(page) < limit:
-                page.append(rec)
-        return total, page
+        return self.log.query(owner, filters, limit, skip)
 
     # ---- packages ---------------------------------------------------------
     def set_meta(self, fname: str, owner: str | None, private: bool, deleted: bool = False, deleted_at: str | None = None):
@@ -1734,6 +2186,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._replicate_blob(path[len("/replicate/blob/"):])
         if path == "/attestations":
             return self._attest_query()
+        if path == "/log/checkpoint":
+            return self._log_checkpoint()
+        if path == "/log/key":
+            return self._log_key()
+        if path == "/log/proof":
+            return self._log_proof()
+        if path == "/log/consistency":
+            return self._log_consistency()
         if path == "/stats":
             return self.send_json(self.store.stats())
         if path == "/index.json":
@@ -2254,6 +2714,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/attestations":
             body = self.read_body(1_000_000)
             return self._attest_publish(body)
+        if path == "/log/anchor":
+            return self._log_anchor()
         if path == "/" or path.startswith("/packages/"):
             return self._upload()
         self.send_json({"error": "not found"}, 404)
@@ -2302,10 +2764,76 @@ class Handler(BaseHTTPRequestHandler):
         att = self._read_json(raw)
         if att is None:
             return self.send_json({"error": "invalid json"}, 400)
-        ok, id_or_err, already = self.store.record_attestation(user, att)
+        ok, id_or_err, already = self.store.record_attestation(user, att, raw)
         if not ok:
             return self.send_json({"error": id_or_err}, 400)
-        return self.send_json({"id": id_or_err, "recorded": not already}, 200 if already else 201)
+        # The leaf position, a signed checkpoint and (when the tree head is
+        # anchored) the TSA token: everything `verify-attest --proof` needs
+        # offline. Idempotent re-posts get a fresh checkpoint, same leaf.
+        position = self.store.log_position(id_or_err)
+        return self.send_json(
+            {"id": id_or_err, "recorded": not already, "log": position},
+            200 if already else 201,
+        )
+
+    # ---- transparency log (public: proofs leak no receipt content) --------
+    def _log_checkpoint(self):
+        checkpoint = self.store.log.checkpoint()
+        anchor = self.store.log.latest_anchor()
+        return self.send_json({"checkpoint": checkpoint, "anchor": anchor,
+                               "key": self.store.log.key_info()})
+
+    def _log_key(self):
+        return self.send_json(self.store.log.key_info())
+
+    def _log_proof(self):
+        qs = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+        leaf = (qs.get("leaf") or [""])[0].strip().removeprefix("sha256:")
+        if len(leaf) != 64 or any(c not in "0123456789abcdef" for c in leaf.lower()):
+            return self.send_json({"error": "leaf must be a sha256 hex digest"}, 400)
+        size = None
+        if qs.get("size"):
+            try:
+                size = int(qs["size"][0])
+            except ValueError:
+                return self.send_json({"error": "size must be an integer"}, 400)
+        proof = self.store.log.inclusion(leaf.lower(), size)
+        if proof is None:
+            return self.send_json({"error": "leaf not in log (or size out of range)"}, 404)
+        checkpoint = self.store.log.checkpoint()
+        proof["checkpoint"] = checkpoint if checkpoint["size"] == proof["tree_size"] else None
+        # Historical size: hand out a consistency proof to the signed head.
+        if proof["checkpoint"] is None:
+            proof["consistency_to_head"] = self.store.log.consistency(
+                proof["tree_size"], checkpoint["size"])
+            proof["head"] = checkpoint
+        anchor = self.store.log.latest_anchor()
+        proof["anchor"] = anchor if anchor and anchor["size"] == proof["tree_size"] else None
+        return self.send_json(proof)
+
+    def _log_consistency(self):
+        qs = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+        try:
+            first = int((qs.get("from") or ["0"])[0])
+            second = int((qs.get("to") or [str(self.store.log.size())])[0])
+        except ValueError:
+            return self.send_json({"error": "from/to must be integers"}, 400)
+        proof = self.store.log.consistency(first, second)
+        if proof is None:
+            return self.send_json({"error": "need 0 < from <= to <= log size"}, 400)
+        return self.send_json(proof)
+
+    def _log_anchor(self):
+        # Anchoring costs a TSA round-trip: authenticated users only.
+        if not self._authorized_user():
+            return self.send_json({"error": "authentication required"}, 401)
+        qs = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+        tsa = (qs.get("tsa") or [None])[0]
+        try:
+            anchor = self.store.log.anchor(tsa)
+        except Exception as e:
+            return self.send_json({"error": f"anchoring failed: {e}"}, 502)
+        return self.send_json({"anchor": anchor}, 201)
 
     def _attest_query(self):
         user = self._authorized_user()
@@ -2911,6 +3439,18 @@ def main() -> None:
                     help="Display name for the SSO provider (default: OIDC)")
     ap.add_argument("--sso-base-url",
                     help="Public base URL of this registry (for redirect_uri)")
+    # Transparency log (ROADMAP P0-5)
+    ap.add_argument("--log-key",
+                    help="Ed25519 seed (32 raw bytes, `erebus keygen` format) signing "
+                         "log checkpoints; default <dir>/log.key, created 0600 if absent")
+    ap.add_argument("--log-origin", default=None,
+                    help="checkpoint origin string clients pin (default: erebus-registry)")
+    ap.add_argument("--tsa-url",
+                    help="RFC 3161 TSA URL used to anchor checkpoints "
+                         "(e.g. https://freetsa.org/tsr); unset = no external anchoring")
+    ap.add_argument("--anchor-every", type=int, default=10,
+                    help="anchor the checkpoint at the TSA every N receipts (0 = manual "
+                         "POST /log/anchor only)")
     args = ap.parse_args()
 
     if bool(args.tls_cert) != bool(args.tls_key):
@@ -2920,6 +3460,10 @@ def main() -> None:
         args.dir, int(args.quota_gb * 1e9), int(args.upload_cap_gb * 1e9),
         require_auth=args.require_auth,
         allow_anon_uploads=args.allow_anon_uploads,
+        log_key=args.log_key,
+        log_origin=args.log_origin,
+        tsa_url=args.tsa_url,
+        anchor_every=args.anchor_every,
     )
     Handler.billing = {
         "secret_key": args.stripe_secret_key,

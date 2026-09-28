@@ -6,6 +6,7 @@
 
 pub mod assembly;
 pub mod attest;
+pub mod attest_log;
 pub mod audit;
 pub mod auth;
 pub mod backup;
@@ -27,7 +28,9 @@ pub mod inference;
 pub mod intoto;
 pub mod layer;
 pub mod legacy;
+pub mod log_proof;
 pub mod manifest;
+pub mod merkle;
 pub mod metadata;
 pub mod otel;
 pub mod paths;
@@ -35,6 +38,7 @@ pub mod persistent;
 pub mod pkgmgr;
 pub mod polyglot;
 pub mod registry;
+pub mod rootfs_merkle;
 pub mod sisr;
 pub mod sisr_header;
 pub mod sisr_stage;

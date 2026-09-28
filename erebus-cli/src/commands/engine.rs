@@ -296,6 +296,8 @@ mod tests {
             );
         }
         // host glibc libs bundled so llama-cli execs inside the sandbox
+        // (only a glibc host has them to copy)
+        #[cfg(target_os = "linux")]
         assert!(dest.join("libstdc++.so.6").is_file());
     }
 

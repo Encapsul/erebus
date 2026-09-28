@@ -17,7 +17,10 @@ use time::format_description::well_known::Iso8601;
 use time::OffsetDateTime;
 
 /// Current attestation spec version.
-pub const ATTESTATION_SPEC_VERSION: &str = "1.1";
+///
+/// 1.2 adds `execution.prev_attestation_hash` (signed) so receipts form a
+/// hash chain; all 1.x documents remain parseable and verifiable.
+pub const ATTESTATION_SPEC_VERSION: &str = "1.2";
 
 /// Marker string identifying this as an erebus execution attestation.
 pub const ATTESTATION_TYPE: &str = "erebus-execution";
@@ -81,6 +84,58 @@ pub struct ExecutionInfo {
     /// when unknown.
     #[serde(default)]
     pub exit_code: Option<i32>,
+    /// SHA-256 of the previous receipt file in the local trail (byte-exact),
+    /// `None` for the first receipt or when no trail is kept. Being inside
+    /// the signed statement, it makes deletion/reordering of receipts
+    /// detectable (see `attest_log`).
+    #[serde(default)]
+    pub prev_attestation_hash: Option<String>,
+    /// Present on receipts emitted by the attesting proxy (`erebus serve
+    /// --attest-key`): one receipt per inference call. `input_hash` is then
+    /// the request (`METHOD path\n` + body) and `output_hash` the decoded
+    /// response body; `exit_code` is unused.
+    #[serde(default)]
+    pub request: Option<RequestInfo>,
+    /// Merkle root of the extracted rootfs that was actually executed
+    /// (`rootfs.merkle`, see `rootfs_merkle`). Written by the launcher; absent
+    /// on offline receipts (`erebus attest`) and on caches predating it.
+    #[serde(default)]
+    pub rootfs_root: Option<String>,
+}
+
+/// One HTTP call through the attesting proxy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestInfo {
+    pub method: String,
+    pub path: String,
+    /// Upstream HTTP status; `None` when the engine never answered.
+    pub status: Option<u16>,
+}
+
+/// Behavior-hook fields a supervising launcher can attach to a receipt.
+///
+/// All fields are optional so offline receipts (`erebus attest`) stay
+/// schema-identical; a config struct keeps the generation API stable as the
+/// spec grows.
+#[derive(Debug, Clone, Default)]
+pub struct ExecutionCapture {
+    pub input_hash: Option<String>,
+    pub output_hash: Option<String>,
+    pub exit_code: Option<i32>,
+    pub prev_attestation_hash: Option<String>,
+    pub request: Option<RequestInfo>,
+    pub rootfs_root: Option<String>,
+}
+
+/// Bundle facts hashed once, reusable for many receipts.
+///
+/// `generate_attestation` re-reads and re-hashes the whole bundle; the
+/// attesting proxy emits one receipt per inference call, so it builds the
+/// template once and only signs a fresh `ExecutionInfo` per call.
+#[derive(Debug, Clone)]
+pub struct AttestationTemplate {
+    pub artifact: ArtifactInfo,
+    pub provenance: ProvenanceInfo,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,68 +243,160 @@ pub fn generate_attestation(
     bundle_path: &Path,
     signing_key: &SigningKey,
 ) -> Result<Attestation, anyhow::Error> {
-    generate_attestation_with_capture(bundle_path, signing_key, None, None, None)
+    generate_attestation_with_capture(bundle_path, signing_key, &ExecutionCapture::default())
 }
 
 /// Like [`generate_attestation`], but records behavior-hook fields captured by
-/// a supervising launcher: the canonical input vector hashed at launch and the
-/// payload's observed output hash + exit code once the run completes. Passing
-/// `None` keeps the field absent so offline attestations stay schema-identical.
+/// a supervising launcher (see [`ExecutionCapture`]). `None` fields stay
+/// absent so offline attestations remain schema-identical.
 pub fn generate_attestation_with_capture(
     bundle_path: &Path,
     signing_key: &SigningKey,
-    input_hash: Option<String>,
-    output_hash: Option<String>,
-    exit_code: Option<i32>,
+    capture: &ExecutionCapture,
 ) -> Result<Attestation, anyhow::Error> {
-    let bundle_bytes =
-        std::fs::read(bundle_path).map_err(|e| anyhow::anyhow!("failed to read bundle: {e}"))?;
+    AttestationTemplate::from_bundle(bundle_path)?.attest(signing_key, capture)
+}
 
-    let mut cursor = std::io::Cursor::new(&bundle_bytes);
+impl AttestationTemplate {
+    /// Read and hash `bundle_path` once.
+    pub fn from_bundle(bundle_path: &Path) -> Result<Self, anyhow::Error> {
+        let bundle_bytes = std::fs::read(bundle_path)
+            .map_err(|e| anyhow::anyhow!("failed to read bundle: {e}"))?;
+        let (artifact, metadata) = hash_bundle(&bundle_bytes)?;
+        Ok(Self {
+            artifact,
+            provenance: provenance_from_metadata(&metadata),
+        })
+    }
+
+    /// Sign a fresh receipt (timestamped now, on this machine) carrying
+    /// `capture`.
+    pub fn attest(
+        &self,
+        signing_key: &SigningKey,
+        capture: &ExecutionCapture,
+    ) -> Result<Attestation, anyhow::Error> {
+        let execution = ExecutionInfo {
+            attested_at: utc_now_iso8601(),
+            machine_id_hash: machine_id_hash(),
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            input_hash: capture.input_hash.clone(),
+            output_hash: capture.output_hash.clone(),
+            exit_code: capture.exit_code,
+            prev_attestation_hash: capture.prev_attestation_hash.clone(),
+            request: capture.request.clone(),
+            rootfs_root: capture.rootfs_root.clone(),
+        };
+
+        // The statement is the signed payload; the top-level fields are display
+        // copies that verifiers re-derive and compare (see `check_consistency`).
+        let statement = build_statement(&self.artifact, &self.provenance, &execution);
+        let mut attestation = Attestation {
+            spec_version: ATTESTATION_SPEC_VERSION.to_string(),
+            attestation_type: ATTESTATION_TYPE.to_string(),
+            artifact: self.artifact.clone(),
+            provenance: self.provenance.clone(),
+            execution,
+            statement,
+            signature: SignatureInfo {
+                algorithm: "ed25519".to_string(),
+                key_fingerprint: key_fingerprint(&signing_key.verifying_key()),
+                signature_hex: String::new(), // filled after signing
+            },
+        };
+
+        let doc_bytes = statement_bytes(&attestation.statement)?;
+        attestation.signature.signature_hex = hex::encode(signing_key.sign(&doc_bytes).to_bytes());
+        Ok(attestation)
+    }
+}
+
+/// `sha256:<hex>` fingerprint of an Ed25519 verifying key.
+pub fn key_fingerprint(vk: &VerifyingKey) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(vk.as_bytes())))
+}
+
+/// Canonical bytes the Ed25519 signature covers (spec 1.x: pretty JSON of the
+/// statement; `serde_json` emits object keys in sorted order, so re-serializing
+/// a parsed statement reproduces them byte-for-byte).
+fn statement_bytes(statement: &InTotoStatement) -> Result<Vec<u8>, anyhow::Error> {
+    serde_json::to_vec_pretty(statement)
+        .map_err(|e| anyhow::anyhow!("failed to serialize statement: {e}"))
+}
+
+/// Parse the footer and hash bundle / payload / metadata. Returns the artifact
+/// facts plus the parsed metadata JSON for provenance extraction.
+fn hash_bundle(bundle_bytes: &[u8]) -> Result<(ArtifactInfo, serde_json::Value), anyhow::Error> {
+    let mut cursor = std::io::Cursor::new(bundle_bytes);
     let footer = Footer::read_from(&mut cursor)
         .map_err(|e| anyhow::anyhow!("failed to read footer: {e}"))?;
 
-    // Hash the full bundle
-    let bundle_hash = sha256_hex(&bundle_bytes);
-
-    // Hash payload
-    let payload_start = footer.payload_offset as usize;
-    let payload_end = payload_start + footer.payload_csize as usize;
-    let payload = if payload_end <= bundle_bytes.len() {
-        &bundle_bytes[payload_start..payload_end]
-    } else {
-        anyhow::bail!("payload extends beyond file boundary");
-    };
-    let payload_hash = sha256_hex(payload);
-
-    // Hash metadata
-    let meta_start = footer.meta_offset as usize;
-    let meta_end = meta_start + footer.meta_size as usize;
-    let meta = if meta_end <= bundle_bytes.len() {
-        &bundle_bytes[meta_start..meta_end]
-    } else {
-        anyhow::bail!("metadata extends beyond file boundary");
-    };
-    let metadata_hash = sha256_hex(meta);
-
-    // Parse metadata JSON for provenance
+    let payload = slice_checked(
+        bundle_bytes,
+        footer.payload_offset,
+        footer.payload_csize,
+        "payload",
+    )?;
+    let meta = slice_checked(
+        bundle_bytes,
+        footer.meta_offset,
+        footer.meta_size,
+        "metadata",
+    )?;
     let metadata: serde_json::Value = serde_json::from_slice(meta)
         .map_err(|e| anyhow::anyhow!("failed to parse metadata JSON: {e}"))?;
 
-    let builder = format!("erebus-cli v{}", env!("CARGO_PKG_VERSION"));
-    let author = metadata
-        .get("author")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let license = metadata
-        .get("license")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let artifact = ArtifactInfo {
+        bundle_hash: sha256_hex(bundle_bytes),
+        payload_hash: sha256_hex(payload),
+        metadata_hash: sha256_hex(meta),
+        format_version: footer.format_version,
+        flags: flag_names(footer.flags),
+    };
+    Ok((artifact, metadata))
+}
 
-    // Extract layers
+/// Bounds-checked sub-slice; offsets come from an untrusted footer.
+fn slice_checked<'a>(
+    bytes: &'a [u8],
+    off: u64,
+    len: u64,
+    what: &str,
+) -> Result<&'a [u8], anyhow::Error> {
+    let end = off
+        .checked_add(len)
+        .filter(|end| *end <= bytes.len() as u64)
+        .ok_or_else(|| anyhow::anyhow!("{what} extends beyond file boundary"))?;
+    Ok(&bytes[off as usize..end as usize])
+}
+
+/// Builder / author / license / layers, read from the bundle metadata.
+fn provenance_from_metadata(metadata: &serde_json::Value) -> ProvenanceInfo {
+    let str_field = |k: &str| {
+        metadata
+            .get(k)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    };
+    ProvenanceInfo {
+        builder: format!("erebus-cli v{}", env!("CARGO_PKG_VERSION")),
+        author: str_field("author"),
+        license: str_field("license"),
+        layers: layers_from_metadata(metadata),
+    }
+}
+
+/// Layer list with a best-effort SHA-256 per layer: model layers carry it in
+/// `metadata.sha256` (embedded at build time); the runtime layer falls back to
+/// the metadata-level `rt_deps_hash`.
+fn layers_from_metadata(metadata: &serde_json::Value) -> Vec<LayerInfo> {
     let rt_deps_hash = metadata.get("rt_deps_hash").and_then(|v| v.as_str());
     let runtime_name = metadata.get("runtime").and_then(|v| v.as_str());
-    let layers: Vec<LayerInfo> = metadata
+    fn non_empty(v: &serde_json::Value) -> Option<&str> {
+        v.as_str().filter(|s| !s.is_empty())
+    }
+    metadata
         .get("layers")
         .and_then(|v| v.as_array())
         .map(|arr| {
@@ -257,29 +404,14 @@ pub fn generate_attestation_with_capture(
                 .filter_map(|layer| {
                     let name = layer.get("name")?.as_str()?.to_string();
                     let kind = layer.get("kind")?.as_str()?.to_string();
-                    // Model layers carry their SHA-256 in `metadata.sha256`
-                    // (embedded at build time); runtime layers fall back to the
-                    // metadata-level `rt_deps_hash`.
                     let sha256 = layer
                         .get("sha256")
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
+                        .and_then(non_empty)
+                        .or_else(|| layer.get("metadata")?.get("sha256").and_then(non_empty))
                         .or_else(|| {
-                            layer
-                                .get("metadata")
-                                .and_then(|m| m.get("sha256"))
-                                .and_then(|v| v.as_str())
-                                .filter(|s| !s.is_empty())
-                        })
-                        .or_else(|| {
-                            if kind == "runtime"
-                                && runtime_name == Some(name.as_str())
-                                && rt_deps_hash.is_some()
-                            {
-                                rt_deps_hash
-                            } else {
-                                None
-                            }
+                            (kind == "runtime" && runtime_name == Some(name.as_str()))
+                                .then_some(rt_deps_hash)
+                                .flatten()
                         })
                         .map(|s| format!("sha256:{s}"))
                         .unwrap_or_default();
@@ -287,54 +419,27 @@ pub fn generate_attestation_with_capture(
                 })
                 .collect()
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
 
-    // Build the structured fields first, then derive the in-toto statement
-    // from them (the statement is the signed payload; the sig covers its
-    // canonical bytes). Cloning here lets a single source of truth feed both
-    // the human-readable fields and the in-toto predicate.
-    let artifact = ArtifactInfo {
-        bundle_hash: bundle_hash.clone(),
-        payload_hash: payload_hash.clone(),
-        metadata_hash: metadata_hash.clone(),
-        format_version: footer.format_version,
-        flags: flag_names(footer.flags),
+/// Derive the in-toto statement from the structured fields. This is the single
+/// source of truth for what gets signed; `check_consistency` re-runs it on a
+/// parsed document and compares, so any edit to the unsigned display copies is
+/// caught.
+pub fn build_statement(
+    artifact: &ArtifactInfo,
+    provenance: &ProvenanceInfo,
+    execution: &ExecutionInfo,
+) -> InTotoStatement {
+    let subject = |name: &str, prefixed: &str| crate::intoto::Subject {
+        name: name.to_string(),
+        digest: std::collections::HashMap::from([("sha256".to_string(), intoto_digest(prefixed))]),
     };
-    let provenance = ProvenanceInfo {
-        builder: builder.clone(),
-        author: author.clone(),
-        license: license.clone(),
-        layers: layers.clone(),
-    };
-    let execution = ExecutionInfo {
-        attested_at: utc_now_iso8601(),
-        machine_id_hash: machine_id_hash(),
-        os: std::env::consts::OS.to_string(),
-        arch: std::env::consts::ARCH.to_string(),
-        input_hash,
-        output_hash,
-        exit_code,
-    };
-
-    let statement = InTotoStatement {
+    InTotoStatement {
         statement_type: INTOTO_STATEMENT_TYPE.to_string(),
         subject: vec![
-            crate::intoto::Subject {
-                name: "bundle".to_string(),
-                digest: {
-                    let mut d = std::collections::HashMap::new();
-                    d.insert("sha256".to_string(), intoto_digest(&artifact.bundle_hash));
-                    d
-                },
-            },
-            crate::intoto::Subject {
-                name: "payload".to_string(),
-                digest: {
-                    let mut d = std::collections::HashMap::new();
-                    d.insert("sha256".to_string(), intoto_digest(&artifact.payload_hash));
-                    d
-                },
-            },
+            subject("bundle", &artifact.bundle_hash),
+            subject("payload", &artifact.payload_hash),
         ],
         predicate_type: EREBUS_PREDICATE_TYPE.to_string(),
         predicate: serde_json::json!({
@@ -351,9 +456,12 @@ pub fn generate_attestation_with_capture(
                 "machine_id_hash": execution.machine_id_hash,
                 "os": execution.os,
                 "arch": execution.arch,
-                "input_hash": execution.input_hash.clone(),
-                "output_hash": execution.output_hash.clone(),
+                "input_hash": execution.input_hash,
+                "output_hash": execution.output_hash,
                 "exit_code": execution.exit_code,
+                "prev_attestation_hash": execution.prev_attestation_hash,
+                "request": execution.request,
+                "rootfs_root": execution.rootfs_root,
             },
             "artifact": {
                 "metadata_hash": artifact.metadata_hash,
@@ -361,34 +469,7 @@ pub fn generate_attestation_with_capture(
                 "flags": artifact.flags,
             },
         }),
-    };
-
-    // Assemble the attestation (unsigned first).
-    let mut attestation = Attestation {
-        spec_version: ATTESTATION_SPEC_VERSION.to_string(),
-        attestation_type: ATTESTATION_TYPE.to_string(),
-        artifact,
-        provenance,
-        execution,
-        statement: statement.clone(),
-        signature: SignatureInfo {
-            algorithm: "ed25519".to_string(),
-            key_fingerprint: format!(
-                "sha256:{}",
-                hex::encode(Sha256::digest(signing_key.verifying_key().as_bytes()))
-            ),
-            signature_hex: String::new(), // filled after signing
-        },
-    };
-
-    // Sign the in-toto statement's canonical bytes and fill the signature.
-    let doc_bytes = serde_json::to_vec_pretty(&attestation.statement)
-        .map_err(|e| anyhow::anyhow!("failed to serialize statement: {e}"))?;
-    let sig = signing_key.sign(&doc_bytes);
-
-    attestation.signature.signature_hex = hex::encode(sig.to_bytes());
-
-    Ok(attestation)
+    }
 }
 
 /// Write a signed execution attestation for `bundle_path` to `out_path`.
@@ -404,47 +485,90 @@ pub fn write_execution_attestation(
     key_path: &Path,
     out_path: &Path,
 ) -> Result<Attestation, anyhow::Error> {
-    let key = load_signing_key(key_path)?;
-    let attestation = generate_attestation(bundle_path, &key)?;
-    persist_attestation(&attestation, out_path)?;
-    Ok(attestation)
+    write_captured_execution_attestation(
+        bundle_path,
+        key_path,
+        out_path,
+        &ExecutionCapture::default(),
+    )
 }
 
 /// Write a signed execution attestation including behavior-hook captures.
 ///
-/// The launcher stub calls this once at launch (input only) and again once the
-/// supervised payload exits (plus `output_hash`/`exit_code`); each write is a
-/// self-contained, self-signed document and the second overwrites the first.
+/// Each write is a self-contained, self-signed document; `out_path` always
+/// holds the latest receipt. Use [`write_receipt`] to also append it to a
+/// hash-chained trail.
 pub fn write_captured_execution_attestation(
     bundle_path: &Path,
     key_path: &Path,
     out_path: &Path,
-    input_hash: Option<String>,
-    output_hash: Option<String>,
-    exit_code: Option<i32>,
+    capture: &ExecutionCapture,
 ) -> Result<Attestation, anyhow::Error> {
     let key = load_signing_key(key_path)?;
-    let attestation =
-        generate_attestation_with_capture(bundle_path, &key, input_hash, output_hash, exit_code)?;
+    let attestation = generate_attestation_with_capture(bundle_path, &key, capture)?;
     persist_attestation(&attestation, out_path)?;
     Ok(attestation)
 }
 
+/// Write a receipt to `out_path` (latest) **and** append it to `log`.
+///
+/// The receipt's `prev_attestation_hash` is set from the log head before
+/// signing, so the chain link is covered by the signature. Returns the
+/// attestation and the path of the appended log entry.
+pub fn write_receipt(
+    bundle_path: &Path,
+    key_path: &Path,
+    out_path: &Path,
+    log: &crate::attest_log::AttestationLog,
+    capture: &ExecutionCapture,
+) -> Result<(Attestation, std::path::PathBuf), anyhow::Error> {
+    let key = load_signing_key(key_path)?;
+    let template = AttestationTemplate::from_bundle(bundle_path)?;
+    let (attestation, entry) = append_receipt(&template, &key, log, capture)?;
+    persist_attestation(&attestation, out_path)?;
+    Ok((attestation, entry))
+}
+
+/// Sign a receipt linked to the trail head and append it. The caller must
+/// serialize concurrent appenders (the head is read, then advanced).
+pub fn append_receipt(
+    template: &AttestationTemplate,
+    signing_key: &SigningKey,
+    log: &crate::attest_log::AttestationLog,
+    capture: &ExecutionCapture,
+) -> Result<(Attestation, std::path::PathBuf), anyhow::Error> {
+    let chained = ExecutionCapture {
+        prev_attestation_hash: log.head()?,
+        ..capture.clone()
+    };
+    let attestation = template.attest(signing_key, &chained)?;
+    let entry = log.append(&attestation)?;
+    Ok((attestation, entry))
+}
+
 /// Load a raw 32-byte Ed25519 seed (the `erebus keygen` format).
-fn load_signing_key(key_path: &Path) -> Result<SigningKey, anyhow::Error> {
-    let key_bytes = std::fs::read(key_path)
-        .map_err(|e| anyhow::anyhow!("failed to read attestation key: {e}"))?;
-    let key = SigningKey::from_bytes(key_bytes.as_slice().try_into().map_err(|_| {
+pub fn load_signing_key(key_path: &Path) -> Result<SigningKey, anyhow::Error> {
+    let key_bytes = zeroize::Zeroizing::new(
+        std::fs::read(key_path)
+            .map_err(|e| anyhow::anyhow!("failed to read attestation key: {e}"))?,
+    );
+    let seed: &[u8; 32] = key_bytes.as_slice().try_into().map_err(|_| {
         anyhow::anyhow!("attestation key must be 32 bytes, got {}", key_bytes.len())
-    })?);
-    Ok(key)
+    })?;
+    Ok(SigningKey::from_bytes(seed))
+}
+
+/// Pretty JSON bytes of a whole receipt — the exact bytes stored on disk and
+/// hashed by the trail.
+pub fn receipt_bytes(attestation: &Attestation) -> Result<Vec<u8>, anyhow::Error> {
+    serde_json::to_vec_pretty(attestation)
+        .map_err(|e| anyhow::anyhow!("failed to serialize attestation: {e}"))
 }
 
 /// Serialize an attestation as pretty JSON and write it to `out_path`.
 fn persist_attestation(attestation: &Attestation, out_path: &Path) -> Result<(), anyhow::Error> {
-    let json = serde_json::to_vec_pretty(attestation)
-        .map_err(|e| anyhow::anyhow!("failed to serialize attestation: {e}"))?;
-    std::fs::write(out_path, json).map_err(|e| anyhow::anyhow!("failed to write attestation: {e}"))
+    std::fs::write(out_path, receipt_bytes(attestation)?)
+        .map_err(|e| anyhow::anyhow!("failed to write attestation: {e}"))
 }
 
 /// ISO 8601 UTC timestamp.
@@ -468,247 +592,150 @@ fn get_hostname() -> String {
 
 /// Verify an attestation against a set of trusted public keys.
 ///
-/// The signature covers the in-toto statement's canonical bytes (the same
-/// object produced by [`generate_attestation`]). Returns the verifying key
-/// that matched, or an error.
+/// Three checks, all required:
+/// 1. the Ed25519 signature over the statement's canonical bytes verifies
+///    under one of `trusted_keys`;
+/// 2. `signature.key_fingerprint` names that key;
+/// 3. the unsigned display fields (`artifact`, `provenance`, `execution`)
+///    re-derive to exactly the signed statement (`check_consistency`).
+///
+/// Returns the verifying key that matched. Error messages for tampering start
+/// with `TAMPERED:` so callers can surface them verbatim.
 pub fn verify_attestation(
     attestation: &Attestation,
     trusted_keys: &[VerifyingKey],
 ) -> Result<VerifyingKey, anyhow::Error> {
-    // Must match generate_attestation which signs `to_vec_pretty` bytes.
-    let doc_bytes = serde_json::to_vec_pretty(&attestation.statement)
-        .map_err(|e| anyhow::anyhow!("failed to serialize statement: {e}"))?;
-
+    let doc_bytes = statement_bytes(&attestation.statement)?;
     let sig_bytes = hex::decode(&attestation.signature.signature_hex)
         .map_err(|e| anyhow::anyhow!("invalid signature hex: {e}"))?;
     let sig = ed25519_dalek::Signature::from_slice(&sig_bytes)
         .map_err(|e| anyhow::anyhow!("invalid signature: {e}"))?;
 
-    for vk in trusted_keys {
-        if vk.verify(&doc_bytes, &sig).is_ok() {
-            return Ok(*vk);
-        }
+    let vk = trusted_keys
+        .iter()
+        .find(|vk| vk.verify(&doc_bytes, &sig).is_ok())
+        .ok_or_else(|| anyhow::anyhow!("TAMPERED: signature does not match any trusted key"))?;
+
+    let expected_fp = key_fingerprint(vk);
+    if attestation.signature.key_fingerprint != expected_fp {
+        anyhow::bail!(
+            "TAMPERED: key_fingerprint mismatch (document says {}, signing key is {})",
+            attestation.signature.key_fingerprint,
+            expected_fp
+        );
     }
 
-    anyhow::bail!("signature does not match any trusted key")
+    check_consistency(attestation)?;
+    Ok(*vk)
+}
+
+/// Re-derive the statement from the unsigned display fields and compare it to
+/// the signed one. Any drift means the human-readable copy was edited after
+/// signing.
+///
+/// `null` predicate entries are dropped on both sides before comparing: a
+/// null carries no signed information, and spec 1.0/1.1 documents predate
+/// some optional keys.
+pub fn check_consistency(attestation: &Attestation) -> Result<(), anyhow::Error> {
+    let expected = build_statement(
+        &attestation.artifact,
+        &attestation.provenance,
+        &attestation.execution,
+    );
+    let actual = &attestation.statement;
+
+    if actual.statement_type != expected.statement_type
+        || actual.predicate_type != expected.predicate_type
+    {
+        anyhow::bail!("TAMPERED: statement type mismatch with signed statement");
+    }
+    if actual.subject != expected.subject {
+        anyhow::bail!(
+            "TAMPERED: artifact hashes mismatch between unsigned fields and signed statement"
+        );
+    }
+
+    let expected_pred = strip_nulls(expected.predicate);
+    let actual_pred = strip_nulls(actual.predicate.clone());
+    if let Some(section) = first_differing_key(&expected_pred, &actual_pred) {
+        anyhow::bail!("TAMPERED: {section} mismatch between unsigned fields and signed statement");
+    }
+    Ok(())
+}
+
+/// Compare a receipt's signed bundle digest with the SHA-256 of `bundle_bytes`.
+pub fn check_bundle_matches(
+    attestation: &Attestation,
+    bundle_bytes: &[u8],
+) -> Result<(), anyhow::Error> {
+    let signed = attestation
+        .statement
+        .subject
+        .iter()
+        .find(|s| s.name == "bundle")
+        .and_then(|s| s.digest.get("sha256"))
+        .ok_or_else(|| anyhow::anyhow!("attestation has no signed bundle digest"))?;
+    let actual = hex::encode(Sha256::digest(bundle_bytes));
+    if signed != &actual {
+        anyhow::bail!(
+            "TAMPERED: bundle mismatch (attestation covers sha256:{signed}, file is sha256:{actual})"
+        );
+    }
+    Ok(())
+}
+
+/// Remove null-valued object members, recursively.
+fn strip_nulls(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter()
+                .filter(|(_, v)| !v.is_null())
+                .map(|(k, v)| (k, strip_nulls(v)))
+                .collect(),
+        ),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(strip_nulls).collect())
+        }
+        other => other,
+    }
+}
+
+/// Name of the first top-level predicate key whose value differs, or `None`
+/// when both predicates are identical.
+fn first_differing_key(expected: &serde_json::Value, actual: &serde_json::Value) -> Option<String> {
+    if expected == actual {
+        return None;
+    }
+    let (Some(e), Some(a)) = (expected.as_object(), actual.as_object()) else {
+        return Some("predicate".to_string());
+    };
+    e.iter()
+        .chain(a.iter())
+        .find(|(k, _)| e.get(*k) != a.get(*k))
+        .map(|(k, _)| k.clone())
+        .or_else(|| Some("predicate".to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
-
     use proptest::prelude::*;
-
-    proptest! {
-        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(32))]
-
-        #[test]
-        fn attestation_proptest_roundtrip(
-            bundle_hash in "sha256:[0-9a-f]{64}",
-            payload_hash in "sha256:[0-9a-f]{64}",
-            metadata_hash in "sha256:[0-9a-f]{64}",
-            builder in ".*",
-            machine_hash in "sha256:[0-9a-f]{64}",
-            os in "(linux|macos|windows)",
-            arch in "(x86_64|aarch64|riscv64)",
-        ) {
-            let att = Attestation {
-                spec_version: "1.0".to_string(),
-                attestation_type: "erebus-execution".to_string(),
-                artifact: ArtifactInfo {
-                    bundle_hash,
-                    payload_hash,
-                    metadata_hash,
-                    format_version: 3,
-                    flags: vec![],
-                },
-                provenance: ProvenanceInfo {
-                    builder,
-                    author: None,
-                    license: None,
-                    layers: vec![],
-                },
-                execution: ExecutionInfo {
-                    attested_at: "2026-01-01T00:00:00Z".to_string(),
-                    machine_id_hash: machine_hash,
-                    os,
-                    arch,
-                    input_hash: None,
-                    output_hash: None,
-                    exit_code: None,
-                },
-                statement: sample_statement(),
-                signature: SignatureInfo {
-                    algorithm: "ed25519".to_string(),
-                    key_fingerprint: "sha256:dead".to_string(),
-                    signature_hex: "deadbeef".to_string(),
-                },
-            };
-            let json = serde_json::to_string(&att).unwrap();
-            let parsed: Attestation = serde_json::from_str(&json).unwrap();
-            assert_eq!(&att.spec_version, &parsed.spec_version);
-            assert_eq!(&att.artifact.bundle_hash, &parsed.artifact.bundle_hash);
-            assert_eq!(&att.execution.os, &parsed.execution.os);
-        }
-    }
 
     fn test_key() -> SigningKey {
         SigningKey::from_bytes(&[1u8; 32])
     }
 
-    fn sample_statement() -> InTotoStatement {
-        InTotoStatement {
-            statement_type: INTOTO_STATEMENT_TYPE.to_string(),
-            subject: vec![crate::intoto::Subject {
-                name: "bundle".to_string(),
-                digest: {
-                    let mut d = std::collections::HashMap::new();
-                    d.insert("sha256".to_string(), "abc".to_string());
-                    d
-                },
-            }],
-            predicate_type: EREBUS_PREDICATE_TYPE.to_string(),
-            predicate: serde_json::json!({}),
-        }
-    }
-
-    #[test]
-    fn sha256_hex_deterministic() {
-        let a = sha256_hex(b"hello");
-        let b = sha256_hex(b"hello");
-        assert_eq!(a, b);
-        assert!(a.starts_with("sha256:"));
-    }
-
-    #[test]
-    fn flag_names_empty() {
-        assert!(flag_names(0x00).is_empty());
-    }
-
-    #[test]
-    fn flag_names_all() {
-        let flags = flag_names(0x07);
-        assert!(flags.contains(&"signed".to_string()));
-        assert!(flags.contains(&"encrypted".to_string()));
-        assert!(flags.contains(&"sisr".to_string()));
-    }
-
-    #[test]
-    fn machine_id_hash_deterministic() {
-        let a = machine_id_hash();
-        let b = machine_id_hash();
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn roundtrip_verify() {
-        let key = test_key();
-        let mut attestation = Attestation {
-            spec_version: "1.0".to_string(),
-            attestation_type: "erebus-execution".to_string(),
-            artifact: ArtifactInfo {
+    fn sample_fields() -> (ArtifactInfo, ProvenanceInfo, ExecutionInfo) {
+        (
+            ArtifactInfo {
                 bundle_hash: "sha256:abc".to_string(),
                 payload_hash: "sha256:def".to_string(),
                 metadata_hash: "sha256:ghi".to_string(),
                 format_version: 3,
                 flags: vec!["signed".to_string()],
             },
-            provenance: ProvenanceInfo {
-                builder: "erebus-cli v0.5.0".to_string(),
-                author: None,
-                license: None,
-                layers: vec![],
-            },
-            execution: ExecutionInfo {
-                attested_at: "2026-09-15T14:32:00Z".to_string(),
-                machine_id_hash: "sha256:abc123".to_string(),
-                os: "linux".to_string(),
-                arch: "x86_64".to_string(),
-                input_hash: None,
-                output_hash: None,
-                exit_code: None,
-            },
-            statement: sample_statement(),
-            signature: SignatureInfo {
-                algorithm: "ed25519".to_string(),
-                key_fingerprint: format!(
-                    "sha256:{}",
-                    hex::encode(Sha256::digest(key.verifying_key().as_bytes()))
-                ),
-                signature_hex: String::new(),
-            },
-        };
-
-        // Sign the statement's canonical bytes (must match verify_attestation: pretty).
-        let doc_bytes = serde_json::to_vec_pretty(&attestation.statement).unwrap();
-        let sig = key.sign(&doc_bytes);
-        attestation.signature.signature_hex = hex::encode(sig.to_bytes());
-
-        // Verify
-        let result = verify_attestation(&attestation, &[key.verifying_key()]);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn verify_wrong_key_fails() {
-        let key = test_key();
-        let wrong_key = SigningKey::from_bytes(&[2u8; 32]);
-
-        let mut attestation = Attestation {
-            spec_version: "1.0".to_string(),
-            attestation_type: "erebus-execution".to_string(),
-            artifact: ArtifactInfo {
-                bundle_hash: "sha256:abc".to_string(),
-                payload_hash: "sha256:def".to_string(),
-                metadata_hash: "sha256:ghi".to_string(),
-                format_version: 3,
-                flags: vec![],
-            },
-            provenance: ProvenanceInfo {
-                builder: "erebus-cli v0.5.0".to_string(),
-                author: None,
-                license: None,
-                layers: vec![],
-            },
-            execution: ExecutionInfo {
-                attested_at: "2026-09-15T14:32:00Z".to_string(),
-                machine_id_hash: "sha256:abc123".to_string(),
-                os: "linux".to_string(),
-                arch: "x86_64".to_string(),
-                input_hash: None,
-                output_hash: None,
-                exit_code: None,
-            },
-            statement: sample_statement(),
-            signature: SignatureInfo {
-                algorithm: "ed25519".to_string(),
-                key_fingerprint: "sha256:wrong".to_string(),
-                signature_hex: String::new(),
-            },
-        };
-
-        let doc_bytes = serde_json::to_vec_pretty(&attestation.statement).unwrap();
-        let sig = key.sign(&doc_bytes);
-        attestation.signature.signature_hex = hex::encode(sig.to_bytes());
-
-        let result = verify_attestation(&attestation, &[wrong_key.verifying_key()]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn attestation_serialization_roundtrip() {
-        let att = Attestation {
-            spec_version: "1.0".to_string(),
-            attestation_type: "erebus-execution".to_string(),
-            artifact: ArtifactInfo {
-                bundle_hash: "sha256:aaa".to_string(),
-                payload_hash: "sha256:bbb".to_string(),
-                metadata_hash: "sha256:ccc".to_string(),
-                format_version: 3,
-                flags: vec!["signed".to_string(), "sisr".to_string()],
-            },
-            provenance: ProvenanceInfo {
+            ProvenanceInfo {
                 builder: "erebus-cli v0.5.0".to_string(),
                 author: Some("test".to_string()),
                 license: Some("MIT".to_string()),
@@ -718,48 +745,49 @@ mod tests {
                     sha256: "sha256:ddd".to_string(),
                 }],
             },
-            execution: ExecutionInfo {
+            ExecutionInfo {
                 attested_at: "2026-09-15T14:32:00Z".to_string(),
                 machine_id_hash: "sha256:abc123".to_string(),
                 os: "linux".to_string(),
                 arch: "x86_64".to_string(),
                 input_hash: None,
-                output_hash: None,
-                exit_code: None,
+                output_hash: Some("sha256:out".to_string()),
+                exit_code: Some(0),
+                prev_attestation_hash: None,
+                request: None,
+                rootfs_root: None,
             },
-            statement: sample_statement(),
-            signature: SignatureInfo {
-                algorithm: "ed25519".to_string(),
-                key_fingerprint: "sha256:fff".to_string(),
-                signature_hex: "deadbeef".to_string(),
-            },
-        };
-        let json = serde_json::to_string(&att).unwrap();
-        let parsed: Attestation = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.spec_version, "1.0");
-        assert_eq!(parsed.artifact.flags.len(), 2);
-        assert_eq!(parsed.provenance.layers.len(), 1);
-        assert_eq!(parsed.provenance.layers[0].kind, "runtime");
-        assert_eq!(parsed.statement.statement_type, INTOTO_STATEMENT_TYPE);
+        )
     }
 
-    #[test]
-    fn write_execution_attestation_roundtrip() {
-        use crate::format::Footer;
-        use tempfile::tempdir;
+    /// Consistent, signed attestation built from `sample_fields`.
+    fn signed_sample(key: &SigningKey) -> Attestation {
+        let (artifact, provenance, execution) = sample_fields();
+        let statement = build_statement(&artifact, &provenance, &execution);
+        let mut att = Attestation {
+            spec_version: ATTESTATION_SPEC_VERSION.to_string(),
+            attestation_type: ATTESTATION_TYPE.to_string(),
+            artifact,
+            provenance,
+            execution,
+            statement,
+            signature: SignatureInfo {
+                algorithm: "ed25519".to_string(),
+                key_fingerprint: key_fingerprint(&key.verifying_key()),
+                signature_hex: String::new(),
+            },
+        };
+        let sig = key.sign(&statement_bytes(&att.statement).unwrap());
+        att.signature.signature_hex = hex::encode(sig.to_bytes());
+        att
+    }
 
-        let dir = tempdir().unwrap();
-        let key_path = dir.path().join("key");
-        let bundle_path = dir.path().join("bundle.erebus");
-        let out_path = dir.path().join("bundle.erebus.attest");
-
-        std::fs::write(&key_path, [7u8; 32]).unwrap();
-
-        // Minimal valid v3 bundle: stub + payload + metadata + packed footer.
-        let payload = b"hello payload";
+    /// Minimal valid v3 bundle on disk: stub + payload + metadata + footer.
+    fn write_bundle(dir: &Path) -> (std::path::PathBuf, Vec<u8>, &'static [u8]) {
+        let bundle_path = dir.join("bundle.erebus");
+        let payload: &[u8] = b"hello payload";
         let meta = br#"{"name":"test","runtime":"binary"}"#;
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&[0u8; 8]); // placeholder stub
+        let mut bytes = vec![0u8; 8];
         let payload_offset = bytes.len() as u64;
         bytes.extend_from_slice(payload);
         let meta_offset = bytes.len() as u64;
@@ -778,25 +806,216 @@ mod tests {
         };
         bytes.extend_from_slice(&footer.pack_full());
         std::fs::write(&bundle_path, &bytes).unwrap();
+        (bundle_path, bytes, payload)
+    }
 
-        let att = write_execution_attestation(&bundle_path, &key_path, &out_path).unwrap();
+    proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(32))]
 
-        // The artifact hashes match the on-disk bundle.
-        assert_eq!(att.artifact.bundle_hash, sha256_hex(&bytes));
-        assert_eq!(att.artifact.payload_hash, sha256_hex(payload));
-        assert_eq!(att.artifact.format_version, 3);
+        #[test]
+        fn attestation_proptest_roundtrip(
+            bundle_hash in "sha256:[0-9a-f]{64}",
+            payload_hash in "sha256:[0-9a-f]{64}",
+            builder in ".*",
+            os in "(linux|macos|windows)",
+        ) {
+            let (mut artifact, mut provenance, mut execution) = sample_fields();
+            artifact.bundle_hash = bundle_hash;
+            artifact.payload_hash = payload_hash;
+            provenance.builder = builder;
+            execution.os = os;
+            let statement = build_statement(&artifact, &provenance, &execution);
+            let att = Attestation {
+                spec_version: "1.2".to_string(),
+                attestation_type: ATTESTATION_TYPE.to_string(),
+                artifact, provenance, execution, statement,
+                signature: SignatureInfo {
+                    algorithm: "ed25519".to_string(),
+                    key_fingerprint: "sha256:dead".to_string(),
+                    signature_hex: "deadbeef".to_string(),
+                },
+            };
+            let json = serde_json::to_string(&att).unwrap();
+            let parsed: Attestation = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(&att.artifact.bundle_hash, &parsed.artifact.bundle_hash);
+            prop_assert_eq!(&att.execution.os, &parsed.execution.os);
+            // Whatever the field values, a document built from its own fields is consistent.
+            prop_assert!(check_consistency(&parsed).is_ok());
+        }
+    }
 
-        // The persisted JSON verifies against the key's public half.
-        let json = std::fs::read_to_string(&out_path).unwrap();
-        let parsed: Attestation = serde_json::from_str(&json).unwrap();
-        let key = SigningKey::from_bytes(&[7u8; 32]);
+    #[test]
+    fn sha256_hex_deterministic() {
+        assert_eq!(sha256_hex(b"hello"), sha256_hex(b"hello"));
+        assert!(sha256_hex(b"hello").starts_with("sha256:"));
+    }
+
+    #[test]
+    fn flag_names_all_and_empty() {
+        assert!(flag_names(0x00).is_empty());
+        let flags = flag_names(0x07);
+        assert!(flags.contains(&"signed".to_string()));
+        assert!(flags.contains(&"encrypted".to_string()));
+        assert!(flags.contains(&"sisr".to_string()));
+    }
+
+    #[test]
+    fn machine_id_hash_deterministic() {
+        assert_eq!(machine_id_hash(), machine_id_hash());
+    }
+
+    #[test]
+    fn roundtrip_verify() {
+        let key = test_key();
+        let att = signed_sample(&key);
+        let vk = verify_attestation(&att, &[key.verifying_key()]).unwrap();
+        assert_eq!(vk, key.verifying_key());
+    }
+
+    #[test]
+    fn verify_wrong_key_fails() {
+        let att = signed_sample(&test_key());
+        let wrong = SigningKey::from_bytes(&[2u8; 32]);
+        let err = verify_attestation(&att, &[wrong.verifying_key()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("TAMPERED"), "{err}");
+    }
+
+    #[test]
+    fn verify_survives_json_roundtrip() {
+        // The verifier re-serializes a parsed statement; this must reproduce
+        // the signed bytes exactly.
+        let key = test_key();
+        let att = signed_sample(&key);
+        let parsed: Attestation =
+            serde_json::from_slice(&serde_json::to_vec_pretty(&att).unwrap()).unwrap();
         verify_attestation(&parsed, &[key.verifying_key()]).unwrap();
     }
 
     #[test]
+    fn tampering_unsigned_execution_field_is_detected() {
+        let key = test_key();
+        let mut att = signed_sample(&key);
+        att.execution.exit_code = Some(1);
+        let err = verify_attestation(&att, &[key.verifying_key()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("TAMPERED: execution mismatch"), "{err}");
+    }
+
+    #[test]
+    fn tampering_unsigned_artifact_hash_is_detected() {
+        let key = test_key();
+        let mut att = signed_sample(&key);
+        att.artifact.bundle_hash = "sha256:evil".to_string();
+        let err = verify_attestation(&att, &[key.verifying_key()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("TAMPERED: artifact hashes mismatch"), "{err}");
+    }
+
+    #[test]
+    fn tampering_unsigned_provenance_is_detected() {
+        let key = test_key();
+        let mut att = signed_sample(&key);
+        att.provenance.layers[0].sha256 = "sha256:swapped".to_string();
+        let err = verify_attestation(&att, &[key.verifying_key()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("TAMPERED: layers mismatch"), "{err}");
+    }
+
+    #[test]
+    fn tampering_key_fingerprint_is_detected() {
+        let key = test_key();
+        let mut att = signed_sample(&key);
+        att.signature.key_fingerprint = "sha256:someone-else".to_string();
+        let err = verify_attestation(&att, &[key.verifying_key()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("TAMPERED: key_fingerprint"), "{err}");
+    }
+
+    #[test]
+    fn legacy_1_1_document_without_prev_hash_is_consistent() {
+        // A 1.1 predicate has no prev_attestation_hash key at all; nulls on
+        // our side must not be counted as a difference.
+        let key = test_key();
+        let mut att = signed_sample(&key);
+        att.spec_version = "1.1".to_string();
+        if let Some(exec) = att
+            .statement
+            .predicate
+            .get_mut("execution")
+            .and_then(|e| e.as_object_mut())
+        {
+            exec.remove("prev_attestation_hash");
+            exec.remove("input_hash");
+        }
+        let sig = key.sign(&statement_bytes(&att.statement).unwrap());
+        att.signature.signature_hex = hex::encode(sig.to_bytes());
+        verify_attestation(&att, &[key.verifying_key()]).unwrap();
+    }
+
+    #[test]
+    fn legacy_1_0_document_parses_with_defaults() {
+        let legacy = r#"{
+            "spec_version": "1.0",
+            "attestation_type": "erebus-execution",
+            "artifact": {"bundle_hash": "sha256:aa", "payload_hash": "sha256:bb",
+                         "metadata_hash": "sha256:cc", "format_version": 3, "flags": []},
+            "provenance": {"builder": "b", "author": null, "license": null, "layers": []},
+            "execution": {"attested_at": "2026-01-01T00:00:00Z",
+                          "machine_id_hash": "sha256:mm", "os": "linux", "arch": "x86_64"},
+            "statement": {"_type": "https://in-toto.io/Statement/v1",
+                          "subject": [], "predicate_type": "https://slsa.dev/provenance/v1",
+                          "predicate": {}},
+            "signature": {"algorithm": "ed25519", "key_fingerprint": "sha256:fp",
+                          "signature_hex": "00"}
+        }"#;
+        let parsed: Attestation = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.execution.input_hash, None);
+        assert_eq!(parsed.execution.prev_attestation_hash, None);
+        assert_eq!(parsed.spec_version, "1.0");
+    }
+
+    #[test]
+    fn check_bundle_matches_accepts_and_rejects() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bundle_path, bytes, _) = write_bundle(dir.path());
+        let att = generate_attestation(&bundle_path, &test_key()).unwrap();
+        check_bundle_matches(&att, &bytes).unwrap();
+        let err = check_bundle_matches(&att, b"other")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("TAMPERED: bundle mismatch"), "{err}");
+    }
+
+    #[test]
+    fn write_execution_attestation_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("key");
+        std::fs::write(&key_path, [7u8; 32]).unwrap();
+        let (bundle_path, bytes, payload) = write_bundle(dir.path());
+        let out_path = dir.path().join("bundle.erebus.attest");
+
+        let att = write_execution_attestation(&bundle_path, &key_path, &out_path).unwrap();
+        assert_eq!(att.artifact.bundle_hash, sha256_hex(&bytes));
+        assert_eq!(att.artifact.payload_hash, sha256_hex(payload));
+        assert_eq!(att.artifact.format_version, 3);
+        assert_eq!(att.spec_version, "1.2");
+
+        let parsed: Attestation =
+            serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        verify_attestation(&parsed, &[key.verifying_key()]).unwrap();
+        check_bundle_matches(&parsed, &bytes).unwrap();
+    }
+
+    #[test]
     fn write_execution_attestation_rejects_bad_key_len() {
-        use tempfile::tempdir;
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let key_path = dir.path().join("badkey");
         std::fs::write(&key_path, [1u8; 16]).unwrap();
         let err = write_execution_attestation(
@@ -806,6 +1025,20 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("must be 32 bytes"));
+    }
+
+    #[test]
+    fn generate_rejects_footer_pointing_past_eof() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bundle_path, mut bytes, _) = write_bundle(dir.path());
+        // Corrupt payload_csize (footer core starts 84 bytes before EOF; csize at +16).
+        let csize_at = bytes.len() - 84 + 16;
+        bytes[csize_at..csize_at + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        std::fs::write(&bundle_path, &bytes).unwrap();
+        let err = generate_attestation(&bundle_path, &test_key())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("beyond file boundary"), "{err}");
     }
 
     #[test]
@@ -842,7 +1075,6 @@ mod tests {
             combined_output_hash(&err, &out),
             "stream order must matter (which stream produced what)"
         );
-        assert!(combined_output_hash(&out, &err).starts_with("sha256:"));
     }
 
     #[test]
@@ -854,101 +1086,81 @@ mod tests {
     }
 
     #[test]
-    fn legacy_attestation_without_capture_fields_parses() {
-        // A v1.0 document (no input/output/exit fields) must still parse, and
-        // the new fields default to None.
-        let legacy = r#"{
-            "spec_version": "1.0",
-            "attestation_type": "erebus-execution",
-            "artifact": {"bundle_hash": "sha256:aa", "payload_hash": "sha256:bb",
-                         "metadata_hash": "sha256:cc", "format_version": 3, "flags": []},
-            "provenance": {"builder": "b", "author": null, "license": null, "layers": []},
-            "execution": {"attested_at": "2026-01-01T00:00:00Z",
-                          "machine_id_hash": "sha256:mm", "os": "linux", "arch": "x86_64"},
-            "statement": {"_type": "https://in-toto.io/Statement/v1",
-                          "subject": [], "predicate_type": "https://slsa.dev/provenance/v1",
-                          "predicate": {}},
-            "signature": {"algorithm": "ed25519", "key_fingerprint": "sha256:fp",
-                          "signature_hex": "00"}
-        }"#;
-        let parsed: Attestation = serde_json::from_str(legacy).unwrap();
-        assert_eq!(parsed.execution.input_hash, None);
-        assert_eq!(parsed.execution.output_hash, None);
-        assert_eq!(parsed.execution.exit_code, None);
-        assert_eq!(parsed.spec_version, "1.0");
-    }
-
-    #[test]
-    fn captured_attestation_roundtrip_and_signature_cover_capture_fields() {
-        use tempfile::tempdir;
-        let dir = tempdir().unwrap();
+    fn captured_attestation_signature_covers_capture_fields() {
+        let dir = tempfile::tempdir().unwrap();
         let key_path = dir.path().join("key");
-        let bundle_path = dir.path().join("bundle.erebus");
-        let out_path = dir.path().join("bundle.erebus.attest");
         std::fs::write(&key_path, [9u8; 32]).unwrap();
+        let (bundle_path, _, _) = write_bundle(dir.path());
+        let out_path = dir.path().join("bundle.erebus.attest");
 
-        let payload = b"payload";
-        let meta = br#"{"name":"t","runtime":"binary"}"#;
-        let mut bytes = vec![0u8; 8];
-        let payload_offset = bytes.len() as u64;
-        bytes.extend_from_slice(payload);
-        let meta_offset = bytes.len() as u64;
-        bytes.extend_from_slice(meta);
-        let footer = Footer {
-            format_version: 3,
-            arch: 0,
-            flags: 0,
-            payload_offset,
-            payload_csize: payload.len() as u64,
-            payload_usize: payload.len() as u64,
-            payload_sha256: [0u8; 32],
-            meta_offset,
-            meta_size: meta.len() as u64,
-            sig_offset: 0,
+        let capture = ExecutionCapture {
+            input_hash: Some("sha256:in".to_string()),
+            output_hash: Some("sha256:out".to_string()),
+            exit_code: Some(42),
+            prev_attestation_hash: Some("sha256:prev".to_string()),
+            request: None,
+            rootfs_root: None,
         };
-        bytes.extend_from_slice(&footer.pack_full());
-        std::fs::write(&bundle_path, &bytes).unwrap();
-
-        let input_hash = Some("sha256:in".to_string());
-        let output_hash = Some("sha256:out".to_string());
-        let att = write_captured_execution_attestation(
-            &bundle_path,
-            &key_path,
-            &out_path,
-            input_hash,
-            output_hash,
-            Some(42),
-        )
-        .unwrap();
-        assert_eq!(att.execution.input_hash.as_deref(), Some("sha256:in"));
-        assert_eq!(att.execution.output_hash.as_deref(), Some("sha256:out"));
+        let att =
+            write_captured_execution_attestation(&bundle_path, &key_path, &out_path, &capture)
+                .unwrap();
         assert_eq!(att.execution.exit_code, Some(42));
-        assert_eq!(att.spec_version, "1.1");
+        assert_eq!(
+            att.execution.prev_attestation_hash.as_deref(),
+            Some("sha256:prev")
+        );
 
-        let json = std::fs::read_to_string(&out_path).unwrap();
-        let parsed: Attestation = serde_json::from_str(&json).unwrap();
+        let mut parsed: Attestation =
+            serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();
         let key = SigningKey::from_bytes(&[9u8; 32]);
         verify_attestation(&parsed, &[key.verifying_key()]).unwrap();
 
-        // The signed predicate carries the capture fields.
-        let predicate = parsed
-            .statement
-            .predicate
-            .as_object()
-            .unwrap()
-            .get("execution")
-            .unwrap();
-        assert_eq!(
-            predicate.get("input_hash").and_then(|v| v.as_str()),
-            Some("sha256:in")
-        );
-        assert_eq!(
-            predicate.get("output_hash").and_then(|v| v.as_str()),
-            Some("sha256:out")
-        );
-        assert_eq!(
-            predicate.get("exit_code").and_then(|v| v.as_i64()),
-            Some(42)
-        );
+        let exec = parsed.statement.predicate.get("execution").unwrap();
+        assert_eq!(exec["input_hash"], "sha256:in");
+        assert_eq!(exec["output_hash"], "sha256:out");
+        assert_eq!(exec["exit_code"], 42);
+        assert_eq!(exec["prev_attestation_hash"], "sha256:prev");
+
+        // Flipping the unsigned copy of a captured field is caught.
+        parsed.execution.output_hash = Some("sha256:forged".to_string());
+        assert!(verify_attestation(&parsed, &[key.verifying_key()]).is_err());
+    }
+
+    #[test]
+    fn template_signs_many_receipts_and_request_info_is_signed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bundle_path, bytes, _) = write_bundle(dir.path());
+        let key = test_key();
+        let template = AttestationTemplate::from_bundle(&bundle_path).unwrap();
+        assert_eq!(template.artifact.bundle_hash, sha256_hex(&bytes));
+
+        let capture = ExecutionCapture {
+            input_hash: Some("sha256:req".to_string()),
+            output_hash: Some("sha256:resp".to_string()),
+            request: Some(RequestInfo {
+                method: "POST".to_string(),
+                path: "/v1/chat/completions".to_string(),
+                status: Some(200),
+            }),
+            ..ExecutionCapture::default()
+        };
+        let mut att = template.attest(&key, &capture).unwrap();
+        verify_attestation(&att, &[key.verifying_key()]).unwrap();
+        check_bundle_matches(&att, &bytes).unwrap();
+        let req = &att.statement.predicate["execution"]["request"];
+        assert_eq!(req["method"], "POST");
+        assert_eq!(req["status"], 200);
+
+        // The template matches what generate_attestation produces.
+        let direct = generate_attestation(&bundle_path, &key).unwrap();
+        assert_eq!(direct.artifact.bundle_hash, att.artifact.bundle_hash);
+        assert_eq!(direct.provenance.builder, att.provenance.builder);
+
+        // Editing the unsigned request status is caught.
+        att.execution.request.as_mut().unwrap().status = Some(500);
+        let err = verify_attestation(&att, &[key.verifying_key()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("TAMPERED: execution mismatch"), "{err}");
     }
 }

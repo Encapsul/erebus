@@ -481,15 +481,24 @@ fn run() -> io::Result<()> {
         });
 
         if src_valid {
-            if verbose {
-                eprintln!("[erebus] warm start: cache hit {}", hash);
+            // The cache key only binds the *bundle*; the extracted tree can
+            // still be edited on disk. Re-hash it against rootfs.merkle and
+            // rebuild from the verified bundle on any drift (P0-4).
+            match extraction::rootfs_intact(&cache_root, &rootfs) {
+                Ok(()) => {
+                    if verbose {
+                        eprintln!("[erebus] warm start: cache hit {hash} (rootfs verified)");
+                    }
+                    return exec::exec_app(&meta, &rootfs, &app_config, &bin_path);
+                }
+                Err(reason) => {
+                    eprintln!("[erebus] rootfs changed since extraction: {reason} — re-extracting");
+                    let _ = fs::remove_file(&ready_marker);
+                }
             }
-            return exec::exec_app(&meta, &rootfs, &app_config, &bin_path);
-        }
-
-        // Source changed since last extraction — fall through to cold path
-        // which will re-verify SHA-256 + signature and rebuild the cache.
-        if verbose {
+        } else if verbose {
+            // Source changed since last extraction — fall through to cold path
+            // which will re-verify SHA-256 + signature and rebuild the cache.
             eprintln!("[erebus] source changed since cache — re-verifying");
         }
     }
@@ -584,6 +593,12 @@ fn run() -> io::Result<()> {
         if let Err(e) = verify_model_tensor_integrity(&rootfs, &meta) {
             eprintln!("[erebus] GGUF integrity check failed: {e}");
             return Err(e);
+        }
+        // Pin the extracted tree: warm starts verify against this manifest
+        // and receipts carry its root (execution.rootfs_root).
+        let root = extraction::record_rootfs_manifest(&cache_root, &rootfs)?;
+        if verbose {
+            eprintln!("[erebus] rootfs manifest written: {root}");
         }
     }
 

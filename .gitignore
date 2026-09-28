@@ -57,6 +57,7 @@ docs/book/
 # IDE / editors
 .DS_Store
 .claude/
+.idea/
 
 # OS
 Thumbs.db

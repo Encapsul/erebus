@@ -140,6 +140,57 @@ pub fn write_source_manifest(
     std::fs::write(path, json)
 }
 
+/// `ERE_ROOTFS_CHECK`: `off` skips the warm-start rootfs verification (and
+/// the read-only bits), `strict` also rejects files the app created at
+/// runtime, anything else is the default (tracked files must be intact).
+fn rootfs_check_mode() -> String {
+    std::env::var("ERE_ROOTFS_CHECK")
+        .map(|v| v.to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+/// After a cold extraction: hash every extracted file into
+/// `<cache_root>/rootfs.merkle` and strip write bits so in-place edits fail.
+/// Returns the `sha256:<root>` that receipts will carry.
+pub fn record_rootfs_manifest(cache_root: &Path, rootfs: &Path) -> io::Result<String> {
+    let manifest = erebus_core::rootfs_merkle::compute(rootfs)?;
+    erebus_core::rootfs_merkle::write(cache_root, &manifest)?;
+    if rootfs_check_mode() != "off" {
+        erebus_core::rootfs_merkle::make_files_read_only(rootfs, &manifest)?;
+    }
+    Ok(manifest.root_display())
+}
+
+/// Warm start gate (ROADMAP P0-4): re-hash the cached rootfs against its
+/// manifest. `Err(reason)` means the cache must be rebuilt from the verified
+/// bundle — a missing manifest (cache predating this check) counts too.
+pub fn rootfs_intact(cache_root: &Path, rootfs: &Path) -> Result<(), String> {
+    use erebus_core::rootfs_merkle::{read, verify, Verdict};
+    let mode = rootfs_check_mode();
+    if mode == "off" {
+        return Ok(());
+    }
+    let manifest = match read(cache_root) {
+        Ok(Some(m)) => m,
+        Ok(None) => return Err("no rootfs.merkle in cache".to_string()),
+        Err(e) => return Err(format!("unreadable rootfs.merkle: {e}")),
+    };
+    match verify(rootfs, &manifest, mode == "strict") {
+        Ok(Verdict::Intact { .. }) => Ok(()),
+        Ok(Verdict::Modified(problems)) => {
+            let shown: Vec<&str> = problems.iter().take(5).map(String::as_str).collect();
+            let more = problems.len().saturating_sub(shown.len());
+            let suffix = if more > 0 {
+                format!(" (+{more} more)")
+            } else {
+                String::new()
+            };
+            Err(format!("{}{suffix}", shown.join(", ")))
+        }
+        Err(e) => Err(format!("rootfs hashing failed: {e}")),
+    }
+}
+
 /// Extract zstd-compressed tar blobs atomically into `cache_root/rootfs`.
 ///
 /// `model_bytes` is the total declared size of model layers in the
@@ -391,6 +442,58 @@ mod tests {
 
         assert!(cache_root.join(".ready").is_file());
         assert!(cache_root.join("rootfs/app/app.py").is_file());
+    }
+
+    /// P0-4 acceptance: a file edited after the cold start (same size, so
+    /// size/mtime heuristics would miss it) forces a re-extraction, after
+    /// which the manifest root matches the pristine tree again.
+    #[test]
+    fn warm_start_refuses_modified_rootfs_and_reextraction_restores_root() {
+        let dir = TempDir::new().unwrap();
+        let cache_root = dir.path().join("hash");
+        let rootfs = cache_root.join("rootfs");
+        atomic_extract(&cache_root, write_app).unwrap();
+
+        // Cache predating the manifest → must rebuild.
+        assert!(rootfs_intact(&cache_root, &rootfs).is_err());
+
+        let root = record_rootfs_manifest(&cache_root, &rootfs).unwrap();
+        assert!(root.starts_with("sha256:"));
+        assert!(cache_root
+            .join(erebus_core::rootfs_merkle::MANIFEST_FILE)
+            .is_file());
+        assert_eq!(rootfs_intact(&cache_root, &rootfs), Ok(()));
+        assert_eq!(
+            erebus_core::rootfs_merkle::read_root(&cache_root).as_deref(),
+            Some(root.as_str())
+        );
+
+        // Runtime artefact: tolerated. Tampered tracked file: refused.
+        fs::write(rootfs.join("app/app.pyc"), b"cache").unwrap();
+        assert_eq!(rootfs_intact(&cache_root, &rootfs), Ok(()));
+        let target = rootfs.join("app/app.py");
+        let original = fs::read(&target).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Read-only bits block casual edits; an attacker with chmod still
+            // gets caught by the hash below.
+            assert!(fs::write(&target, &original).is_err());
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let mut evil = original.clone();
+        evil[0] ^= 0xff;
+        fs::write(&target, &evil).unwrap();
+        let reason = rootfs_intact(&cache_root, &rootfs).unwrap_err();
+        assert!(reason.contains("modified: app/app.py"), "{reason}");
+
+        // What main.rs does: drop the marker, re-extract, re-record.
+        fs::remove_file(cache_root.join(".ready")).unwrap();
+        atomic_extract(&cache_root, write_app).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), original);
+        let root2 = record_rootfs_manifest(&cache_root, &rootfs).unwrap();
+        assert_eq!(root, root2, "root must be a pure function of the bundle");
+        assert_eq!(rootfs_intact(&cache_root, &rootfs), Ok(()));
     }
 
     #[test]

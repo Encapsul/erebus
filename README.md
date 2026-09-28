@@ -102,6 +102,23 @@ erebus resolves the engine from the model format and launches it for you:
 | `*.engine` / `*.plan` | TensorRT-LLM | `trtllm-serve` |
 | MLX weights + config | MLX | `mlx_lm.server` |
 
+Add `--attest-key <key>` (or `ERE_ATTEST_KEY`) and `serve` becomes an
+**attesting reverse proxy**: the engine binds a private loopback port, every
+`POST` is relayed unchanged (streaming included) while its request and
+response bodies are hashed, and one Ed25519-signed, hash-chained receipt is
+appended to `agent.erebus.attest.d/`. Audit later with
+`erebus verify-attest --chain agent.erebus.attest.d --bundle agent.erebus`.
+
+Receipts can also be anchored outside your infrastructure: the registry keeps
+a **Merkle transparency log** (SQLite, RFC 6962) with Ed25519-signed
+checkpoints, optionally timestamped at an RFC 3161 TSA (`--tsa-url`).
+`erebus attest agent.erebus --push` stores the inclusion proof as
+`<receipt>.proof.json`; `erebus verify-attest <receipt> --proof` checks it
+**offline** — leaf, path, checkpoint signature, TSA token. On every warm
+start the launcher re-hashes the extracted rootfs against `rootfs.merkle` and
+re-extracts on any drift; the root is signed into the receipt
+(`execution.rootfs_root`).
+
 Missing engine on the target? If `ERE_REGISTRY` points at your registry,
 `serve` transparently downloads `<engine>-<platform>.pack.tar.gz`, verifies its
 SHA-256 sidecar and caches it — no llama.cpp install needed. Offline hosts can
@@ -144,13 +161,14 @@ fail-cold at boot.
 |---------|-------------|
 | `erebus build <dir>` | Package an app dir (`--universal`, `--embed-model`, `--ngl`, `--sign`, `--encrypt`, `--enable-sisr`, `--target`) |
 | `erebus run <file>` | Execute a bundle (namespace isolation, health gate) |
-| `erebus serve <file>` | Launch the engine as an OpenAI-compatible HTTP API |
+| `erebus serve <file>` | Launch the engine as an OpenAI-compatible HTTP API (`--attest-key`: signed receipt per call) |
 | `erebus chat <file>` | Terminal TUI chat; `--web` serves the embedded browser UI |
 | `erebus pull <name>` | Download from a registry (integrity-checked, cached) |
 | `erebus publish <file>` | Upload to a registry |
 | `erebus swap <file> <path> --from <new>` | Replace a file inside an existing bundle (hot-swap) |
 | `erebus inspect <file>` | Metadata, slice tables, JSON output |
 | `erebus layer push/list` | Manage shared runtime packs & models (local CAS) |
+| `erebus attest / verify-attest` | Signed execution receipts; `--push` / `--proof` for the transparency log |
 | `erebus keygen/sign/verify/trust` | Ed25519 signing workflow |
 | `erebus dashboard` | Interactive TUI: SISR benchmarks, cache status |
 | `erebus doctor / scan / env / clean / selftest / upgrade / completion / man` | Ops & tooling |

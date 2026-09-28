@@ -361,7 +361,7 @@ fn test_attest_roundtrip() {
     assert!(attest_out.exists(), ".attest file must exist");
     let attest_data = std::fs::read(&attest_out).unwrap();
     let parsed: serde_json::Value = serde_json::from_slice(&attest_data).unwrap();
-    assert_eq!(parsed["spec_version"], "1.1");
+    assert_eq!(parsed["spec_version"], "1.2");
     assert_eq!(parsed["attestation_type"], "erebus-execution");
     assert!(parsed["artifact"]["bundle_hash"].is_string());
     assert!(parsed["artifact"]["payload_hash"].is_string());

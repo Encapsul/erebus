@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
 use clap::Args;
 use ed25519_dalek::SigningKey;
-use erebus_core::attest::generate_attestation;
+use erebus_core::attest::{
+    generate_attestation, generate_attestation_with_capture, receipt_bytes, ExecutionCapture,
+};
+use erebus_core::attest_log::{default_log_dir, AttestationLog};
 use erebus_core::paths::default_key_dir;
 use std::path::PathBuf;
 use zeroize::Zeroizing;
@@ -18,6 +21,16 @@ pub struct AttestArgs {
     /// Output file path (defaults to <file>.attest)
     #[arg(short, long)]
     pub output: Option<PathBuf>,
+
+    /// Hash-chained trail directory to append the receipt to
+    /// (defaults to <output>.d; the receipt's previous-hash link points at
+    /// the trail head and is covered by the signature)
+    #[arg(long, value_name = "DIR")]
+    pub log: Option<PathBuf>,
+
+    /// Do not append the receipt to a trail (latest file only)
+    #[arg(long, conflicts_with = "log")]
+    pub no_log: bool,
 
     /// Push the attestation to a registry (needs --registry + a token)
     #[arg(long)]
@@ -62,15 +75,41 @@ pub fn run(args: AttestArgs) -> Result<()> {
     key_arr.copy_from_slice(&key_bytes);
     let signing_key = SigningKey::from_bytes(&key_arr);
 
-    let attestation =
-        generate_attestation(&args.file, &signing_key).context("failed to generate attestation")?;
-
     let output_path = args
         .output
         .unwrap_or_else(|| args.file.with_extension("erebus.attest"));
 
-    let json_bytes =
-        serde_json::to_vec_pretty(&attestation).context("failed to serialize attestation")?;
+    let log = if args.no_log {
+        None
+    } else {
+        let dir = args.log.unwrap_or_else(|| default_log_dir(&output_path));
+        Some(
+            AttestationLog::open(&dir)
+                .with_context(|| format!("failed to open trail {}", dir.display()))?,
+        )
+    };
+
+    // The trail head must be folded into the signed statement, so chaining
+    // happens at generation time rather than as a post-hoc append.
+    let (attestation, entry) = match &log {
+        Some(log) => {
+            let capture = ExecutionCapture {
+                prev_attestation_hash: log.head()?,
+                ..ExecutionCapture::default()
+            };
+            let att = generate_attestation_with_capture(&args.file, &signing_key, &capture)
+                .context("failed to generate attestation")?;
+            let entry = log.append(&att).context("failed to append to trail")?;
+            (att, Some(entry))
+        }
+        None => (
+            generate_attestation(&args.file, &signing_key)
+                .context("failed to generate attestation")?,
+            None,
+        ),
+    };
+
+    let json_bytes = receipt_bytes(&attestation).context("failed to serialize attestation")?;
     std::fs::write(&output_path, &json_bytes)
         .with_context(|| format!("failed to write {}", output_path.display()))?;
 
@@ -80,6 +119,8 @@ pub fn run(args: AttestArgs) -> Result<()> {
             serde_json::to_string_pretty(&serde_json::json!({
                 "file": args.file.display().to_string(),
                 "attestation": output_path.display().to_string(),
+                "trail_entry": entry.as_ref().map(|p| p.display().to_string()),
+                "prev_attestation_hash": attestation.execution.prev_attestation_hash,
                 "signed": true,
                 "key": key_path.display().to_string(),
             }))?
@@ -87,6 +128,9 @@ pub fn run(args: AttestArgs) -> Result<()> {
     } else if !args.quiet {
         eprintln!("Attested {}", args.file.display());
         eprintln!("  output: {}", output_path.display());
+        if let Some(entry) = &entry {
+            eprintln!("  trail:  {}", entry.display());
+        }
         eprintln!("  key:    {}", key_path.display());
     }
 
@@ -115,6 +159,10 @@ pub fn run(args: AttestArgs) -> Result<()> {
         let status = resp.status();
         let body: serde_json::Value = resp.json().context("invalid registry response")?;
         let id = body.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+        // The registry answers with the leaf position, a signed checkpoint
+        // and (when anchored) the TSA token: stored next to the receipt so
+        // `verify-attest --proof` works offline, forever.
+        let proof_path = store_proof(&registry, &body, &output_path, &json_bytes)?;
         if args.json {
             println!(
                 "{}",
@@ -122,16 +170,65 @@ pub fn run(args: AttestArgs) -> Result<()> {
                     "id": id,
                     "status": status.as_u16(),
                     "recorded": body.get("recorded"),
+                    "proof": proof_path.as_ref().map(|p| p.display().to_string()),
+                    "log": body.get("log"),
                 }))?
             );
         } else if !args.quiet {
             eprintln!("Pushed attestation to {registry}");
             eprintln!("  id:      {}", id);
             eprintln!("  status:  {}", status);
+            match (&proof_path, body.get("log")) {
+                (Some(p), Some(log)) => {
+                    eprintln!(
+                        "  log:     leaf #{} of {} (root {})",
+                        log["leaf_index"],
+                        log["tree_size"],
+                        log["root"].as_str().unwrap_or("?")
+                    );
+                    if log.get("anchor").is_some_and(|a| !a.is_null()) {
+                        eprintln!("  anchor:  RFC 3161 token stored");
+                    }
+                    eprintln!("  proof:   {}", p.display());
+                }
+                _ => eprintln!("  proof:   none (registry predates the transparency log)"),
+            }
         }
     }
 
     Ok(())
+}
+
+/// Conventional proof location: `<receipt>.proof.json`.
+pub fn proof_path_for(receipt: &std::path::Path) -> PathBuf {
+    let mut name = receipt
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    name.push_str(".proof.json");
+    receipt.with_file_name(name)
+}
+
+/// Verify the registry's proof against the bytes we just sent before
+/// persisting it — a registry returning a proof for another leaf would
+/// otherwise be stored as evidence.
+fn store_proof(
+    registry: &str,
+    body: &serde_json::Value,
+    receipt_path: &std::path::Path,
+    receipt_bytes: &[u8],
+) -> Result<Option<PathBuf>> {
+    let Some(log) = body.get("log").filter(|l| !l.is_null()) else {
+        return Ok(None);
+    };
+    let proof = erebus_core::log_proof::from_registry_response(registry, log)?;
+    let signer = proof.checkpoint.verify_signature()?;
+    erebus_core::log_proof::verify_proof(receipt_bytes, &proof, &[signer])
+        .context("registry returned a proof that does not verify")?;
+    let path = proof_path_for(receipt_path);
+    std::fs::write(&path, serde_json::to_vec_pretty(&proof)?)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(Some(path))
 }
 
 fn resolve_key_path(key: &Option<PathBuf>) -> Result<PathBuf> {

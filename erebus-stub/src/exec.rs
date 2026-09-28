@@ -722,6 +722,7 @@ fn relay_exit_status(status: libc::c_int) -> io::Result<()> {
 }
 
 /// Whether behavior capture is requested (opt-in) via `ERE_ATTEST_KEY`.
+#[cfg(target_os = "linux")]
 fn attest_capture_enabled() -> bool {
     std::env::var_os("ERE_ATTEST_KEY").is_some()
 }
@@ -757,6 +758,61 @@ fn attest_paths(bin_path: &Path) -> Option<(PathBuf, PathBuf)> {
             p
         });
     Some((key_path, out_path))
+}
+
+/// Trail directory for hash-chained receipts: `ERE_ATTEST_LOG=<dir>` overrides,
+/// `ERE_ATTEST_LOG=none` disables, default is `<receipt>.d` next to the latest
+/// receipt.
+fn attest_log_dir(out_path: &Path) -> Option<PathBuf> {
+    match std::env::var_os("ERE_ATTEST_LOG") {
+        Some(v) if v == "none" => None,
+        Some(v) => Some(PathBuf::from(v)),
+        None => Some(erebus_core::attest_log::default_log_dir(out_path)),
+    }
+}
+
+/// Write the final receipt for this run: latest copy at `out_path` and, unless
+/// disabled, an entry appended to the hash-chained trail. Never blocks the
+/// launch — the operator's duty is to make the proof write succeed.
+fn write_receipt_or_warn(
+    bin_path: &Path,
+    key_path: &Path,
+    out_path: &Path,
+    capture: &erebus_core::attest::ExecutionCapture,
+    phase: &str,
+) {
+    let log = match attest_log_dir(out_path) {
+        Some(dir) => match erebus_core::attest_log::AttestationLog::open(&dir) {
+            Ok(log) => Some(log),
+            Err(e) => {
+                eprintln!(
+                    "[erebus] warning: failed to open attestation trail {}: {e}",
+                    dir.display()
+                );
+                return;
+            }
+        },
+        None => None,
+    };
+    let result = match log {
+        Some(log) => {
+            erebus_core::attest::write_receipt(bin_path, key_path, out_path, &log, capture)
+                .map(|(_, entry)| Some(entry))
+        }
+        None => erebus_core::attest::write_captured_execution_attestation(
+            bin_path, key_path, out_path, capture,
+        )
+        .map(|_| None),
+    };
+    match result {
+        Ok(Some(entry)) => eprintln!(
+            "[erebus] attestation {phase}: {} (trail: {})",
+            out_path.display(),
+            entry.display()
+        ),
+        Ok(None) => eprintln!("[erebus] attestation {phase}: {}", out_path.display()),
+        Err(e) => eprintln!("[erebus] warning: failed to write execution attestation: {e}"),
+    }
 }
 
 /// Create a pipe pair (read, write).
@@ -915,23 +971,21 @@ fn exec_app_captured(
     let exit_code = exit_code_from_status(status);
 
     if let Some((key_path, out_path)) = attest_paths(bin_path) {
-        match erebus_core::attest::write_captured_execution_attestation(
-            bin_path,
-            &key_path,
-            &out_path,
+        let capture = erebus_core::attest::ExecutionCapture {
             input_hash,
             output_hash,
             exit_code,
-        ) {
-            Ok(_) => eprintln!(
-                "[erebus] attestation updated: {} (exit {})",
-                out_path.display(),
-                exit_code
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "?".to_string())
-            ),
-            Err(e) => eprintln!("[erebus] warning: failed to update execution attestation: {e}"),
-        }
+            prev_attestation_hash: None, // set from the trail head by write_receipt
+            request: None,
+            rootfs_root: rootfs_root_of(rootfs),
+        };
+        let phase = format!(
+            "updated (exit {})",
+            exit_code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "?".to_string())
+        );
+        write_receipt_or_warn(bin_path, &key_path, &out_path, &capture, &phase);
     }
 
     relay_exit_status(status)
@@ -965,7 +1019,7 @@ pub fn exec_app(
     // Auto-attestation (opt-in): with `ERE_ATTEST_KEY` set, write a signed
     // `.erebus.attest` right before launch. Done pre-pivot so host paths for
     // key and bundle still resolve; failures warn but never block the run.
-    write_auto_attestation_if_requested(bin_path);
+    write_auto_attestation_if_requested(bin_path, rootfs);
 
     // Single source of truth for the argv template: the layer system when
     // `entrypoint_layer` is set, the flat field for legacy binaries.
@@ -1220,7 +1274,7 @@ pub fn exec_app(
 /// attest (missing key, read-only dir) is logged loudly but never blocks the
 /// launch — the app must run; the operator's duty is to make the proof write
 /// succeed.
-fn write_auto_attestation_if_requested(bin_path: &Path) {
+fn write_auto_attestation_if_requested(bin_path: &Path, rootfs: &Path) {
     // Inside the capture child, the outer supervisor rewrites the attestation
     // with output+exit at the end; writing an intermediate one here would leak
     // a launcher line into the captured stderr stream.
@@ -1230,11 +1284,20 @@ fn write_auto_attestation_if_requested(bin_path: &Path) {
     let Some((key_path, out_path)) = attest_paths(bin_path) else {
         return;
     };
+    let capture = erebus_core::attest::ExecutionCapture {
+        rootfs_root: rootfs_root_of(rootfs),
+        ..Default::default()
+    };
+    write_receipt_or_warn(bin_path, &key_path, &out_path, &capture, "written");
+}
 
-    match erebus_core::attest::write_execution_attestation(bin_path, &key_path, &out_path) {
-        Ok(_) => eprintln!("[erebus] attestation written: {}", out_path.display()),
-        Err(e) => eprintln!("[erebus] warning: failed to write execution attestation: {e}"),
-    }
+/// `sha256:<root>` of the extracted tree, read from the manifest the cold
+/// path wrote next to `rootfs/` (`<cache_root>/rootfs.merkle`). `None` when
+/// the cache predates the manifest or the layout is unexpected.
+fn rootfs_root_of(rootfs: &Path) -> Option<String> {
+    rootfs
+        .parent()
+        .and_then(erebus_core::rootfs_merkle::read_root)
 }
 
 /// Resolve the entrypoint program + interpreter details shared by the

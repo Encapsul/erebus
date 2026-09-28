@@ -39,6 +39,8 @@ which = "7"
 
 # Hex encoding
 hex = "0.4"
+# RFC 3161 tokens travel base64-encoded inside proof files
+base64 = "0.22"
 
 # SISR manifest signing (Ed25519, zeroize on drop).
 # Pinned >= 2.1.0 for CVE-2023-48022 (Ed25519 bit must be set).
