@@ -19,6 +19,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable (2026-08-26)
         with:
+          toolchain: stable
           targets: x86_64-unknown-linux-musl
 
       - name: Install musl target
@@ -70,6 +71,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable (2026-08-26)
         with:
+          toolchain: stable
           targets: x86_64-unknown-linux-musl
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
@@ -79,6 +81,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable (2026-08-26)
+        with:
+          toolchain: stable
       - name: Install cargo-audit
         run: cargo install cargo-audit
       - name: Run cargo audit
@@ -111,6 +115,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable (2026-08-26)
         with:
+          toolchain: stable
           targets: ${{ matrix.triple }}
 
       - name: Install system dependencies
@@ -146,6 +151,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable (2026-08-26)
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
       - name: Install zig + cargo-zigbuild
