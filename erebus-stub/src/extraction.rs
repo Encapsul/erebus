@@ -327,8 +327,15 @@ mod tests {
 
     // ── Chaos: decompression-bomb limit math ────────────────────────────
 
+    // `from_env` reads ERE_MAX_EXTRACT_SIZE, and one test below sets it.
+    // Tests run in parallel threads sharing one process environment, so
+    // every reader must hold this lock or it may observe the other test's
+    // value (seen as a 1-in-N flake on CI).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn limits_default_without_model_allowance() {
+        let _env = ENV_LOCK.lock().unwrap();
         let l = ExtractLimits::from_env(0);
         assert_eq!(l.max_bytes, DEFAULT_MAX_DECOMPRESSED_BYTES);
         assert_eq!(l.max_files, DEFAULT_MAX_FILES);
@@ -336,6 +343,7 @@ mod tests {
 
     #[test]
     fn limits_raise_ceiling_for_declared_models() {
+        let _env = ENV_LOCK.lock().unwrap();
         let model = 3u64 * 1024 * 1024 * 1024; // 3 GB of declared weights
         let l = ExtractLimits::from_env(model);
         assert_eq!(l.max_bytes, model + MODEL_ALLOWANCE_SLACK);
@@ -343,6 +351,7 @@ mod tests {
 
     #[test]
     fn limits_env_cap_wins_when_larger_than_models() {
+        let _env = ENV_LOCK.lock().unwrap();
         std::env::set_var("ERE_MAX_EXTRACT_SIZE", "9000000000");
         let l = ExtractLimits::from_env(1024);
         std::env::remove_var("ERE_MAX_EXTRACT_SIZE");
@@ -351,6 +360,7 @@ mod tests {
 
     #[test]
     fn limits_saturate_on_huge_declaration() {
+        let _env = ENV_LOCK.lock().unwrap();
         let l = ExtractLimits::from_env(u64::MAX);
         assert_eq!(l.max_bytes, u64::MAX);
     }

@@ -452,20 +452,6 @@ fn unpack_engine_pack(archive: &Path, dest: &Path, engine: &str) -> Result<PathB
 }
 
 #[cfg(unix)]
-#[allow(dead_code)] // used when engine packs need chmod
-fn make_executable(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perm = std::fs::metadata(path)?.permissions();
-    perm.set_mode(0o755);
-    std::fs::set_permissions(path, perm).context("chmod engine pack")?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn make_executable(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
 fn humansize(n: usize) -> String {
     if n >= 1024 * 1024 {
         format!("{} MB", n / (1024 * 1024))

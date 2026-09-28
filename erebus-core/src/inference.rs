@@ -393,12 +393,17 @@ mod tests {
     #[test]
     fn gguf_launch_plan_shape() {
         let dir = tempfile::tempdir().unwrap();
+        // A bundled engine wins over PATH, so the test never depends on the
+        // host having llama.cpp installed (CI runners do not).
+        let bundled = dir.path().join("usr/local/bin");
+        std::fs::create_dir_all(&bundled).unwrap();
+        std::fs::write(bundled.join("llama-server"), b"#!/bin/sh\n").unwrap();
         let m = FoundModel {
             path: dir.path().join("m.gguf"),
             format: ModelFormat::Gguf,
         };
         let plan = plan_launch(dir.path(), &m, "0.0.0.0", 9000, 4096, 33, Some(8)).unwrap();
-        assert!(plan.program.ends_with("llama-server"));
+        assert_eq!(plan.program, bundled.join("llama-server").to_string_lossy());
         let joined = plan.args.join(" ");
         assert!(joined.contains("-ngl 33"));
         assert!(joined.contains("-c 4096"));

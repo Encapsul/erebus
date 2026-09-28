@@ -123,8 +123,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-user-static musl-tools
 
+      # cc-rs needs a C cross-compiler for the vendored C in zstd/ring; zig
+      # ships one for every musl target, so no distro cross toolchain is needed.
+      - name: Install zig + cargo-zigbuild
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked
+
       - name: Build stub for ${{ matrix.triple }}
-        run: cargo build --release -p erebus-stub --target ${{ matrix.triple }}
+        run: cargo zigbuild --release -p erebus-stub --target ${{ matrix.triple }}
 
       - name: Run QEMU ARM test (${{ matrix.target }})
         run: bash scripts/test_arm_qemu.sh ${{ matrix.target }}
