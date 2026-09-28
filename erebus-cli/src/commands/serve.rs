@@ -451,7 +451,6 @@ fn unpack_engine_pack(archive: &Path, dest: &Path, engine: &str) -> Result<PathB
     find_engine_binary(dest, engine).context("no engine binary inside pack")
 }
 
-#[cfg(unix)]
 fn humansize(n: usize) -> String {
     if n >= 1024 * 1024 {
         format!("{} MB", n / (1024 * 1024))
