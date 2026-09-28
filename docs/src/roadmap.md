@@ -1,5 +1,10 @@
 # Roadmap
 
+> **Source of truth:** [`ROADMAP.md`](https://github.com/Tednoob17/erebus/blob/main/ROADMAP.md)
+> at the repository root (product state, audit findings A1–A12, P0 proof
+> chain — complete as of 2026-09-17 — and P1/P2). This page keeps the original
+> distribution-centric vision for context.
+
 ## Vision
 
 Un **format d'artefact exécutable universel pour agents IA** : `[polyglot-stub][payload][metadata][footer]`.

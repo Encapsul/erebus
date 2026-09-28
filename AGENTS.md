@@ -2,7 +2,7 @@
 
 ## Project
 
-erebus packages any app into a single self-extracting ELF binary. Rust workspace (3 crates): `erebus-core` (library), `erebus-cli` (CLI, cross-platform), `erebus-stub` (launcher, Linux-only).
+erebus packages any app into a single self-extracting ELF binary and emits a signed, hash-chained, publicly anchored receipt of every execution (spec 2.0: DSSE over JCS in-toto, machine co-signature, Merkle transparency log — see `docs/src/spec/attestation.md`). Rust workspace (3 crates): `erebus-core` (library), `erebus-cli` (CLI, cross-platform), `erebus-stub` (launcher, Linux-only). `scripts/registry_server.py` is the stdlib-only registry (packages + transparency log + machine enrollment).
 
 ## Critical gotchas
 
@@ -55,6 +55,14 @@ Reads footer+metadata from `/proc/self/exe` → cache check → SHA-256 verify �
 Entrypoint resolution in `detect.rs:resolve_entrypoint()`:
 - Python: `["python3", "/app/app.py"]` (interpreter bare on PATH, app path absolute)
 - Binary: `["/app/app"]`
+
+### Proof chain (`erebus-core/src/attest.rs` and friends)
+
+- Receipt = `Attestation { artifact, provenance, execution (display copies), statement (signed), signature, envelope (2.0), machine (2.0) }`.
+- Signing bytes: 2.0 → DSSE PAE over `jcs::canonicalize(statement)`; 1.x → pretty JSON of `intoto::LegacyStatement`. Never change either without a new spec version.
+- `verify_attestation` must read only signed data; display copies are rebuilt via `build_statement` and compared (`TAMPERED: … mismatch`).
+- Machine identity is loaded implicitly by every producer (`attest::host_machine`); absence degrades to operator-only, never to an error.
+- Canonical byte formats shared with the Python registry (checkpoint, machine certificate, Merkle leaf/node) are pinned by tests on both sides — change both or neither.
 
 ### Unsafe boundary
 

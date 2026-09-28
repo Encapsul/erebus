@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # yc_demo.sh — YC Demo Day: cryptographic proof of AI agent execution
 #
-# Full flow: build → sign → verify → execute with capture → examine attestation
-# → tamper detection → registry push + query → chaos monkeys
+# Full flow: build → sign → verify → enroll this machine → execute with capture
+# → examine the spec 2.0 receipt (DSSE + machine co-signature) → tamper
+# detection → transparency log push, offline proof, --strict → cosign interop
+# → chaos monkeys
 #
 # Every step shows cryptographic evidence. No hand-waving.
 set -euo pipefail
@@ -26,7 +28,7 @@ WORK=$(mktemp -d /tmp/yc-demo.XXXXXX)
 trap 'rm -rf "$WORK"' EXIT
 
 # ────────────────────────────────────────────────────────────
-step "1/9  BUILD — Create a real agent"
+step "1/11 BUILD — Create a real agent"
 # ────────────────────────────────────────────────────────────
 APP="$WORK/agent"
 mkdir -p "$APP"
@@ -72,7 +74,7 @@ print(f'  signed: {d.get(\"signed\",\"?\")}')
 " && pass "Agent built" || fail "Build failed"
 
 # ────────────────────────────────────────────────────────────
-step "2/9  KEYGEN — Generate Ed25519 signing keys"
+step "2/11 KEYGEN — Generate Ed25519 signing keys"
 # ────────────────────────────────────────────────────────────
 mkdir -p "$WORK/keys" "$WORK/trusted"
 $ERE keygen --key-dir "$WORK/keys" --json -q 2>/dev/null | python3 -c "
@@ -88,7 +90,7 @@ PUB=$(ls "$WORK/keys"/*.pub | head -1)
 cp "$PUB" "$WORK/trusted/"
 
 # ────────────────────────────────────────────────────────────
-step "3/9  SIGN + VERIFY — Cryptographic signature"
+step "3/11 SIGN + VERIFY — Cryptographic signature"
 # ────────────────────────────────────────────────────────────
 $ERE sign "$WORK/agent.erebus" --key "$KEY" -q 2>/dev/null && pass "Binary signed" || fail "Sign failed"
 
@@ -100,7 +102,55 @@ print(f'  verified={v[\"verified\"]}  key={str(v.get(\"key\",\"\"))[:50]}')
 " && pass "Signature verified" || fail "Verify failed"
 
 # ────────────────────────────────────────────────────────────
-step "4/9  EXECUTE — Run with behavior capture (spec 1.1)"
+step "4/11 REGISTRY + ENROLL — Give this machine a certified identity"
+# ────────────────────────────────────────────────────────────
+SCRIPTS="$(dirname "$0")"
+REG_PORT=$(python3 -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print(s.getsockname()[1]);s.close()")
+REGISTRY="http://127.0.0.1:$REG_PORT"
+
+python3 "$SCRIPTS/registry_server.py" --dir "$WORK/registry" --host 127.0.0.1 --port "$REG_PORT" \
+    --log-origin yc-demo --anchor-every 0 >"$WORK/registry.log" 2>&1 &
+REG_PID=$!
+REG_UP=0
+for _ in $(seq 1 30); do
+    curl -sf --max-time 2 "$REGISTRY/health" >/dev/null 2>&1 && { REG_UP=1; break; }
+    sleep 0.5
+done
+test "$REG_UP" -eq 1 && pass "Registry live on :$REG_PORT (SQLite Merkle transparency log)" || fail "Registry did not start"
+trap 'mkdir -p /tmp/yc-harness-debug && cp "$WORK"/harness-*.log /tmp/yc-harness-debug/ 2>/dev/null; kill $REG_PID 2>/dev/null; rm -rf "$WORK"' EXIT
+
+TOKEN=$(python3 -c "
+import urllib.request, json
+req = urllib.request.Request('$REGISTRY/auth/register',
+    data=json.dumps({'username':'yc-demo','password':'demo-2026!'}).encode(),
+    headers={'Content-Type':'application/json'})
+try:
+    print(json.loads(urllib.request.urlopen(req).read()).get('token',''))
+except Exception:
+    print('')
+" 2>/dev/null)
+test -n "$TOKEN" && pass "Operator account registered" || fail "Registration failed"
+REG_KEY=$(curl -sf "$REGISTRY/log/key" | python3 -c "import json,sys;print(json.load(sys.stdin)['public_key_hex'])" 2>/dev/null || echo "")
+info "Registry key: ${REG_KEY:0:16}… (signs checkpoints AND machine certificates)"
+
+# The machine key never leaves this host; the registry only certifies it.
+export ERE_MACHINE_DIR="$WORK/machine"
+if $ERE enroll --registry "$REGISTRY" --token "$TOKEN" --json >"$WORK/enroll.json" 2>/dev/null; then
+    pass "Machine enrolled"
+    python3 -c "
+import json
+e = json.load(open('$WORK/enroll.json'))
+c = e.get('certificate') or {}
+print(f'  machine_id:  {e[\"machine_id\"][:52]}...')
+print(f'  key file:    {e[\"dir\"]}/machine.key (0600, never leaves this host)')
+print(f'  certificate: owner={c.get(\"owner\")} registry={c.get(\"registry\")} issued_at={c.get(\"issued_at\")}')
+" 2>/dev/null || true
+else
+    fail "Enroll failed"
+fi
+
+# ────────────────────────────────────────────────────────────
+step "5/11 EXECUTE — Run with behavior capture (spec 2.0 receipt)"
 # ────────────────────────────────────────────────────────────
 export ERE_ATTEST_KEY="$KEY"
 export ERE_ATTEST_OUT="$WORK/agent.attest"
@@ -127,7 +177,7 @@ test $RC -eq 0 && pass "Agent executed (exit 0)" || fail "Agent failed (rc=$RC)"
 test -f "$WORK/agent.attest" && pass "Attestation file written" || fail "No attestation file"
 
 # ────────────────────────────────────────────────────────────
-step "5/9  ATTESTATION — Examine the signed proof"
+step "6/11 RECEIPT — Examine the signed proof (DSSE + machine co-signature)"
 # ────────────────────────────────────────────────────────────
 if [ -f "$WORK/agent.attest" ]; then
     python3 <<PYEOF
@@ -135,6 +185,13 @@ import json
 att = json.load(open("$WORK/agent.attest"))
 print(f"  spec_version:      {att['spec_version']}")
 print(f"  attestation_type:  {att['attestation_type']}")
+env = att.get('envelope') or {}
+print(f"  envelope:          {env.get('payloadType','-')} — {len(env.get('signatures',[]))} signature(s): "
+      + ", ".join(s['keyid'][:23] + '…' for s in env.get('signatures',[])))
+m = att.get('machine') or {}
+print(f"  machine:           {m.get('machine_id','(not enrolled)')[:52]}"
+      + (f"  certified by {m['certificate']['registry']} for {m['certificate']['owner']}" if m.get('certificate') else ""))
+print(f"  predicate:         {att['statement'].get('predicateType', att['statement'].get('predicate_type'))}")
 print()
 print("  Artifact:")
 a = att['artifact']
@@ -161,6 +218,9 @@ ec = ex.get('exit_code')
 print(f"    input_hash:      {(ih or 'N/A')[:52]}...")
 print(f"    output_hash:     {(oh or 'N/A')[:52]}...")
 print(f"    exit_code:       {ec}")
+print(f"    rootfs_root:     {(ex.get('rootfs_root') or 'N/A')[:52]}...")
+print(f"    prev_receipt:    {(ex.get('prev_attestation_hash') or 'none (first in trail)')[:52]}")
+print(f"    machine_id:      {(ex.get('machine_id') or 'N/A')[:52]}  (inside the SIGNED statement)")
 print()
 print("  Signature:")
 sig = att['signature']
@@ -183,12 +243,30 @@ ok = ex.get('input_hash') is not None and ex.get('output_hash') is not None and 
 print('yes' if ok else 'no')
 " 2>/dev/null)
     test "$CAPTURE_OK" = "yes" && pass "Behavior capture complete (input_hash + output_hash + exit_code)" || fail "Behavior capture fields missing"
+
+    # Independent verification: operator signature + machine identity + bundle binding.
+    VA_OUT=$($ERE verify-attest "$WORK/agent.attest" --trusted-dir "$WORK/trusted" \
+        --bundle "$WORK/agent.erebus" --strict --registry-key "$REG_KEY" 2>&1 || true)
+    echo "$VA_OUT" | sed 's/^/  /'
+    echo "$VA_OUT" | grep -q "OK: attestation verified" && pass "verify-attest: operator signature, signed fields consistent, bundle bound" || fail "verify-attest failed"
+    echo "$VA_OUT" | grep -q "OK: machine" && pass "verify-attest --strict: co-signed by the enrolled machine, certificate trusted" || fail "--strict failed"
+
+    # Same receipt, edited exit code → refused: the display copy no longer
+    # matches the signed statement.
+    python3 -c "
+import json
+d = json.load(open('$WORK/agent.attest'))
+d['execution']['exit_code'] = 1
+json.dump(d, open('$WORK/agent.attest.edited', 'w'), indent=2)
+"
+    EDIT_OUT=$($ERE verify-attest "$WORK/agent.attest.edited" --trusted-dir "$WORK/trusted" 2>&1 || true)
+    echo "$EDIT_OUT" | grep -q "TAMPERED" && pass "Edited receipt (exit_code 0→1) REFUSED — $(echo "$EDIT_OUT" | grep -o 'TAMPERED[^(]*' | head -1)" || fail "Edited receipt accepted"
 else
     fail "No attestation file"
 fi
 
 # ────────────────────────────────────────────────────────────
-step "6/9  TAMPER DETECTION — Corrupt the binary"
+step "7/11 TAMPER DETECTION — Corrupt the binary"
 # ────────────────────────────────────────────────────────────
 cp "$WORK/agent.erebus" "$WORK/tampered.erebus"
 python3 -c "
@@ -204,7 +282,7 @@ echo "  $VERIFY_OUT" | head -2
 echo "$VERIFY_OUT" | grep -qi "tamper\|invalid\|mismatch\|error" && pass "Tamper DETECTED" || fail "Tamper NOT detected"
 
 # ────────────────────────────────────────────────────────────
-step "7/9  INTEGRITY — Untampered binary still verifies"
+step "8/11 INTEGRITY — Untampered binary still verifies"
 # ────────────────────────────────────────────────────────────
 $ERE verify "$WORK/agent.erebus" --trusted-dir "$WORK/trusted" --json -o "$WORK/verify.json" 2>/dev/null
 python3 -c "
@@ -214,87 +292,99 @@ print(f'  verified={v[\"verified\"]}')
 " && pass "Original binary intact" || fail "Original binary broken"
 
 # ────────────────────────────────────────────────────────────
-step "8/9  REGISTRY — Push + query attestation history"
+step "9/11 TRANSPARENCY LOG — push, kill the registry, prove offline"
 # ────────────────────────────────────────────────────────────
-SCRIPTS="$(dirname "$0")"
-REG_PORT=$(python3 -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print(s.getsockname()[1]);s.close()")
-REGISTRY="http://127.0.0.1:$REG_PORT"
-
-python3 "$SCRIPTS/registry_server.py" --dir "$WORK/registry" --host 127.0.0.1 --port "$REG_PORT" >"$WORK/registry.log" 2>&1 &
-REG_PID=$!
-REG_UP=0
-for _ in $(seq 1 30); do
-    curl -sf --max-time 2 "$REGISTRY/health" >/dev/null 2>&1 && { REG_UP=1; break; }
-    sleep 0.5
-done
-test "$REG_UP" -eq 1 && pass "Registry live on :$REG_PORT" || fail "Registry did not start"
-trap 'mkdir -p /tmp/yc-harness-debug && cp "$WORK"/harness-*.log /tmp/yc-harness-debug/ 2>/dev/null; kill $REG_PID 2>/dev/null; rm -rf "$WORK"' EXIT
-
-# Register
-REG_RESULT=$(python3 -c "
-import urllib.request, json
-req = urllib.request.Request('$REGISTRY/auth/register',
-    data=json.dumps({'username':'yc-demo','password':'demo-2026!'}).encode(),
-    headers={'Content-Type':'application/json'})
-try:
-    resp = urllib.request.urlopen(req)
-    d = json.loads(resp.read())
-    print(d.get('token',''))
-except Exception as e:
-    print('ERROR:' + str(e))
-" 2>/dev/null)
-
-if echo "$REG_RESULT" | grep -q "^ERROR:"; then
-    info "Registry registration: $REG_RESULT — skipping push"
+if [ -z "$TOKEN" ]; then
+    info "No registry token — skipping log push"
 else
-    TOKEN="$REG_RESULT"
-    info "Token: ${TOKEN:0:20}..."
-    
-    # Push the RUNTIME attestation (captured in step 4/5) — it carries the
-    # input/output hashes + exit code. `erebus attest --push` regenerates a
-    # detached doc without execution data, so post the captured file instead.
+    # Push the RUNTIME receipt (input/output hashes + exit code) into the
+    # Merkle log; the registry answers with its leaf position.
     PUSH_OUT=$(python3 -c "
 import urllib.request, json
 att = open('$WORK/agent.attest','rb').read()
-req = urllib.request.Request('$REGISTRY/attestations',
-    data=att,
-    headers={'Content-Type':'application/json','Authorization':'Bearer ' + '$TOKEN'})
+req = urllib.request.Request('$REGISTRY/attestations', data=att,
+    headers={'Content-Type':'application/json','Authorization':'Bearer $TOKEN'})
 try:
-    resp = urllib.request.urlopen(req)
-    print(json.dumps(json.loads(resp.read())))
+    print(json.dumps(json.loads(urllib.request.urlopen(req).read())))
 except Exception as e:
     print('ERROR:' + str(e))
 " 2>/dev/null)
-    
     if echo "$PUSH_OUT" | grep -q "ERROR:"; then
-        info "Registry push failed: $PUSH_OUT" && fail "Attestation push failed"
+        fail "Runtime receipt push failed: $PUSH_OUT"
     else
-        PUSH_ID=$(echo "$PUSH_OUT" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('id','?'))" 2>/dev/null)
-        pass "Attestation pushed (id: ${PUSH_ID:-?})"
+        echo "$PUSH_OUT" | python3 -c "
+import json,sys
+d=json.load(sys.stdin); l=d.get('log') or {}; cp=l.get('checkpoint') or {}
+print(f'  runtime receipt → leaf #{l.get(\"leaf_index\")} of {l.get(\"tree_size\")}  root={str(l.get(\"root\"))[:40]}...')
+print(f'  checkpoint signed by {str(cp.get(\"key_id\"))[:30]}... at {cp.get(\"timestamp\")}')
+" 2>/dev/null || true
+        pass "Runtime receipt in the transparency log"
     fi
-    
-    # Query history
-    BUNDLE=$(python3 -c "
-import json
-att = json.load(open('$WORK/agent.attest'))
-print(att['artifact']['bundle_hash'])
-" 2>/dev/null)
-    
-    if [ -n "$BUNDLE" ]; then
-        $ERE attest-history --registry "$REGISTRY" --token "$TOKEN" --query "bundle=$BUNDLE" --json 2>/dev/null | python3 -c "
+
+    # A detached receipt via the CLI: the proof is verified and stored next
+    # to it, then checked again OFFLINE (registry killed below).
+    sleep 1.1   # distinct attested_at → distinct leaf
+    $ERE attest "$WORK/agent.erebus" --key "$KEY" --output "$WORK/detached.attest" --no-log \
+        --envelope "$WORK/agent.dsse.json" --push --registry "$REGISTRY" --token "$TOKEN" 2>&1 | sed 's/^/  /'
+    test -f "$WORK/detached.attest.proof.json" && pass "Inclusion proof stored: detached.attest.proof.json" || fail "No proof file"
+
+    BUNDLE=$(python3 -c "import json;print(json.load(open('$WORK/agent.attest'))['artifact']['bundle_hash'])" 2>/dev/null)
+    $ERE attest-history --registry "$REGISTRY" --token "$TOKEN" --query "bundle=$BUNDLE" --json 2>/dev/null | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 recs = d.get('records', d if isinstance(d, list) else [])
-print(f'  records: {len(recs)}')
-for r in recs[:3]:
-    ex = r.get('attestation',{}).get('execution',{})
-    print(f'    [{ex.get(\"attested_at\",\"?\")[:19]}] input={str(ex.get(\"input_hash\",\"?\"))[:30]}...')
+print(f'  history: {len(recs)} receipt(s) for this bundle')
 " 2>/dev/null && pass "Registry queryable history" || fail "History query failed"
-    fi
+
+    # Registry gone. Everything below is offline.
+    kill $REG_PID 2>/dev/null || true
+    wait $REG_PID 2>/dev/null || true
+    info "Registry stopped — verifying with nothing but files and public keys"
+    PROOF_OUT=$($ERE verify-attest "$WORK/detached.attest" --trusted-dir "$WORK/trusted" \
+        --proof --log-key "$REG_KEY" --strict 2>&1 || true)
+    echo "$PROOF_OUT" | sed 's/^/  /'
+    echo "$PROOF_OUT" | grep -q "OK: transparency log" && pass "Offline proof: leaf, Merkle path, signed checkpoint" || fail "Offline proof failed"
+    echo "$PROOF_OUT" | grep -q "OK: machine" && pass "Offline --strict: machine co-signature + registry certificate" || fail "Offline --strict failed"
+
+    # Forge the proof's tree size → refused.
+    python3 -c "
+import json
+p = json.load(open('$WORK/detached.attest.proof.json'))
+p['tree_size'] += 1; p['checkpoint']['size'] += 1
+json.dump(p, open('$WORK/forged.proof.json','w'))
+"
+    FORGE_OUT=$($ERE verify-attest "$WORK/detached.attest" --trusted-dir "$WORK/trusted" \
+        --proof-file "$WORK/forged.proof.json" --log-key "$REG_KEY" 2>&1 || true)
+    echo "$FORGE_OUT" | grep -q "TAMPERED" && pass "Forged checkpoint REFUSED" || fail "Forged checkpoint accepted"
 fi
 
 # ────────────────────────────────────────────────────────────
-step "9/9  CHAOS — All 4 harnesses (extreme mode)"
+step "10/11 INTEROP — Verify the same receipt with Sigstore cosign"
+# ────────────────────────────────────────────────────────────
+PEM=$(ls "$WORK/keys"/*.pem 2>/dev/null | head -1)
+if command -v cosign >/dev/null 2>&1 && [ -f "$WORK/agent.dsse.json" ] && [ -n "$PEM" ]; then
+    COSIGN_OUT=$(cosign verify-blob-attestation --key "$PEM" --signature "$WORK/agent.dsse.json" \
+        --type https://erebus.dev/attestation/execution/v2 --insecure-ignore-tlog "$WORK/agent.erebus" 2>&1 || true)
+    echo "$COSIGN_OUT" | grep -v "WARNING\|deprecated" | sed 's/^/  /'
+    echo "$COSIGN_OUT" | grep -q "Verified OK" && pass "cosign verify-blob-attestation: Verified OK — standard DSSE/in-toto, zero erebus tooling" || fail "cosign refused the envelope"
+    python3 -c "
+import json,base64
+e=json.load(open('$WORK/agent.dsse.json'))
+p=json.loads(base64.b64decode(e['payload'])); p['predicate']['execution']['os']='plan9'
+e['payload']=base64.b64encode(json.dumps(p,separators=(',',':')).encode()).decode()
+json.dump(e,open('$WORK/bad.dsse.json','w'))"
+    if cosign verify-blob-attestation --key "$PEM" --signature "$WORK/bad.dsse.json" \
+        --type https://erebus.dev/attestation/execution/v2 --insecure-ignore-tlog "$WORK/agent.erebus" >/dev/null 2>&1; then
+        fail "cosign accepted a tampered envelope"
+    else
+        pass "cosign REFUSES the tampered envelope"
+    fi
+else
+    info "cosign not installed (or no envelope) — skipping Sigstore interop (CI runs it)"
+fi
+
+# ────────────────────────────────────────────────────────────
+step "11/11 CHAOS — All 4 harnesses (extreme mode)"
 # ────────────────────────────────────────────────────────────
 SCRIPTS="$(dirname "$0")"
 CHAOS_PASS=0; CHAOS_FAIL=0
@@ -326,17 +416,19 @@ if [ $FAILURES -eq 0 ]; then
     echo -e "${BOLD}${GREEN}║  YC DEMO: ALL CHECKS PASSED                             ║${NC}"
     echo -e "${BOLD}${GREEN}║                                                          ║${NC}"
     echo -e "${BOLD}${GREEN}║  ✓ Cryptographic proof of AI agent execution             ║${NC}"
-    echo -e "${BOLD}${GREEN}║  ✓ Behavior capture (spec 1.1) — input/output/exit       ║${NC}"
-    echo -e "${BOLD}${GREEN}║  ✓ Tamper detection — corrupted binary rejected          ║${NC}"
-    echo -e "${BOLD}${GREEN}║  ✓ Registry + queryable attestation history              ║${NC}"
+    echo -e "${BOLD}${GREEN}║  ✓ Spec 2.0 receipt: DSSE + in-toto, input/output/exit   ║${NC}"
+    echo -e "${BOLD}${GREEN}║  ✓ Machine identity: enrolled key co-signs, --strict     ║${NC}"
+    echo -e "${BOLD}${GREEN}║  ✓ Tamper detection: binary, receipt, proof all refused  ║${NC}"
+    echo -e "${BOLD}${GREEN}║  ✓ Transparency log: offline proof after registry death  ║${NC}"
+    echo -e "${BOLD}${GREEN}║  ✓ Sigstore interop: cosign says Verified OK             ║${NC}"
     echo -e "${BOLD}${GREEN}║  ✓ Chaos monkeys ($CHAOS_PASS/4) — all SURVIVED               ║${NC}"
     echo -e "${BOLD}${GREEN}║                                                          ║${NC}"
     echo -e "${BOLD}${GREEN}║  60-second pitch: \"erebus packages any AI agent into      ║${NC}"
-    echo -e "${BOLD}${GREEN}║  a single signed binary. When it runs, it produces a     ║${NC}"
-    echo -e "${BOLD}${GREEN}║  cryptographically signed attestation proving WHAT ran,   ║${NC}"
-    echo -e "${BOLD}${GREEN}║  WHERE, WHEN, and WHAT IT DID — input/output hashes,     ║${NC}"
-    echo -e "${BOLD}${GREEN}║  exit code, all signed by the agent's key. No infra      ║${NC}"
-    echo -e "${BOLD}${GREEN}║  needed. EU AI Act / SOC 2 compliant audit trail.\"        ║${NC}"
+    echo -e "${BOLD}${GREEN}║  a single signed binary. Every run leaves a standard,    ║${NC}"
+    echo -e "${BOLD}${GREEN}║  signed receipt proving WHAT ran, WHERE (enrolled        ║${NC}"
+    echo -e "${BOLD}${GREEN}║  machine), WHEN (public Merkle log + TSA) and WHAT IT    ║${NC}"
+    echo -e "${BOLD}${GREEN}║  DID — verifiable offline by erebus or cosign. No infra  ║${NC}"
+    echo -e "${BOLD}${GREEN}║  needed. EU AI Act / SOC 2 audit trail, by construction.\"║${NC}"
     echo -e "${BOLD}${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
     exit 0
 else

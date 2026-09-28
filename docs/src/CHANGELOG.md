@@ -2,6 +2,44 @@
 
 All notable changes to erebus are documented here.
 
+## [Unreleased] — 0.6.0-dev — the proof chain
+
+### Added
+
+- **Execution receipts spec 2.0** — DSSE envelope over the JCS (RFC 8785)
+  canonical in-toto statement, predicate
+  `https://erebus.dev/attestation/execution/v2`; `signature` mirrors the
+  operator entry so 1.x consumers keep working. `verify-attest` accepts 1.x
+  and 2.0. Spec: [`spec/attestation.md`](./spec/attestation.md).
+- **Machine identity** — `erebus enroll [--registry]`: per-host Ed25519 key
+  (0600), certificate signed by the registry key (`POST /machines/enroll`,
+  `GET /machines`); every receipt produced on the host is co-signed;
+  `verify-attest --strict [--registry-key]`.
+- **Sigstore interop** — `erebus keygen` writes `<fp>.pem`,
+  `erebus attest --envelope FILE` writes the bare envelope;
+  `cosign verify-blob-attestation` verifies it (exercised in CI).
+- **Transparency log** — registry `attestations/log.sqlite` Merkle tree
+  (RFC 6962/9162) with signed checkpoints, `GET /log/{checkpoint,proof,
+  consistency,key}`, RFC 3161 anchoring (`--tsa-url`, `--anchor-every`);
+  `erebus attest --push` stores `<receipt>.proof.json`;
+  `verify-attest --proof [--log-key]` verifies it offline.
+- **Warm-cache re-verification** — `rootfs.merkle` manifest written at
+  extraction; every warm start re-hashes the rootfs and re-extracts on drift;
+  `execution.rootfs_root` is signed into receipts (`ERE_ROOTFS_CHECK=off|strict`).
+- **Attesting reverse proxy** — `erebus serve --attest-key`: one hash-chained
+  receipt per inference call (`execution.request`).
+- **Hash-chained local trail** — `<bundle>.attest.d/`,
+  `execution.prev_attestation_hash`, `verify-attest --chain`.
+- `verify-attest` hardening: display-copy consistency check, `--bundle`
+  binding, fingerprint check.
+
+### Changed
+
+- The in-toto statement now serializes `predicateType` (standard); the 1.x
+  spelling `predicate_type` is still accepted and its signature bytes are
+  reproduced for legacy verification.
+- Registry attestations moved from JSONL to SQLite (old journal imported once).
+
 ## [1.0.0] — 2026-08-03 — SISR
 
 First major release integrating SISR (Self-Incremental Sovereign

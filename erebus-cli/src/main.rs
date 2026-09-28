@@ -21,7 +21,7 @@ use std::process::ExitCode;
     version,
     propagate_version = true,
     about = "Package any app into a single self-extracting binary",
-    long_about = "erebus packages any application into a single self-extracting ELF binary.\n\nSupported runtimes: Python, Node.js, Go, and static binaries.\nBuild, sign, attest, and serve AI agent bundles from one file.\n\nExamples:\n  erebus build ./myapp -o myapp.erebus\n  erebus run myapp.erebus\n  erebus inspect myapp.erebus\n  erebus keygen\n  erebus sign myapp.erebus --key ~/.erebus/keys/*.key\n  erebus verify myapp.erebus\n  erebus attest myapp.erebus --key ~/.erebus/keys/*.key\n  erebus audit myapp.erebus\n  erebus doctor\n  erebus scan .\n  erebus serve agent.erebus --port 8080\n  erebus chat agent.erebus\n  erebus completion bash >> ~/.bashrc\n  erebus completion zsh >> ~/.zshrc\n  erebus completion fish > ~/.config/fish/completions/erebus.fish\n\nDocumentation: https://github.com/Tednoob17/erebus\nReport bugs: https://github.com/Tednoob17/erebus/issues\n\nUninstall: rm $(which erebus) && rm -rf ~/.cache/erebus ~/.local/share/erebus"
+    long_about = "erebus packages any application into a single self-extracting ELF binary.\n\nSupported runtimes: Python, Node.js, Go, and static binaries.\nBuild, sign, serve — and prove what executed: every run leaves a signed, hash-chained receipt.\n\nExamples:\n  erebus build ./myapp -o myapp.erebus\n  erebus run myapp.erebus\n  erebus inspect myapp.erebus\n  erebus keygen\n  erebus sign myapp.erebus --key ~/.erebus/keys/*.key\n  erebus verify myapp.erebus\n  erebus attest myapp.erebus --key ~/.erebus/keys/*.key --push\n  erebus verify-attest myapp.erebus.attest --proof --strict\n  erebus enroll --registry http://host:8080 --token $TOKEN\n  erebus audit myapp.erebus\n  erebus doctor\n  erebus scan .\n  erebus serve agent.erebus --port 8080\n  erebus chat agent.erebus\n  erebus completion bash >> ~/.bashrc\n  erebus completion zsh >> ~/.zshrc\n  erebus completion fish > ~/.config/fish/completions/erebus.fish\n\nDocumentation: https://github.com/Tednoob17/erebus\nReport bugs: https://github.com/Tednoob17/erebus/issues\n\nUninstall: rm $(which erebus) && rm -rf ~/.cache/erebus ~/.local/share/erebus"
 )]
 struct Cli {
     /// Enable verbose output
@@ -77,11 +77,17 @@ enum Commands {
     /// Sign a .erebus file
     Sign(commands::sign::SignArgs),
 
-    /// Generate a detached attestation proving what executed
+    /// Generate a signed execution receipt (spec 2.0, DSSE + in-toto)
     ///
-    /// Produces a signed .erebus.attest JSON file containing artifact hashes,
-    /// provenance, and execution context. The hostname is never stored in
-    /// plaintext — only a SHA-256 hash is recorded.
+    /// Produces a .erebus.attest JSON file: artifact hashes, provenance and
+    /// execution context inside a DSSE envelope signed by your key and, on an
+    /// enrolled host, co-signed by the machine key. The hostname is never
+    /// stored in plaintext.
+    ///
+    /// Examples:
+    ///   erebus attest agent.erebus --key keys/<fp>.key
+    ///   erebus attest agent.erebus --push --registry <http://host:8080>   # + <receipt>.proof.json
+    ///   erebus attest agent.erebus --envelope agent.dsse.json             # for cosign
     Attest(commands::attest::AttestArgs),
 
     /// Query your execution attestation trail from a registry
@@ -160,13 +166,17 @@ enum Commands {
     /// Verify a .erebus file's signature
     Verify(commands::verify::VerifyArgs),
 
-    /// Verify a detached .erebus.attest attestation document
+    /// Verify execution receipts (single, trail, log proof, machine identity)
     ///
-    /// Checks the Ed25519 signature on the attestation against trusted keys.
+    /// Checks the signature against trusted keys and that every displayed
+    /// field matches the signed statement. Accepts spec 1.x and 2.0.
+    /// Everything runs offline.
     ///
     /// Examples:
-    ///   erebus verify-attest agent.erebus.attest
-    ///   erebus verify-attest agent.erebus.attest --trusted-dir ~/.erebus/trusted-keys/
+    ///   erebus verify-attest agent.erebus.attest --bundle agent.erebus
+    ///   erebus verify-attest --chain agent.erebus.attest.d
+    ///   erebus verify-attest agent.erebus.attest --proof --log-key <hex>      # transparency log
+    ///   erebus verify-attest agent.erebus.attest --strict --registry-key <hex> # enrolled machine
     VerifyAttest(commands::verify_attest::VerifyAttestArgs),
 
     /// Trust a public key
@@ -315,7 +325,9 @@ fn main() -> ExitCode {
         eprintln!("  inspect     Inspect a .erebus file's metadata");
         eprintln!("  serve       Serve a bundle model as an OpenAI-compatible API");
         eprintln!("  chat        Interactive chat with a bundled model");
-        eprintln!("  attest      Generate a detached attestation proving what executed");
+        eprintln!("  attest      Sign an execution receipt (DSSE + in-toto); --push to the log");
+        eprintln!("  verify-attest  Verify receipts: --chain, --proof, --strict");
+        eprintln!("  enroll      Give this host a certified machine identity");
         eprintln!("  audit       Generate or verify a signed compliance audit report");
         eprintln!();
         eprintln!("Use 'erebus --help' for the full listing of commands and options.");

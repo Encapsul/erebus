@@ -44,20 +44,28 @@ et qui génère **automatiquement** une preuve signée de ce qui a exécuté :
 
 ```bash
 erebus build ./mon-agent --embed-model model.gguf -o agent.erebus
-erebus sign agent.erebus --key my-key.pem
-erebus attest agent.erebus -o agent.erebus.attest
+erebus sign agent.erebus --key keys/<fp>.key
+erebus enroll --registry $ERE_REGISTRY --token $TOKEN   # une fois par machine
+ERE_ATTEST_KEY=keys/<fp>.key ./agent.erebus < input.json  # → agent.erebus.attest
+erebus attest agent.erebus --key keys/<fp>.key --push      # → <reçu>.proof.json
 ```
 
-L'auditeur reçoit trois fichiers :
+L'auditeur reçoit quatre fichiers :
 1. `agent.erebus` — le bundle exécutable
-2. `agent.erebus.attest` — la preuve signée de ce qui a exécuté
-3. La clé publique — pour vérifier la signature
+2. `agent.erebus.attest` — le reçu signé (spec 2.0 : enveloppe DSSE sur un
+   énoncé in-toto, co-signé par la clé machine de l'hôte enrôlé)
+3. `agent.erebus.attest.proof.json` — la preuve d'inclusion dans le log de
+   transparence du registre (checkpoint signé, jeton RFC 3161)
+4. Les clés publiques — opérateur (`<fp>.pub` / `<fp>.pem`) et registre
 
 Vérification offline, sans daemon, sans internet :
 
 ```bash
-erebus verify agent.erebus
-erebus verify-attest agent.erebus.attest --key auditeur-pub.pem
+erebus verify agent.erebus --trusted-dir ./trusted
+erebus verify-attest agent.erebus.attest --trusted-dir ./trusted \
+  --bundle agent.erebus --strict --proof --registry-key <hex>
+cosign verify-blob-attestation --key keys/<fp>.pem --signature agent.dsse.json \
+  --type https://erebus.dev/attestation/execution/v2 --insecure-ignore-tlog agent.erebus
 ```
 
 **Zéro installation. Zéro configuration. La preuve est le produit.**

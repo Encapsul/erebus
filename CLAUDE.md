@@ -12,8 +12,9 @@ everything in §4 is frozen.
 
 ## Architecture
 
-- `erebus-core/` — Core library (format, detect, compress, encrypt, attest + attest_log, SISR, assembly)
-- `erebus-cli/` — CLI tool (clap-based; proof commands: keygen/sign/verify/trust/attest/verify-attest/attest-history/audit)
+- `erebus-core/` — Core library (format, detect, compress, encrypt, SISR, assembly; proof: `attest`, `attest_log`, `intoto`, `jcs`, `dsse`, `merkle`, `rootfs_merkle`, `log_proof`, `machine`)
+- `erebus-cli/` — CLI tool (clap-based; proof commands: keygen/sign/verify/trust/attest/verify-attest/attest-history/enroll/audit)
+- `scripts/registry_server.py` — stdlib-only registry: packages, auth, SQLite Merkle transparency log (`/log/*`), RFC 3161 anchoring, machine enrollment (`/machines/*`)
 - `erebus-stub/` — Launcher (ELF/Mach-O/PE; the only crate with `unsafe`)
 
 ## Build Commands
@@ -32,7 +33,7 @@ make fmt          # Auto-format all code
 Before finishing any code change, run:
 1. `cargo fmt --check`
 2. `cargo clippy -p erebus-core --all-targets -- -D warnings` (then `erebus-cli`, `erebus-stub`)
-3. `cargo test --workspace` (on macOS hosts the stub e2e / engine tests need a Linux stub and `llama-server`; the attestation suites `attest*`, `attest_log`, `tests/attest_e2e.rs` must always pass)
+3. `cargo test --workspace` (on macOS hosts the stub e2e / engine tests need a Linux stub and `llama-server`; the attestation suites `attest*`, `attest_log`, `jcs`, `dsse`, `machine`, `merkle*`, `log_proof`, `tests/attest_e2e.rs`, `tests/attest_proof_e2e.rs`, `tests/attest_strict_e2e.rs` must always pass) and `python3 scripts/test_transparency_log.py` (must print `VERDICT: SURVIVED`)
 4. `erebus build examples/hello-web -o /tmp/test.erebus && erebus inspect /tmp/test.erebus`
 
 ## Claude Code Architecture (Command → Agent → Skill)

@@ -2,21 +2,25 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/Tednoob17/erebus/ci.yml?branch=main&label=build)](https://github.com/Tednoob17/erebus/actions)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.5.0-green.svg)](https://github.com/Tednoob17/erebus/releases)
+[![Version](https://img.shields.io/badge/version-0.6.0--dev-green.svg)](https://github.com/Tednoob17/erebus/releases)
+[![Attestation](https://img.shields.io/badge/receipts-DSSE%20%2B%20in--toto%20%2B%20cosign-blueviolet.svg)](docs/src/spec/attestation.md)
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)]()
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Tednoob17/erebus/pulls)
 
-**Your AI agent. One file. Runs anywhere — then serves an OpenAI-compatible API.**
+**Cryptographic proof of what your AI agent executed. One file. Runs anywhere.**
 
 erebus packages an AI agent — model weights, inference engine config, runtime,
-dependencies — into a single self-contained binary. Ship it like software:
+dependencies — into a single self-contained, sandboxed binary, and every
+execution leaves a **signed, hash-chained, publicly anchored receipt** of what
+ran, where, when, with which inputs and outputs. Ship it like software, audit it
+like a bank statement:
 
 ```bash
 erebus pull demo-agent                 # fetch from any registry
 erebus chat demo-agent.erebus          # terminal chat, zero install on the target
-# or expose it:
-erebus serve demo-agent.erebus --port 8080   # POST /v1/chat/completions
+erebus serve demo-agent.erebus --port 8080 --attest-key ops.key   # OpenAI API, one receipt per call
+erebus verify-attest --chain demo-agent.erebus.attest.d --bundle demo-agent.erebus   # prove it, offline
 ```
 
 One `.erebus` file carries **4 native platform slices** (linux-x64, linux-arm64,
@@ -53,7 +57,45 @@ erebus chat agent.erebus --web --port 8080   # or from the browser (embedded UI)
 | Delta model updates (SISR) | ✅ content-defined chunking | ❌ re-download | ❌ |
 | Declarative builds | `Agentfile.yaml` | Modelfile | ❌ |
 | Signing & trusted keys | Ed25519, fail-closed | ❌ | ❌ |
+| Execution receipts | ✅ signed in-toto/DSSE per run **and per inference call** | ❌ | ❌ |
+| Tamper-evident trail | ✅ local hash chain + Merkle transparency log + RFC 3161 anchor | ❌ | ❌ |
+| Machine identity | ✅ `erebus enroll`, per-host key co-signs, `--strict` | ❌ | ❌ |
+| Verifiable with standard tools | ✅ `cosign verify-blob-attestation` → `Verified OK` | ❌ | ❌ |
 | Chaos/security test suites in-repo | ✅ [benchmarks/security.md](benchmarks/security.md) | ❌ | ❌ |
+
+## Prove what ran — in 60 seconds
+
+```bash
+erebus keygen --key-dir keys                      # operator key (+ <fp>.pem for cosign)
+erebus enroll --registry $ERE_REGISTRY --token $T # once per host: machine key, certified
+erebus build ./agent -o agent.erebus && erebus sign agent.erebus --key keys/<fp>.key
+
+ERE_ATTEST_KEY=keys/<fp>.key ./agent.erebus < input.json   # run → agent.erebus.attest (+ trail)
+erebus verify-attest agent.erebus.attest --bundle agent.erebus --strict --registry-key $REG
+#  OK: attestation verified (key: …)      format: spec 2.0 (DSSE envelope)
+#  OK: machine sha256:… — enrolled by alice at https://registry (2026-09-17T…)
+
+erebus attest agent.erebus --key keys/<fp>.key --push --envelope agent.dsse.json
+erebus verify-attest agent.erebus.attest --proof --log-key $REG   # offline, forever
+#  OK: transparency log — leaf #41 of 42 … anchor: RFC 3161 token from freetsa.org
+
+cosign verify-blob-attestation --key keys/<fp>.pem --signature agent.dsse.json \
+  --type https://erebus.dev/attestation/execution/v2 --insecure-ignore-tlog agent.erebus
+#  Verified OK
+```
+
+What a receipt proves, layer by layer ([spec](docs/src/spec/attestation.md)):
+
+| Layer | Proves | Signed by |
+|---|---|---|
+| in-toto statement | bundle + payload digests, provenance, `input_hash`/`output_hash`/`exit_code`, `rootfs_root`, `prev_attestation_hash` | — |
+| DSSE envelope (JCS canonical) | the statement comes from the **operator key** | operator Ed25519 |
+| Machine co-signature + certificate | it was produced **on an enrolled host** owned by `<owner>` | machine key, registry key |
+| Transparency-log proof | it was published at leaf *i* of a signed Merkle tree, timestamped by a TSA | registry log key, RFC 3161 TSA |
+| Local trail | receipts are append-only; editing one breaks every later hash | operator key |
+
+Every value a verifier prints is read from the **signed** statement, never from
+the human-readable copies. Legacy 1.x receipts stay verifiable.
 
 ## The five-minute tour
 
@@ -105,29 +147,18 @@ erebus resolves the engine from the model format and launches it for you:
 Add `--attest-key <key>` (or `ERE_ATTEST_KEY`) and `serve` becomes an
 **attesting reverse proxy**: the engine binds a private loopback port, every
 `POST` is relayed unchanged (streaming included) while its request and
-response bodies are hashed, and one Ed25519-signed, hash-chained receipt is
-appended to `agent.erebus.attest.d/`. Audit later with
+response bodies are hashed, and one signed, hash-chained spec 2.0 receipt
+(co-signed by the host's machine key when enrolled) is appended to
+`agent.erebus.attest.d/`. Audit later with
 `erebus verify-attest --chain agent.erebus.attest.d --bundle agent.erebus`.
 
-Receipts can also be anchored outside your infrastructure: the registry keeps
-a **Merkle transparency log** (SQLite, RFC 6962) with Ed25519-signed
-checkpoints, optionally timestamped at an RFC 3161 TSA (`--tsa-url`).
-`erebus attest agent.erebus --push` stores the inclusion proof as
-`<receipt>.proof.json`; `erebus verify-attest <receipt> --proof` checks it
-**offline** — leaf, path, checkpoint signature, TSA token. On every warm
-start the launcher re-hashes the extracted rootfs against `rootfs.merkle` and
-re-extracts on any drift; the root is signed into the receipt
-(`execution.rootfs_root`).
-
-Receipts are **standard**: spec 2.0 signs a DSSE envelope over the
-JCS-canonical in-toto statement, so `cosign verify-blob-attestation --key
-<fp>.pem --signature agent.dsse.json --type
-https://erebus.dev/attestation/execution/v2 agent.erebus` says `Verified OK`
-with no erebus tooling (`erebus attest --envelope agent.dsse.json`). Run
-`erebus enroll --registry <url>` once per host: the registry certifies a
-per-machine key that co-signs every receipt produced there, and
-`erebus verify-attest --strict --registry-key <hex>` refuses anything not
-produced on an enrolled machine. Spec: `docs/src/spec/attestation.md`.
+Anchor receipts outside your infrastructure: the registry keeps a **Merkle
+transparency log** (SQLite, RFC 6962) with Ed25519-signed checkpoints,
+optionally timestamped at an RFC 3161 TSA (`--tsa-url`). `erebus attest --push`
+stores the inclusion proof as `<receipt>.proof.json`; `verify-attest --proof`
+checks it **offline**. On every warm start the launcher re-hashes the
+extracted rootfs against `rootfs.merkle`, re-extracts on any drift, and signs
+the root into the receipt (`execution.rootfs_root`).
 
 Missing engine on the target? If `ERE_REGISTRY` points at your registry,
 `serve` transparently downloads `<engine>-<platform>.pack.tar.gz`, verifies its
@@ -178,8 +209,10 @@ fail-cold at boot.
 | `erebus swap <file> <path> --from <new>` | Replace a file inside an existing bundle (hot-swap) |
 | `erebus inspect <file>` | Metadata, slice tables, JSON output |
 | `erebus layer push/list` | Manage shared runtime packs & models (local CAS) |
-| `erebus attest / verify-attest` | Signed execution receipts (DSSE/in-toto); `--push` / `--proof` for the transparency log, `--strict` for machine identity |
-| `erebus enroll` | Per-machine key + registry certificate; receipts from this host are co-signed |
+| `erebus attest / verify-attest` | Spec 2.0 execution receipts (DSSE + in-toto, JCS); `--envelope` for cosign, `--push` / `--proof` for the transparency log, `--strict` for machine identity, `--chain` for trails |
+| `erebus enroll` | Per-machine Ed25519 key + registry certificate; every receipt from this host is co-signed |
+| `erebus attest-history` | Query your receipts on a registry (`--query bundle=…,until=…`) |
+| `erebus audit` | Signed compliance report aggregating receipts, SBOM and integrity facts |
 | `erebus keygen/sign/verify/trust` | Ed25519 signing workflow |
 | `erebus dashboard` | Interactive TUI: SISR benchmarks, cache status |
 | `erebus doctor / scan / env / clean / selftest / upgrade / completion / man` | Ops & tooling |
@@ -233,7 +266,13 @@ health_port = 8000
 
 - **Ed25519 signatures**, fail-cold verification against `~/.erebus/trusted-keys/`
   (CVE-2023-48022 mitigated; ed25519-dalek ≥ 2.1 with `zeroize`)
-- **SHA-256 integrity** over payload ‖ metadata at every launch
+- **SHA-256 integrity** over payload ‖ metadata at every launch; warm-cache
+  rootfs re-verified against a Merkle manifest (`rootfs.merkle`)
+- **Execution receipts** (spec 2.0): DSSE envelope over the JCS-canonical
+  in-toto statement, operator + machine co-signature, hash-chained trail,
+  Merkle transparency log with signed checkpoints and RFC 3161 anchoring;
+  verifiers read only signed fields and refuse `TAMPERED` documents
+  ([spec](docs/src/spec/attestation.md), [threat notes](ROADMAP.md))
 - **`--encrypt` is obfuscation only** — the AES-256-GCM key lives in the file's
   metadata by design; use signing for authenticity. Mutually exclusive with SISR.
 - **Isolation**: Linux namespaces + seccomp/Landlock; macOS App Sandbox;
@@ -255,12 +294,12 @@ registry/pull/serve).
 ```bash
 git clone https://github.com/Tednoob17/erebus.git && cd erebus
 cargo build --release          # CLI at target/release/erebus
-cargo test --workspace         # 444 tests
+cargo test --workspace         # 650+ tests (+ scripts/test_transparency_log.py, 49 checks)
 ```
 
 | Crate | Purpose |
 |-------|---------|
-| `erebus-core` | Format, compression, detection, encryption, inference-engine resolution, SISR, CAS |
+| `erebus-core` | Format, compression, detection, encryption, inference-engine resolution, SISR, CAS, attestation (`attest`, `attest_log`, `dsse`, `jcs`, `merkle`, `log_proof`, `machine`, `rootfs_merkle`) |
 | `erebus-stub` | Self-extracting launcher (ELF / Mach-O / PE32+) |
 | `erebus-cli` | Everything you type: build, serve, chat, pull, … |
 

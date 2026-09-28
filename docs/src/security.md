@@ -220,3 +220,28 @@ Both `random_encryption_key` and `random_salt` are stored in the binary metadata
 Decryption happens after signature verification and SHA-256 integrity check. We decrypt what's already proven authentic. The SHA-256 hash covers the ciphertext, not the plaintext — this ensures integrity verification and signature verification both operate on the same bytes.
 
 Nothing is written to disk before integrity is verified. With signatures enabled, nothing executes before the signature is verified. With encryption, nothing is decrypted before both signature and integrity are verified.
+
+## 7. Execution receipts — what ran, provably
+
+Every execution (launcher exec, `erebus serve --attest-key` per inference
+call, `erebus attest`) emits a **spec 2.0 receipt**: a DSSE envelope over the
+JCS-canonical in-toto statement, signed by the operator key and — once the
+host has run `erebus enroll` — co-signed by a per-machine key certified by the
+registry. Receipts are hash-chained locally (`<bundle>.attest.d/`) and can be
+published to the registry's Merkle transparency log (RFC 6962), whose signed
+checkpoints are timestamped at an RFC 3161 TSA.
+
+Verifier guarantees (`erebus verify-attest`):
+
+- every printed value comes from the **signed** statement; the human-readable
+  copies are re-derived and compared (`TAMPERED: <block> mismatch` otherwise);
+- the operator key is looked up **by fingerprint**, so a trusted machine key
+  can never satisfy the operator check;
+- `--strict` demands the machine co-signature, a signed `execution.machine_id`
+  matching the machine block, and a certificate from a trusted registry key;
+- `--proof` re-hashes the exact receipt bytes into the leaf, walks the
+  inclusion path to the signed root and checks the TSA token — **offline**;
+- 1.x receipts (pretty-JSON signature) remain verifiable; `--strict` rejects them.
+
+Full schema, canonical byte formats and threat notes:
+[Execution attestation — spec 2.0](./spec/attestation.md).

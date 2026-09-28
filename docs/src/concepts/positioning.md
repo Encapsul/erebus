@@ -61,12 +61,20 @@ Chaque binaire `.erebus` contient :
 - Une **signature Ed25519** (fail-cold, anti-downgrade)
 - Un **Merkle tree** des chunks SISR (chaque byte est traçable)
 
-erebus étend cela en générant un **document d'attestation détaché**
-(`.erebus.attest`) qui prouve :
-- quel bundle a été exécuté (hash)
-- sur quel type de machine (OS, arch — jamais le hostname en clair)
-- à quelle date (horodatage signé)
-- par quel builder (clé publique)
+erebus étend cela en générant, à chaque exécution, un **reçu signé**
+(`.erebus.attest`, spec 2.0 — enveloppe DSSE sur un énoncé in-toto canonique
+JCS) qui prouve :
+- quel bundle a été exécuté (hash du bundle et du payload, racine Merkle du rootfs)
+- ce qu'il a fait (`input_hash`, `output_hash`, `exit_code` — ou la requête
+  HTTP proxifiée)
+- sur quelle machine (clé machine enrôlée et certifiée par le registre — jamais
+  le hostname en clair)
+- à quelle date (horodatage signé, ancré par un TSA RFC 3161 via le log de
+  transparence)
+- par quel opérateur (clé publique), et après quel reçu (chaîne de hachage)
+
+Vérifiable avec `erebus verify-attest` **ou avec `cosign`** — le format est
+standard, pas propriétaire.
 
 ### Against Ollama
 
@@ -99,7 +107,8 @@ Le format `.erebus` est :
 - Un **payload tar/zstd ou SquashFS** — décompressible avec `tar`
 - Des **signatures Ed25519 standards** — vérifiables offline
 - Un **rootfs POSIX** — pas de kernel features propriétaires
-- Des **attestations détachées** (`.erebus.attest`) — preuve signée
+- Des **reçus d'exécution standards** (`.erebus.attest`, DSSE + in-toto) —
+  vérifiables par `cosign` sans outillage erebus
 
 Versions : v2 (plain) → v3 (signed) → v4 (encrypted) → v5 (squashfs).
 Backward-compatible. Forward-compatible via attestation détachée.
