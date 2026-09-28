@@ -706,6 +706,12 @@ class TransparencyLog:
             " root TEXT NOT NULL, ts TEXT NOT NULL, tsa_url TEXT NOT NULL,"
             " gen_time TEXT, token BLOB NOT NULL)"
         )
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS machines ("
+            " machine_id TEXT PRIMARY KEY, public_key_hex TEXT UNIQUE NOT NULL,"
+            " owner TEXT NOT NULL, os TEXT, arch TEXT, enrolled_at TEXT NOT NULL,"
+            " certificate TEXT NOT NULL)"
+        )
         rows = self.conn.execute("SELECT leaf_hash FROM attestations ORDER BY seq").fetchall()
         self.leaves: list[bytes] = [bytes.fromhex(r[0]) for r in rows]
         # seq is AUTOINCREMENT: gaps would break seq-1 == leaf index, so the
@@ -906,6 +912,60 @@ class TransparencyLog:
     def key_info(self) -> dict:
         return {"algorithm": "ed25519", "key_id": self.key_id,
                 "public_key_hex": self.public_key.hex(), "origin": self.origin}
+
+    # -- machine identity (spec 2.0, `erebus enroll`) ----------------------
+    # The registry certifies "this Ed25519 key belongs to a host enrolled by
+    # <owner>". Canonical bytes are shared with erebus-core/src/machine.rs;
+    # the log key doubles as the certificate key so verifiers trust one key.
+    CERT_PREFIX = b"erebus-machine-cert/v1\n"
+
+    def cert_bytes(self, machine_id: str, pub_hex: str, owner: str, registry: str,
+                   issued_at: str) -> bytes:
+        return self.CERT_PREFIX + "\n".join(
+            [machine_id, pub_hex, owner, registry, issued_at]).encode() + b"\n"
+
+    def enroll(self, owner: str, pub_hex: str, registry: str, os_name: str,
+               arch: str) -> tuple[dict, bool]:
+        """Certify a machine key. Re-enrolling the same key returns the
+        existing certificate (idempotent) so a retried CLI call is harmless."""
+        if len(pub_hex) != 64 or any(c not in "0123456789abcdef" for c in pub_hex):
+            raise ValueError("public_key_hex must be 64 lowercase hex chars")
+        pub = bytes.fromhex(pub_hex)
+        if _ed_point_decode(pub) is None:
+            raise ValueError("public_key_hex is not a valid Ed25519 point")
+        machine_id = "sha256:" + hashlib.sha256(pub).hexdigest()
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT owner, certificate FROM machines WHERE machine_id = ?", (machine_id,)
+            ).fetchone()
+            if row:
+                if row[0] != owner:
+                    raise PermissionError("machine key already enrolled by another user")
+                return json.loads(row[1]), True
+            issued_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            sig = _ed25519_sign(
+                self.seed, self.cert_bytes(machine_id, pub_hex, owner, registry, issued_at))
+            cert = {
+                "machine_id": machine_id, "public_key_hex": pub_hex, "owner": owner,
+                "registry": registry, "issued_at": issued_at,
+                "registry_key_id": self.key_id, "registry_key_hex": self.public_key.hex(),
+                "signature_hex": sig.hex(),
+            }
+            self.conn.execute(
+                "INSERT INTO machines (machine_id, public_key_hex, owner, os, arch,"
+                " enrolled_at, certificate) VALUES (?,?,?,?,?,?,?)",
+                (machine_id, pub_hex, owner, os_name, arch, issued_at, json.dumps(cert)),
+            )
+        return cert, False
+
+    def machines_of(self, owner: str) -> list[dict]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT machine_id, public_key_hex, os, arch, enrolled_at FROM machines"
+                " WHERE owner = ? ORDER BY enrolled_at", (owner,)
+            ).fetchall()
+        return [{"machine_id": r[0], "public_key_hex": r[1], "os": r[2], "arch": r[3],
+                 "enrolled_at": r[4]} for r in rows]
 
 
 def load_or_create_log_key(path: str) -> bytes:
@@ -2194,6 +2254,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._log_proof()
         if path == "/log/consistency":
             return self._log_consistency()
+        if path == "/machines":
+            return self._machine_list()
         if path == "/stats":
             return self.send_json(self.store.stats())
         if path == "/index.json":
@@ -2716,6 +2778,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._attest_publish(body)
         if path == "/log/anchor":
             return self._log_anchor()
+        if path == "/machines/enroll":
+            body = self.read_body(4096)
+            return self._machine_enroll(body)
         if path == "/" or path.startswith("/packages/"):
             return self._upload()
         self.send_json({"error": "not found"}, 404)
@@ -2822,6 +2887,39 @@ class Handler(BaseHTTPRequestHandler):
         if proof is None:
             return self.send_json({"error": "need 0 < from <= to <= log size"}, 400)
         return self.send_json(proof)
+
+    # ---- machine identity --------------------------------------------------
+    def _machine_enroll(self, raw: bytes | None):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        try:
+            payload = json.loads(raw or b"{}")
+            pub_hex = str(payload.get("public_key_hex", "")).strip().lower()
+            registry = self._public_base_url()
+            cert, already = self.store.log.enroll(
+                user, pub_hex, registry,
+                str(payload.get("os", ""))[:32], str(payload.get("arch", ""))[:32])
+        except PermissionError as e:
+            return self.send_json({"error": str(e)}, 409)
+        except (ValueError, TypeError) as e:
+            return self.send_json({"error": f"invalid enrollment: {e}"}, 400)
+        if not already:
+            self.store.record_audit(user, "machine_enroll", cert["machine_id"])
+        return self.send_json({"certificate": cert}, 200 if already else 201)
+
+    def _machine_list(self):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        return self.send_json({"machines": self.store.log.machines_of(user)})
+
+    def _public_base_url(self) -> str:
+        # Certificates name the registry so a verifier can tell which
+        # registry vouched for the host; honour reverse-proxy headers.
+        host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "registry"
+        scheme = self.headers.get("X-Forwarded-Proto") or "http"
+        return f"{scheme}://{host}"
 
     def _log_anchor(self):
         # Anchoring costs a TSA round-trip: authenticated users only.

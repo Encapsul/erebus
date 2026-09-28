@@ -110,7 +110,8 @@ fn verify_attest_accepts_genuine_receipt_and_binds_bundle() {
     assert!(json.status.success());
     let v: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
     assert_eq!(v["verified"], true);
-    assert_eq!(v["spec_version"], "1.2");
+    assert_eq!(v["spec_version"], "2.0");
+    assert_eq!(v["envelope"], true);
     assert!(v["bundle_sha256"].as_str().unwrap().len() == 64);
 }
 

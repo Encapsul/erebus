@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 use clap::Args;
 use ed25519_dalek::SigningKey;
 use erebus_core::attest::{
-    generate_attestation, generate_attestation_with_capture, receipt_bytes, ExecutionCapture,
+    generate_attestation, generate_attestation_with_capture, host_machine, receipt_bytes,
+    ExecutionCapture,
 };
 use erebus_core::attest_log::{default_log_dir, AttestationLog};
 use erebus_core::paths::default_key_dir;
@@ -47,6 +48,11 @@ pub struct AttestArgs {
     /// Path to a file containing the bearer token (preferred over --token)
     #[arg(long)]
     pub token_file: Option<PathBuf>,
+
+    /// Also write the bare DSSE envelope (in-toto payload) to FILE — the
+    /// interchange form for cosign / in-toto / Sigstore tooling
+    #[arg(long, value_name = "FILE")]
+    pub envelope: Option<PathBuf>,
 
     /// Quiet output
     #[arg(short, long)]
@@ -112,6 +118,15 @@ pub fn run(args: AttestArgs) -> Result<()> {
     let json_bytes = receipt_bytes(&attestation).context("failed to serialize attestation")?;
     std::fs::write(&output_path, &json_bytes)
         .with_context(|| format!("failed to write {}", output_path.display()))?;
+    if let Some(env_path) = &args.envelope {
+        let envelope = attestation
+            .envelope
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("receipt has no DSSE envelope"))?;
+        std::fs::write(env_path, serde_json::to_vec(envelope)?)
+            .with_context(|| format!("failed to write {}", env_path.display()))?;
+    }
+    let machine_id = attestation.machine.as_ref().map(|m| m.machine_id.clone());
 
     if args.json {
         println!(
@@ -123,6 +138,9 @@ pub fn run(args: AttestArgs) -> Result<()> {
                 "prev_attestation_hash": attestation.execution.prev_attestation_hash,
                 "signed": true,
                 "key": key_path.display().to_string(),
+                "spec_version": attestation.spec_version,
+                "envelope": args.envelope.as_ref().map(|p| p.display().to_string()),
+                "machine_id": machine_id,
             }))?
         );
     } else if !args.quiet {
@@ -132,6 +150,16 @@ pub fn run(args: AttestArgs) -> Result<()> {
             eprintln!("  trail:  {}", entry.display());
         }
         eprintln!("  key:    {}", key_path.display());
+        if let Some(p) = &args.envelope {
+            eprintln!("  dsse:   {}", p.display());
+        }
+        match &machine_id {
+            Some(id) => eprintln!("  machine: {id} (co-signed)"),
+            None if host_machine().is_none() => {
+                eprintln!("  machine: not enrolled (run `erebus enroll` for --strict receipts)");
+            }
+            None => {}
+        }
     }
 
     if args.push {
@@ -255,7 +283,7 @@ fn resolve_key_path(key: &Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-fn resolve_token(
+pub fn resolve_token(
     token: Option<&str>,
     token_file: Option<&std::path::Path>,
 ) -> Result<Option<String>> {

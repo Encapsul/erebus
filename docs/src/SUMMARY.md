@@ -21,6 +21,7 @@
 
 - [Delta Manifest Format](./spec/delta-manifest-format.md)
 - [`.erebus` Format v2 — SISR extension](./spec/erebus-format-v2.md)
+- [Execution attestation — spec 2.0](./spec/attestation.md)
 
 # Technical Reference
 

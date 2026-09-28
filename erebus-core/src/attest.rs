@@ -5,11 +5,14 @@
 //! never included in plaintext; only a SHA-256 hash of
 //! `hostname + os + arch` is recorded.
 
+use crate::dsse::{Envelope, INTOTO_PAYLOAD_TYPE};
 use crate::format::Footer;
 use crate::intoto::{
-    digest_value as intoto_digest, InTotoStatement, EREBUS_PREDICATE_TYPE, INTOTO_STATEMENT_TYPE,
+    digest_value as intoto_digest, InTotoStatement, EREBUS_PREDICATE_TYPE,
+    EREBUS_PREDICATE_TYPE_V2, INTOTO_STATEMENT_TYPE,
 };
-use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+use crate::machine::{MachineIdentity, MachineInfo};
+use ed25519_dalek::{SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -18,9 +21,11 @@ use time::OffsetDateTime;
 
 /// Current attestation spec version.
 ///
-/// 1.2 adds `execution.prev_attestation_hash` (signed) so receipts form a
-/// hash chain; all 1.x documents remain parseable and verifiable.
-pub const ATTESTATION_SPEC_VERSION: &str = "1.2";
+/// 2.0 signs a DSSE envelope over `JCS(statement)` (predicate `…/execution/v2`,
+/// `execution.machine_id`, optional machine co-signature). 1.2 added
+/// `execution.prev_attestation_hash`. All 1.x documents (pretty-JSON
+/// signature, no envelope) remain parseable and verifiable.
+pub const ATTESTATION_SPEC_VERSION: &str = "2.0";
 
 /// Marker string identifying this as an erebus execution attestation.
 pub const ATTESTATION_TYPE: &str = "erebus-execution";
@@ -37,7 +42,17 @@ pub struct Attestation {
     /// The in-toto statement this attestation is about; the Ed25519 signature
     /// in [`SignatureInfo::signature_hex`] covers these canonical bytes.
     pub statement: InTotoStatement,
+    /// Operator signature. Spec 1.x: Ed25519 over the pretty-JSON statement.
+    /// Spec 2.0: mirror of the operator entry in `envelope`.
     pub signature: SignatureInfo,
+    /// Spec 2.0: DSSE envelope over `JCS(statement)`; `statement` above is
+    /// the decoded display copy. Absent on 1.x receipts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope: Option<Envelope>,
+    /// Spec 2.0: identity of the enrolled host that co-signed the envelope.
+    /// Absent when the host was not enrolled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<MachineInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +116,12 @@ pub struct ExecutionInfo {
     /// on offline receipts (`erebus attest`) and on caches predating it.
     #[serde(default)]
     pub rootfs_root: Option<String>,
+    /// Fingerprint of the enrolled machine key that co-signed this receipt
+    /// (spec 2.0, `erebus enroll`). Unlike `machine_id_hash` (a hostname
+    /// hash anyone can compute) it is backed by a key that never leaves the
+    /// host and by a registry certificate.
+    #[serde(default)]
+    pub machine_id: Option<String>,
 }
 
 /// One HTTP call through the attesting proxy.
@@ -136,6 +157,26 @@ pub struct ExecutionCapture {
 pub struct AttestationTemplate {
     pub artifact: ArtifactInfo,
     pub provenance: ProvenanceInfo,
+}
+
+/// Who signs a receipt: the operator key always, the enrolled machine key
+/// when the host has one.
+pub struct Signers<'a> {
+    pub operator: &'a SigningKey,
+    pub machine: Option<&'a MachineIdentity>,
+}
+
+impl<'a> Signers<'a> {
+    pub fn operator_only(operator: &'a SigningKey) -> Self {
+        Self {
+            operator,
+            machine: None,
+        }
+    }
+
+    pub fn with_machine(operator: &'a SigningKey, machine: Option<&'a MachineIdentity>) -> Self {
+        Self { operator, machine }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,7 +295,19 @@ pub fn generate_attestation_with_capture(
     signing_key: &SigningKey,
     capture: &ExecutionCapture,
 ) -> Result<Attestation, anyhow::Error> {
-    AttestationTemplate::from_bundle(bundle_path)?.attest(signing_key, capture)
+    let machine = host_machine();
+    AttestationTemplate::from_bundle(bundle_path)?.attest_with(
+        &Signers::with_machine(signing_key, machine.as_ref()),
+        capture,
+    )
+}
+
+/// The enrolled identity of this host, if any. A missing or unreadable
+/// machine key silently degrades to operator-only receipts: the machine
+/// signature is an *extra* guarantee (`verify-attest --strict`), never a
+/// reason to stop producing evidence.
+pub fn host_machine() -> Option<MachineIdentity> {
+    MachineIdentity::load_default().ok().flatten()
 }
 
 impl AttestationTemplate {
@@ -269,13 +322,24 @@ impl AttestationTemplate {
         })
     }
 
-    /// Sign a fresh receipt (timestamped now, on this machine) carrying
-    /// `capture`.
+    /// Sign a fresh receipt with the operator key only (no machine identity).
     pub fn attest(
         &self,
         signing_key: &SigningKey,
         capture: &ExecutionCapture,
     ) -> Result<Attestation, anyhow::Error> {
+        self.attest_with(&Signers::operator_only(signing_key), capture)
+    }
+
+    /// Sign a fresh spec 2.0 receipt (timestamped now, on this machine)
+    /// carrying `capture`: DSSE envelope over `JCS(statement)`, signed by the
+    /// operator key and, when enrolled, co-signed by the machine key.
+    pub fn attest_with(
+        &self,
+        signers: &Signers<'_>,
+        capture: &ExecutionCapture,
+    ) -> Result<Attestation, anyhow::Error> {
+        let signing_key = signers.operator;
         let execution = ExecutionInfo {
             attested_at: utc_now_iso8601(),
             machine_id_hash: machine_id_hash(),
@@ -287,12 +351,28 @@ impl AttestationTemplate {
             prev_attestation_hash: capture.prev_attestation_hash.clone(),
             request: capture.request.clone(),
             rootfs_root: capture.rootfs_root.clone(),
+            machine_id: signers.machine.map(MachineIdentity::machine_id),
         };
 
         // The statement is the signed payload; the top-level fields are display
         // copies that verifiers re-derive and compare (see `check_consistency`).
-        let statement = build_statement(&self.artifact, &self.provenance, &execution);
-        let mut attestation = Attestation {
+        let statement = build_statement(
+            &self.artifact,
+            &self.provenance,
+            &execution,
+            EREBUS_PREDICATE_TYPE_V2,
+        );
+        let operator_fp = key_fingerprint(&signing_key.verifying_key());
+        let mut envelope = Envelope::new(
+            INTOTO_PAYLOAD_TYPE,
+            &crate::jcs::canonicalize(&serde_json::to_value(&statement)?)?,
+        );
+        envelope.sign(signing_key, &operator_fp)?;
+        if let Some(machine) = signers.machine {
+            envelope.sign(&machine.key, &machine.machine_id())?;
+        }
+        let operator_sig = envelope_sig_hex(&envelope, &operator_fp)?;
+        Ok(Attestation {
             spec_version: ATTESTATION_SPEC_VERSION.to_string(),
             attestation_type: ATTESTATION_TYPE.to_string(),
             artifact: self.artifact.clone(),
@@ -301,15 +381,27 @@ impl AttestationTemplate {
             statement,
             signature: SignatureInfo {
                 algorithm: "ed25519".to_string(),
-                key_fingerprint: key_fingerprint(&signing_key.verifying_key()),
-                signature_hex: String::new(), // filled after signing
+                key_fingerprint: operator_fp,
+                signature_hex: operator_sig,
             },
-        };
-
-        let doc_bytes = statement_bytes(&attestation.statement)?;
-        attestation.signature.signature_hex = hex::encode(signing_key.sign(&doc_bytes).to_bytes());
-        Ok(attestation)
+            envelope: Some(envelope),
+            machine: signers.machine.map(MachineIdentity::info),
+        })
     }
+}
+
+/// Hex of the envelope signature filed under `keyid`.
+fn envelope_sig_hex(envelope: &Envelope, keyid: &str) -> Result<String, anyhow::Error> {
+    use base64::Engine;
+    let entry = envelope
+        .signatures
+        .iter()
+        .find(|s| s.keyid == keyid)
+        .ok_or_else(|| anyhow::anyhow!("envelope has no signature for {keyid}"))?;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(&entry.sig)
+        .map_err(|e| anyhow::anyhow!("envelope signature is not base64: {e}"))?;
+    Ok(hex::encode(raw))
 }
 
 /// `sha256:<hex>` fingerprint of an Ed25519 verifying key.
@@ -317,11 +409,12 @@ pub fn key_fingerprint(vk: &VerifyingKey) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(vk.as_bytes())))
 }
 
-/// Canonical bytes the Ed25519 signature covers (spec 1.x: pretty JSON of the
-/// statement; `serde_json` emits object keys in sorted order, so re-serializing
-/// a parsed statement reproduces them byte-for-byte).
+/// Canonical bytes a spec 1.x Ed25519 signature covers: pretty JSON of the
+/// statement in its 1.x wire form (`predicate_type`). `serde_json` emits
+/// object keys in sorted order, so re-serializing a parsed statement
+/// reproduces them byte-for-byte.
 fn statement_bytes(statement: &InTotoStatement) -> Result<Vec<u8>, anyhow::Error> {
-    serde_json::to_vec_pretty(statement)
+    serde_json::to_vec_pretty(&crate::intoto::LegacyStatement::from(statement))
         .map_err(|e| anyhow::anyhow!("failed to serialize statement: {e}"))
 }
 
@@ -430,6 +523,7 @@ pub fn build_statement(
     artifact: &ArtifactInfo,
     provenance: &ProvenanceInfo,
     execution: &ExecutionInfo,
+    predicate_type: &str,
 ) -> InTotoStatement {
     let subject = |name: &str, prefixed: &str| crate::intoto::Subject {
         name: name.to_string(),
@@ -441,7 +535,7 @@ pub fn build_statement(
             subject("bundle", &artifact.bundle_hash),
             subject("payload", &artifact.payload_hash),
         ],
-        predicate_type: EREBUS_PREDICATE_TYPE.to_string(),
+        predicate_type: predicate_type.to_string(),
         predicate: serde_json::json!({
             "builder": provenance.builder,
             "author": provenance.author,
@@ -462,6 +556,7 @@ pub fn build_statement(
                 "prev_attestation_hash": execution.prev_attestation_hash,
                 "request": execution.request,
                 "rootfs_root": execution.rootfs_root,
+                "machine_id": execution.machine_id,
             },
             "artifact": {
                 "metadata_hash": artifact.metadata_hash,
@@ -537,11 +632,23 @@ pub fn append_receipt(
     log: &crate::attest_log::AttestationLog,
     capture: &ExecutionCapture,
 ) -> Result<(Attestation, std::path::PathBuf), anyhow::Error> {
+    let machine = host_machine();
+    let signers = Signers::with_machine(signing_key, machine.as_ref());
+    append_receipt_with(template, &signers, log, capture)
+}
+
+/// [`append_receipt`] with explicit signers (no host lookup).
+pub fn append_receipt_with(
+    template: &AttestationTemplate,
+    signers: &Signers<'_>,
+    log: &crate::attest_log::AttestationLog,
+    capture: &ExecutionCapture,
+) -> Result<(Attestation, std::path::PathBuf), anyhow::Error> {
     let chained = ExecutionCapture {
         prev_attestation_hash: log.head()?,
         ..capture.clone()
     };
-    let attestation = template.attest(signing_key, &chained)?;
+    let attestation = template.attest_with(signers, &chained)?;
     let entry = log.append(&attestation)?;
     Ok((attestation, entry))
 }
@@ -605,6 +712,11 @@ pub fn verify_attestation(
     attestation: &Attestation,
     trusted_keys: &[VerifyingKey],
 ) -> Result<VerifyingKey, anyhow::Error> {
+    if let Some(envelope) = &attestation.envelope {
+        let vk = verify_envelope(attestation, envelope, trusted_keys)?;
+        check_consistency(attestation)?;
+        return Ok(vk);
+    }
     let doc_bytes = statement_bytes(&attestation.statement)?;
     let sig_bytes = hex::decode(&attestation.signature.signature_hex)
         .map_err(|e| anyhow::anyhow!("invalid signature hex: {e}"))?;
@@ -629,6 +741,56 @@ pub fn verify_attestation(
     Ok(*vk)
 }
 
+/// Spec 2.0: the envelope payload must be `JCS(statement)` and the operator
+/// entry (keyid = `signature.key_fingerprint`) must verify under the trusted
+/// key with that fingerprint. Looking the key up by fingerprint — instead of
+/// trying every trusted key on every signature — keeps a trusted *machine*
+/// key from satisfying the operator check.
+fn verify_envelope(
+    attestation: &Attestation,
+    envelope: &Envelope,
+    trusted_keys: &[VerifyingKey],
+) -> Result<VerifyingKey, anyhow::Error> {
+    if envelope.payload_type != INTOTO_PAYLOAD_TYPE {
+        anyhow::bail!(
+            "unsupported envelope payloadType {:?}",
+            envelope.payload_type
+        );
+    }
+    let canonical = crate::jcs::canonicalize(&serde_json::to_value(&attestation.statement)?)?;
+    if envelope.payload_bytes()? != canonical {
+        anyhow::bail!("TAMPERED: envelope payload is not the canonical statement");
+    }
+    let fp = &attestation.signature.key_fingerprint;
+    let vk = operator_key(fp, envelope, trusted_keys)?;
+    if !envelope.verified_by(vk)? {
+        anyhow::bail!("TAMPERED: signature does not match any trusted key");
+    }
+    if envelope_sig_hex(envelope, fp)? != attestation.signature.signature_hex {
+        anyhow::bail!("TAMPERED: signature_hex does not mirror the envelope signature");
+    }
+    Ok(*vk)
+}
+
+/// The trusted key named by `fp`, distinguishing "unknown signer" from
+/// "known signer, edited fingerprint" in the error.
+fn operator_key<'k>(
+    fp: &str,
+    envelope: &Envelope,
+    trusted_keys: &'k [VerifyingKey],
+) -> Result<&'k VerifyingKey, anyhow::Error> {
+    if let Some(vk) = trusted_keys.iter().find(|vk| key_fingerprint(vk) == fp) {
+        return Ok(vk);
+    }
+    match envelope.verify_any(trusted_keys) {
+        Ok((actual, _)) => anyhow::bail!(
+            "TAMPERED: key_fingerprint mismatch (document says {fp}, signing key is {})",
+            key_fingerprint(actual)
+        ),
+        Err(_) => anyhow::bail!("TAMPERED: signature does not match any trusted key"),
+    }
+}
+
 /// Re-derive the statement from the unsigned display fields and compare it to
 /// the signed one. Any drift means the human-readable copy was edited after
 /// signing.
@@ -637,12 +799,21 @@ pub fn verify_attestation(
 /// null carries no signed information, and spec 1.0/1.1 documents predate
 /// some optional keys.
 pub fn check_consistency(attestation: &Attestation) -> Result<(), anyhow::Error> {
+    let actual = &attestation.statement;
+    if actual.predicate_type != EREBUS_PREDICATE_TYPE
+        && actual.predicate_type != EREBUS_PREDICATE_TYPE_V2
+    {
+        anyhow::bail!(
+            "TAMPERED: unknown predicate type {:?}",
+            actual.predicate_type
+        );
+    }
     let expected = build_statement(
         &attestation.artifact,
         &attestation.provenance,
         &attestation.execution,
+        &actual.predicate_type,
     );
-    let actual = &attestation.statement;
 
     if actual.statement_type != expected.statement_type
         || actual.predicate_type != expected.predicate_type
@@ -719,7 +890,7 @@ fn first_differing_key(expected: &serde_json::Value, actual: &serde_json::Value)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::{Signer, SigningKey};
     use proptest::prelude::*;
 
     fn test_key() -> SigningKey {
@@ -756,16 +927,17 @@ mod tests {
                 prev_attestation_hash: None,
                 request: None,
                 rootfs_root: None,
+                machine_id: None,
             },
         )
     }
 
-    /// Consistent, signed attestation built from `sample_fields`.
+    /// Consistent, legacy (1.2) signed attestation built from `sample_fields`.
     fn signed_sample(key: &SigningKey) -> Attestation {
         let (artifact, provenance, execution) = sample_fields();
-        let statement = build_statement(&artifact, &provenance, &execution);
+        let statement = build_statement(&artifact, &provenance, &execution, EREBUS_PREDICATE_TYPE);
         let mut att = Attestation {
-            spec_version: ATTESTATION_SPEC_VERSION.to_string(),
+            spec_version: "1.2".to_string(),
             attestation_type: ATTESTATION_TYPE.to_string(),
             artifact,
             provenance,
@@ -776,6 +948,8 @@ mod tests {
                 key_fingerprint: key_fingerprint(&key.verifying_key()),
                 signature_hex: String::new(),
             },
+            envelope: None,
+            machine: None,
         };
         let sig = key.sign(&statement_bytes(&att.statement).unwrap());
         att.signature.signature_hex = hex::encode(sig.to_bytes());
@@ -824,7 +998,8 @@ mod tests {
             artifact.payload_hash = payload_hash;
             provenance.builder = builder;
             execution.os = os;
-            let statement = build_statement(&artifact, &provenance, &execution);
+            let statement =
+                build_statement(&artifact, &provenance, &execution, EREBUS_PREDICATE_TYPE);
             let att = Attestation {
                 spec_version: "1.2".to_string(),
                 attestation_type: ATTESTATION_TYPE.to_string(),
@@ -834,6 +1009,8 @@ mod tests {
                     key_fingerprint: "sha256:dead".to_string(),
                     signature_hex: "deadbeef".to_string(),
                 },
+                envelope: None,
+                machine: None,
             };
             let json = serde_json::to_string(&att).unwrap();
             let parsed: Attestation = serde_json::from_str(&json).unwrap();
@@ -1004,7 +1181,7 @@ mod tests {
         assert_eq!(att.artifact.bundle_hash, sha256_hex(&bytes));
         assert_eq!(att.artifact.payload_hash, sha256_hex(payload));
         assert_eq!(att.artifact.format_version, 3);
-        assert_eq!(att.spec_version, "1.2");
+        assert_eq!(att.spec_version, "2.0");
 
         let parsed: Attestation =
             serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();
@@ -1162,5 +1339,143 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("TAMPERED: execution mismatch"), "{err}");
+    }
+
+    fn spec2_receipt(
+        key: &SigningKey,
+        machine: Option<&MachineIdentity>,
+    ) -> (Attestation, Vec<u8>) {
+        let dir = tempfile::tempdir().unwrap();
+        let (bundle_path, bytes, _) = write_bundle(dir.path());
+        let template = AttestationTemplate::from_bundle(&bundle_path).unwrap();
+        let att = template
+            .attest_with(
+                &Signers::with_machine(key, machine),
+                &ExecutionCapture::default(),
+            )
+            .unwrap();
+        (att, bytes)
+    }
+
+    #[test]
+    fn spec2_receipt_is_dsse_over_jcs_statement_and_roundtrips() {
+        let key = test_key();
+        let (att, bytes) = spec2_receipt(&key, None);
+        assert_eq!(att.spec_version, "2.0");
+        assert_eq!(att.statement.predicate_type, EREBUS_PREDICATE_TYPE_V2);
+        assert!(att.machine.is_none());
+        let env = att.envelope.as_ref().unwrap();
+        assert_eq!(env.payload_type, INTOTO_PAYLOAD_TYPE);
+        assert_eq!(env.signatures.len(), 1);
+        assert_eq!(env.signatures[0].keyid, att.signature.key_fingerprint);
+        let canonical =
+            crate::jcs::canonicalize(&serde_json::to_value(&att.statement).unwrap()).unwrap();
+        assert_eq!(env.payload_bytes().unwrap(), canonical);
+
+        verify_attestation(&att, &[key.verifying_key()]).unwrap();
+        check_bundle_matches(&att, &bytes).unwrap();
+        let reparsed: Attestation = serde_json::from_slice(&receipt_bytes(&att).unwrap()).unwrap();
+        verify_attestation(&reparsed, &[key.verifying_key()]).unwrap();
+        // Legacy-only trust set (wrong key) is rejected by fingerprint lookup.
+        let other = SigningKey::from_bytes(&[9u8; 32]);
+        let err = verify_attestation(&att, &[other.verifying_key()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("TAMPERED"), "{err}");
+    }
+
+    #[test]
+    fn spec2_tampering_statement_payload_or_mirror_is_detected() {
+        let key = test_key();
+        let (att, _) = spec2_receipt(&key, None);
+        let trusted = [key.verifying_key()];
+
+        let mut t = att.clone();
+        t.statement.predicate["execution"]["os"] = serde_json::json!("plan9");
+        let err = verify_attestation(&t, &trusted).unwrap_err().to_string();
+        assert!(err.contains("not the canonical statement"), "{err}");
+
+        let mut t = att.clone();
+        t.execution.os = "plan9".to_string();
+        let err = verify_attestation(&t, &trusted).unwrap_err().to_string();
+        assert!(err.contains("TAMPERED: execution mismatch"), "{err}");
+
+        let mut t = att.clone();
+        t.envelope.as_mut().unwrap().signatures[0].sig = "AAAA".to_string();
+        let err = verify_attestation(&t, &trusted).unwrap_err().to_string();
+        assert!(err.contains("TAMPERED"), "{err}");
+
+        let mut t = att.clone();
+        t.signature.signature_hex = "00".repeat(64);
+        let err = verify_attestation(&t, &trusted).unwrap_err().to_string();
+        assert!(err.contains("does not mirror"), "{err}");
+
+        let mut t = att;
+        t.statement.predicate_type = "https://erebus.dev/attestation/execution/v9".to_string();
+        let err = verify_attestation(&t, &trusted).unwrap_err().to_string();
+        assert!(err.contains("TAMPERED"), "{err}");
+    }
+
+    #[test]
+    fn spec2_machine_cosignature_is_signed_and_strictly_verifiable() {
+        let key = test_key();
+        let registry_key = SigningKey::from_bytes(&[7u8; 32]);
+        let mut machine = MachineIdentity::generate();
+        machine.certificate = Some(
+            crate::machine::issue_certificate(
+                &registry_key,
+                "https://registry.test",
+                "alice",
+                &machine.public_key_hex(),
+                "2026-09-17T00:00:00Z",
+            )
+            .unwrap(),
+        );
+        let (att, _) = spec2_receipt(&key, Some(&machine));
+        let env = att.envelope.as_ref().unwrap();
+        assert_eq!(env.signatures.len(), 2);
+        assert_eq!(
+            att.execution.machine_id.as_deref(),
+            Some(machine.machine_id().as_str())
+        );
+        assert_eq!(
+            att.statement.predicate["execution"]["machine_id"],
+            machine.machine_id()
+        );
+
+        // Operator trust alone is enough for the regular check…
+        verify_attestation(&att, &[key.verifying_key()]).unwrap();
+        // …a trusted *machine* key must not pass as operator.
+        let err = verify_attestation(&att, &[machine.key.verifying_key()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("TAMPERED"), "{err}");
+
+        let report = crate::machine::verify_machine(&att, &[registry_key.verifying_key()]).unwrap();
+        assert_eq!(report.owner, "alice");
+        assert_eq!(report.machine_id, machine.machine_id());
+
+        // Swapping the machine block for another enrolled key is caught by the
+        // signed machine_id, then by the missing co-signature.
+        let mut t = att.clone();
+        let impostor = MachineIdentity::generate();
+        t.machine = Some(impostor.info());
+        let err = crate::machine::verify_machine(&t, &[registry_key.verifying_key()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("TAMPERED"), "{err}");
+
+        // Untrusted registry → strict fails, regular check still passes.
+        let err = crate::machine::verify_machine(&att, &[key.verifying_key()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("registry") || err.contains("trusted"), "{err}");
+
+        // Receipt without machine identity is rejected under --strict.
+        let (bare, _) = spec2_receipt(&key, None);
+        let err = crate::machine::verify_machine(&bare, &[registry_key.verifying_key()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("STRICT"), "{err}");
     }
 }

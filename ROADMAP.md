@@ -46,7 +46,7 @@ evidence. The bigger the trail, the stronger the lock-in.
 | Level | Claim | erebus status |
 |---|---|---|
 | L1 — artifact integrity | this exact bundle/model ran, unmodified | ✅ SHA-256 + Ed25519 at cold start; ⚠️ warm cache not re-attested (P0-4) |
-| L3 — non-repudiation / trace integrity | this key attested this run at this time; the trail cannot be silently edited | ⚠️ single receipts, no chain, no anchoring (P0-2, P0-5) |
+| L3 — non-repudiation / trace integrity | this key attested this run at this time; the trail cannot be silently edited | ✅ hash chain (P0-2), Merkle log + TSA (P0-5), machine co-signature (P0-6), DSSE (P0-7) |
 | L2 — execution correctness | output = f(input, weights) | ❌ out of scope (TEE/zkML), stays a documented future option |
 
 The pitch must say **"we prove the execution happened, unaltered, and the
@@ -66,11 +66,11 @@ as items land.
 | A3 | Every run **overwrites** `<bundle>.attest`. "Every execution leaves a receipt" is false locally. | Trail = last run only | P0-2 | ✅ 2026-09-17 |
 | A4 | Receipts are independent documents: no `prev_hash`, no sequence, no local chain. | Deletion/reordering undetectable | P0-2 | ✅ 2026-09-17 |
 | A5 | Registry `/attestations` = JSONL append with `flock`; `_attestation_exists` rescans the whole file per POST; no Merkle tree, no signed tree head, no inclusion proof, no external anchoring. | The "compliance trail" is editable by the registry admin without trace; O(n) per write | P0-5 | ✅ 2026-09-17 |
-| A6 | Signing key = raw 32-byte file on the executor host (`ERE_ATTEST_KEY`). The party that runs the agent holds the key that attests. | It is a signed journal, not third-party proof — acceptable **only** with anchoring (A5) and a per-machine identity (A7) | P0-5, P0-6 | 🟡 anchored (P0-5); machine identity pending (P0-6) |
-| A7 | `machine_id_hash = SHA-256(hostname‖os‖arch)`: tiny input space, brute-forceable, no enrolled machine identity. | "500 PoS terminals" cannot be told apart reliably | P0-6 | ⬜ |
+| A6 | Signing key = raw 32-byte file on the executor host (`ERE_ATTEST_KEY`). The party that runs the agent holds the key that attests. | It is a signed journal, not third-party proof — acceptable **only** with anchoring (A5) and a per-machine identity (A7) | P0-5, P0-6 | ✅ 2026-09-17 (anchored + machine co-signature) |
+| A7 | `machine_id_hash = SHA-256(hostname‖os‖arch)`: tiny input space, brute-forceable, no enrolled machine identity. | "500 PoS terminals" cannot be told apart reliably | P0-6 | ✅ 2026-09-17 |
 | A8 | Warm start (`main.rs:463-487`) trusts `~/.cache/erebus/<hash>/rootfs` on size+mtime of the bundle; rootfs content is never re-hashed. With `isolation < 2` the payload can rewrite its own rootfs. | Attestation says "bundle X intact" while modified code runs | P0-4 | ✅ 2026-09-17 |
 | A9 | Behavior capture hashes **argv** (`input_hash`) and **stdout‖stderr** (`output_hash`). For an HTTP-serving agent this is the engine's log noise. `erebus serve` launches `llama-server` directly, bypassing the stub — the main LLM path produces **no** attestation. | Capture exists but not where agent behavior lives | P0-3 | ✅ 2026-09-17 |
-| A10 | Signature = Ed25519 over `serde_json::to_vec_pretty(statement)`. No DSSE envelope, no JCS/RFC 8785 canonicalization, predicate URI resolves to nothing. "in-toto compatible" is aspirational: cosign/in-toto-verify/Rekor cannot consume it. | No ecosystem interop, fragile canonical form | P0-7 | ⬜ |
+| A10 | Signature = Ed25519 over `serde_json::to_vec_pretty(statement)`. No DSSE envelope, no JCS/RFC 8785 canonicalization, predicate URI resolves to nothing. "in-toto compatible" is aspirational: cosign/in-toto-verify/Rekor cannot consume it. | No ecosystem interop, fragile canonical form | P0-7 | ✅ 2026-09-17 |
 | A11 | CI runs `cargo test` + one HTTP smoke test. **None** of the chaos harnesses, `yc_demo.sh`, or an attestation e2e run in CI; "SURVIVED" verdicts are manual VPS runs. | Claims are not continuously proven | P1-1 | ⬜ (CLI-level attest e2e added 2026-09-17) |
 | A12 | `docs/src` (mdbook) has zero pages on attestation; README pitches "package anything → OpenAI API" while this file pitches "proof layer". | Two products, two stories | P1-3 | ⬜ |
 | A13 | 37 subcommands; `registry_server.py` = 3 004 lines in one file with Stripe, SAML, webhooks, replication, mirror, MCP, CVE, web UI. Proof code ≈ 2 % of the codebase. | Dilution; every new surface is attack surface and maintenance | §4 freeze | ⬜ |
@@ -186,30 +186,54 @@ CI job).
     verifies offline and rejects three tampers.
   - Still open from A6: the executor holds the receipt key → P0-6.
 
-- [ ] **P0-6 Machine identity** (A7)
-  - `erebus enroll [--registry]`: generate a per-machine Ed25519 key
-    (`~/.local/share/erebus/machine.key`, 0600), publish the public half to
-    the registry with an operator token → registry issues a signed
-    `machine_id` certificate.
-  - Receipts carry `machine_id` (public key fingerprint) and are signed by
-    the **machine key**; the operator/build key is a separate field. Keep
-    `machine_id_hash` for compatibility.
-  - Optional Linux TPM2 quote (`/dev/tpmrm0`) embedded in the receipt when
-    available — behind a feature flag, never required.
-  - Acceptance: two enrolled machines produce distinguishable receipts; a
-    receipt from an unenrolled key is rejected by `--strict`.
+- [x] **P0-6 Machine identity** (A7) — landed 2026-09-17.
+  - `erebus enroll [--registry URL --token T] [--dir] [--show]`: per-machine
+    Ed25519 seed (`~/.local/share/erebus/machine/machine.key`, 0600,
+    `create_new` → never rotated implicitly, `$ERE_MACHINE_DIR` override).
+    With `--registry`, `POST /machines/enroll` returns a certificate signed
+    by the registry **log key** over
+    `erebus-machine-cert/v1\n{machine_id}\n{pubkey}\n{owner}\n{registry}\n{issued_at}\n`;
+    the CLI checks it names our key and verifies before saving. Idempotent
+    (200 + same cert); another user claiming the key → 409; `GET /machines`
+    lists the owner's hosts (SQLite `machines` table).
+  - Every producer (`attest`, launcher stub, attesting proxy) loads the host
+    identity (`attest::host_machine`) and **co-signs the DSSE envelope**
+    with the machine key; `execution.machine_id` (key fingerprint) is inside
+    the signed statement. `machine_id_hash` kept for compatibility. No
+    identity → operator-only receipt, never a failure.
+  - `verify-attest --strict [--registry-key HEX]`: 2.0 receipt, signed
+    `machine_id` == machine block, co-signature by that key, certificate
+    for that key from a trusted registry key. Operator check looks trusted
+    keys up **by fingerprint**, so a trusted machine key cannot pass as the
+    operator.
+  - Acceptance: `machine::tests` + `attest::spec2_machine_cosignature_is_signed_and_strictly_verifiable`
+    (impostor machine block, untrusted registry, un-enrolled receipt);
+    `erebus-cli/tests/attest_strict_e2e.rs` enrolls against the real
+    registry, verifies `--strict` offline, rejects a grafted machine block
+    and a forged certificate; `scripts/test_transparency_log.py` (+8 checks:
+    auth, cert bytes/signature, idempotence, 409, listing).
+  - Not done: TPM2 quote (P1, optional), certificate revocation list (P1).
 
-- [ ] **P0-7 Standard envelope** (A10)
-  - Spec 2.0: DSSE envelope `{payloadType: application/vnd.in-toto+json,
-    payload: base64(JCS(statement)), signatures: [{keyid, sig}]}` with PAE;
-    JCS (RFC 8785) canonicalization (our values are strings/ints/bools/
-    null — no floats).
-  - Publish the predicate schema at the predicate URI
-    (`https://erebus.dev/attestation/execution/v2`, JSON Schema in
-    `docs/src/spec/attestation.md`).
-  - `verify-attest` accepts 1.x (legacy pretty-JSON signature) and 2.0.
-  - Acceptance: vectors from the DSSE spec; `cosign verify-blob-attestation`
-    on a produced envelope succeeds in CI.
+- [x] **P0-7 Standard envelope** (A10) — landed 2026-09-17.
+  - **Spec 2.0** (`docs/src/spec/attestation.md`, JSON Schema for predicate
+    `https://erebus.dev/attestation/execution/v2`): `envelope` = DSSE v1
+    `{payloadType: application/vnd.in-toto+json, payload: base64(JCS(statement)),
+    signatures: [{keyid: fingerprint, sig}]}` with PAE (`dsse.rs`, spec
+    vector pinned); JCS RFC 8785 (`jcs.rs`, §3.2.3 sorting vector pinned,
+    floats rejected). `signature` mirrors the operator entry for 1.x
+    consumers and the mirror is checked.
+  - `verify-attest` accepts 1.x (legacy pretty-JSON signature) and 2.0
+    (payload must equal `JCS(statement)`, then display-copy consistency with
+    the statement's own predicate type). Output shows
+    `format: spec 2.0 (DSSE envelope)`.
+  - Interop: `erebus keygen` also writes `<fp>.pem` (RFC 8410 SPKI, vector
+    pinned); `erebus attest --envelope FILE` writes the bare envelope;
+    **`cosign verify-blob-attestation --key <pem> --signature <envelope>
+    --type …/v2 <bundle>` → `Verified OK`** (subject digest = bundle
+    sha256) and rejects a flipped payload byte. Exercised in
+    `attest_strict_e2e.rs`; CI installs cosign (`sigstore/cosign-installer`).
+  - Not done: Rekor upload (P1) — receipts are anchored in the erebus
+    transparency log instead.
 
 ### 🟠 P1 — Make the claims continuously proven (parallel with late P0)
 
@@ -400,7 +424,10 @@ AI agents*. Traction line must only cite what CI proves (P1-1).
   inference call, `execution.request`); P0-4 warm-cache re-verification
   (`rootfs.merkle`, `execution.rootfs_root`); P0-5 SQLite Merkle
   transparency log with signed checkpoints, RFC 3161 anchoring,
-  `attest --push` proofs and offline `verify-attest --proof`; roadmap reset.
+  `attest --push` proofs and offline `verify-attest --proof`; P0-6 machine
+  identity (`erebus enroll`, registry certificates, machine co-signature,
+  `verify-attest --strict`); P0-7 spec 2.0 DSSE/JCS envelope, `--envelope`,
+  PEM export, cosign interop in CI; roadmap reset.
 - **0.5.0** — SISR engine, universal 4-slice binaries, Windows PE stub,
   `serve`/`chat`, registry auth/quotas/attestations, behavior capture
   (spec 1.1), Landlock, hermetic `/proc`.

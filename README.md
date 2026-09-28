@@ -119,6 +119,16 @@ start the launcher re-hashes the extracted rootfs against `rootfs.merkle` and
 re-extracts on any drift; the root is signed into the receipt
 (`execution.rootfs_root`).
 
+Receipts are **standard**: spec 2.0 signs a DSSE envelope over the
+JCS-canonical in-toto statement, so `cosign verify-blob-attestation --key
+<fp>.pem --signature agent.dsse.json --type
+https://erebus.dev/attestation/execution/v2 agent.erebus` says `Verified OK`
+with no erebus tooling (`erebus attest --envelope agent.dsse.json`). Run
+`erebus enroll --registry <url>` once per host: the registry certifies a
+per-machine key that co-signs every receipt produced there, and
+`erebus verify-attest --strict --registry-key <hex>` refuses anything not
+produced on an enrolled machine. Spec: `docs/src/spec/attestation.md`.
+
 Missing engine on the target? If `ERE_REGISTRY` points at your registry,
 `serve` transparently downloads `<engine>-<platform>.pack.tar.gz`, verifies its
 SHA-256 sidecar and caches it — no llama.cpp install needed. Offline hosts can
@@ -168,7 +178,8 @@ fail-cold at boot.
 | `erebus swap <file> <path> --from <new>` | Replace a file inside an existing bundle (hot-swap) |
 | `erebus inspect <file>` | Metadata, slice tables, JSON output |
 | `erebus layer push/list` | Manage shared runtime packs & models (local CAS) |
-| `erebus attest / verify-attest` | Signed execution receipts; `--push` / `--proof` for the transparency log |
+| `erebus attest / verify-attest` | Signed execution receipts (DSSE/in-toto); `--push` / `--proof` for the transparency log, `--strict` for machine identity |
+| `erebus enroll` | Per-machine key + registry certificate; receipts from this host are co-signed |
 | `erebus keygen/sign/verify/trust` | Ed25519 signing workflow |
 | `erebus dashboard` | Interactive TUI: SISR benchmarks, cache status |
 | `erebus doctor / scan / env / clean / selftest / upgrade / completion / man` | Ops & tooling |

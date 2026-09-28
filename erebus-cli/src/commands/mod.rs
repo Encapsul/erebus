@@ -11,6 +11,7 @@ pub mod clean;
 pub mod dashboard;
 pub mod doctor;
 pub mod engine;
+pub mod enroll;
 pub mod env;
 pub mod hf;
 pub mod init;

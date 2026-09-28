@@ -465,6 +465,7 @@ mod tests {
                 prev_attestation_hash: None,
                 request: None,
                 rootfs_root: None,
+                machine_id: None,
             },
             statement: crate::intoto::InTotoStatement {
                 statement_type: crate::intoto::INTOTO_STATEMENT_TYPE.to_string(),
@@ -477,6 +478,8 @@ mod tests {
                 key_fingerprint: "sha256:eee".to_string(),
                 signature_hex: "ffff".to_string(),
             },
+            envelope: None,
+            machine: None,
         };
         let chain = aggregate_attestations(&[att]);
         assert_eq!(chain.count, 1);

@@ -282,6 +282,36 @@ def test_http(mod, root: str, tsa_url: str) -> str:
         status, body = req(base, "GET", "/attestations", token)
         check("attestations: query from sqlite", status == 200 and body["total"] == 3
               and body["records"][0]["leaf_index"] == 0)
+
+        # Machine enrollment: certificate signed by the log key, canonical
+        # bytes identical to erebus-core/src/machine.rs.
+        seed = b"\x05" * 32
+        mpub = mod._ed25519_public_key(seed).hex()
+        status, body = req(base, "POST", "/machines/enroll", body={"public_key_hex": mpub})
+        check("enroll: requires auth", status == 401)
+        status, body = req(base, "POST", "/machines/enroll", token,
+                           body={"public_key_hex": mpub, "os": "linux", "arch": "x86_64"})
+        cert = body.get("certificate", {})
+        check("enroll: 201 with certificate", status == 201 and cert.get("owner") == "alice", str(body))
+        mid = "sha256:" + hashlib.sha256(bytes.fromhex(mpub)).hexdigest()
+        cbytes = (f"erebus-machine-cert/v1\n{mid}\n{mpub}\nalice\n{cert.get('registry')}\n"
+                  f"{cert.get('issued_at')}\n").encode()
+        check("enroll: machine_id = sha256(pubkey)", cert.get("machine_id") == mid)
+        check("enroll: certificate signed by log key",
+              cert.get("registry_key_id") == key["key_id"]
+              and mod._ed25519_verify(pub, cbytes, bytes.fromhex(cert.get("signature_hex", "00"))))
+        status, body2 = req(base, "POST", "/machines/enroll", token, body={"public_key_hex": mpub})
+        check("enroll: re-enroll is idempotent (200, same cert)",
+              status == 200 and body2.get("certificate") == cert)
+        status, body = req(base, "POST", "/machines/enroll", token, body={"public_key_hex": "zz"})
+        check("enroll: garbage key → 400", status == 400)
+        status, body = req(base, "POST", "/auth/register", body={"username": "bob", "password": "pw12345678"})
+        bob = body.get("token", "")
+        status, body = req(base, "POST", "/machines/enroll", bob, body={"public_key_hex": mpub})
+        check("enroll: another user cannot claim the key → 409", status == 409)
+        status, body = req(base, "GET", "/machines", token)
+        check("enroll: owner lists the machine",
+              status == 200 and [m["machine_id"] for m in body.get("machines", [])] == [mid])
         return token
     finally:
         proc.kill()

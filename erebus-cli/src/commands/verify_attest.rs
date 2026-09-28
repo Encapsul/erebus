@@ -8,7 +8,8 @@
 //! statement, never from the unsigned copies. `--proof` additionally checks
 //! the registry transparency-log proof stored by `erebus attest --push`
 //! (`<receipt>.proof.json`) — inclusion, signed checkpoint, TSA anchor —
-//! entirely offline.
+//! entirely offline. `--strict` additionally demands a spec 2.0 receipt
+//! co-signed by an enrolled machine key certified by a trusted registry.
 
 use anyhow::{Context, Result};
 use clap::Args;
@@ -45,10 +46,16 @@ pub struct VerifyAttestArgs {
     #[arg(long, value_name = "FILE", conflicts_with = "chain")]
     pub proof_file: Option<PathBuf>,
 
-    /// Registry log public key (64 hex chars) to trust for the checkpoint,
-    /// in addition to `.pub` files in the trusted dir
-    #[arg(long, value_name = "HEX", requires = "proof")]
+    /// Registry public key (64 hex chars) to trust for the log checkpoint
+    /// and machine certificates, in addition to `.pub` files in the trusted
+    /// dir
+    #[arg(long, value_name = "HEX", visible_alias = "registry-key")]
     pub log_key: Option<String>,
+
+    /// Require a machine co-signature: spec 2.0 receipt, signed by an
+    /// enrolled machine key whose certificate comes from a trusted registry
+    #[arg(long, conflicts_with = "chain")]
+    pub strict: bool,
 
     /// Output verification result as JSON
     #[arg(long)]
@@ -79,15 +86,23 @@ pub fn run(args: VerifyAttestArgs) -> Result<()> {
         (None, Some(file)) => verify_single(file, &keys, bundle_bytes.as_deref())?,
         (None, None) => anyhow::bail!("provide a receipt path or --chain <dir>"),
     };
+    let mut registry_keys = keys.clone();
+    if let Some(hex_key) = &args.log_key {
+        registry_keys.push(parse_log_key(hex_key)?);
+    }
+    if args.strict {
+        let file = args
+            .attest_file
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("--strict needs a receipt path"))?;
+        report["machine"] = verify_strict(file, &registry_keys)?;
+    }
     if args.proof || args.proof_file.is_some() {
         let file = args
             .attest_file
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("--proof needs a receipt path"))?;
-        let mut log_keys = keys.clone();
-        if let Some(hex_key) = &args.log_key {
-            log_keys.push(parse_log_key(hex_key)?);
-        }
+        let log_keys = registry_keys;
         let proof_path = args
             .proof_file
             .clone()
@@ -132,10 +147,30 @@ fn verify_single(
         "mode": "single",
         "key": hex::encode(vk.as_bytes()),
         "spec_version": attestation.spec_version,
+        "envelope": attestation.envelope.is_some(),
+        "machine_id": attestation.machine.as_ref().map(|m| m.machine_id.clone()),
         "attestation_type": attestation.attestation_type,
         "bundle_sha256": signed_subject(&attestation, "bundle"),
         "bundle_checked": bundle_bytes.is_some(),
         "execution": exec,
+    }))
+}
+
+/// `--strict`: machine co-signature + registry certificate (see
+/// `erebus_core::machine::verify_machine`).
+fn verify_strict(file: &Path, registry_keys: &[VerifyingKey]) -> Result<serde_json::Value> {
+    let data = std::fs::read_to_string(file)
+        .with_context(|| format!("failed to read {}", file.display()))?;
+    let attestation: Attestation = serde_json::from_str(&data)
+        .with_context(|| format!("failed to parse {}", file.display()))?;
+    let report = erebus_core::machine::verify_machine(&attestation, registry_keys)
+        .context("strict verification failed")?;
+    Ok(serde_json::json!({
+        "verified": true,
+        "machine_id": report.machine_id,
+        "owner": report.owner,
+        "registry": report.registry,
+        "issued_at": report.issued_at,
     }))
 }
 
@@ -261,6 +296,25 @@ fn print_human(report: &serde_json::Value) {
         if exec.get("rootfs_root").is_some_and(|v| !v.is_null()) {
             eprintln!("  rootfs:   {}", e("rootfs_root"));
         }
+        eprintln!(
+            "  format:   spec {}{}",
+            s("spec_version"),
+            if report.get("envelope") == Some(&serde_json::Value::Bool(true)) {
+                " (DSSE envelope)"
+            } else {
+                " (legacy signature)"
+            }
+        );
+    }
+    if let Some(m) = report.get("machine").filter(|m| m.is_object()) {
+        let ms = |k: &str| m.get(k).and_then(|v| v.as_str()).unwrap_or("?");
+        eprintln!(
+            "OK: machine {} — enrolled by {} at {} ({})",
+            ms("machine_id"),
+            ms("owner"),
+            ms("registry"),
+            ms("issued_at")
+        );
     }
     if report.get("bundle_checked") == Some(&serde_json::Value::Bool(true)) {
         eprintln!("  bundle file matches the signed digest");

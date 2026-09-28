@@ -91,6 +91,16 @@ enum Commands {
     ///   erebus attest-history --query 'bundle=sha256:abc…,until=2026-09-30'
     AttestHistory(commands::attest_history::AttestHistoryArgs),
 
+    /// Give this host a machine identity (key + registry certificate)
+    ///
+    /// Receipts produced on an enrolled host are co-signed by a key that
+    /// never leaves the machine; `verify-attest --strict` demands it.
+    ///
+    /// Examples:
+    ///   erebus enroll
+    ///   erebus enroll --registry <http://host:8080> --token "$TOKEN"
+    Enroll(commands::enroll::EnrollArgs),
+
     /// Generate or verify a signed compliance audit report
     ///
     /// Aggregates attestations, SBOM, and integrity info into a single
@@ -350,6 +360,7 @@ fn main() -> ExitCode {
             commands::attest::run(args)
         }
         Commands::AttestHistory(args) => commands::attest_history::run(args),
+        Commands::Enroll(args) => commands::enroll::run(args),
         Commands::Audit(mut args) => {
             if cli.quiet {
                 args.quiet = true;

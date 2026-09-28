@@ -60,6 +60,11 @@ pub fn run(args: KeygenArgs) -> Result<()> {
         .with_context(|| format!("failed to write private key to {}", key_path.display()))?;
     std::fs::write(&pub_path, verifying_key.as_bytes())
         .with_context(|| format!("failed to write public key to {}", pub_path.display()))?;
+    // Same key in PEM so cosign / openssl / in-toto can verify our DSSE
+    // envelopes without any erebus tooling.
+    let pem_path = key_dir.join(format!("{fingerprint}.pem"));
+    std::fs::write(&pem_path, erebus_core::dsse::public_key_pem(&verifying_key))
+        .with_context(|| format!("failed to write PEM public key to {}", pem_path.display()))?;
 
     #[cfg(unix)]
     debug_assert_private_mode(&key_path)?;
@@ -69,6 +74,7 @@ pub fn run(args: KeygenArgs) -> Result<()> {
             "fingerprint": fingerprint,
             "private_key": key_path.display().to_string(),
             "public_key": pub_path.display().to_string(),
+            "public_key_pem": pem_path.display().to_string(),
         });
         println!("{}", serde_json::to_string_pretty(&info)?);
     } else if !args.quiet {
@@ -76,6 +82,7 @@ pub fn run(args: KeygenArgs) -> Result<()> {
         eprintln!("  fingerprint: {fingerprint}");
         eprintln!("  private key: {}", key_path.display());
         eprintln!("  public key:  {}", pub_path.display());
+        eprintln!("  public pem:  {}", pem_path.display());
     }
 
     Ok(())
