@@ -27,15 +27,20 @@ echo "── [0/7] fixtures"
 mkdir -p "$WORK/app"
 printf 'print("biz")\n' > "$WORK/app/app.py"
 "$ERE" build "$WORK/app" --isolation none -o "$WORK/tiny.erebus" >/dev/null 2>&1
+[ -f "$WORK/tiny.erebus" ] || { echo "  ✗ bundle build failed:"; df -h / | tail -1; exit 1; }
+# The bundle embeds the host's Python runtime, so its size S varies by host.
+# The quota test in [3/7] needs Q in [3.5 S, 4.5 S) (see the comment there), so
+# derive it instead of hard-coding a size seen on one machine.
+SIZE=$(stat -c%s "$WORK/tiny.erebus")
+QUOTA_GB=$(python3 -c "print($SIZE * 4 / 1e9)")
 setsid python3 "$HERE/registry_server.py" --dir "$WORK/reg" --host 127.0.0.1 \
-  --port "$PORT" --quota-gb 0.077 > "$WORK/reg.log" 2>&1 < /dev/null &
+  --port "$PORT" --quota-gb "$QUOTA_GB" > "$WORK/reg.log" 2>&1 < /dev/null &
 UP=1
 for i in $(seq 1 30); do
   curl -sf --max-time 2 "$R/health" >/dev/null && UP=0 && break
   sleep 0.5
 done
 check "registry up" $UP
-[ -f "$WORK/tiny.erebus" ] || { echo "  ✗ bundle build failed:"; df -h / | tail -1; exit 1; }
 
 echo "── [1/7] accounts"
 ALICE_TOKEN=$(curl -s -X POST "$R/auth/register" -d '{"username":"alice","password":"correct-horse-42"}' | python3 -c 'import json,sys; print(json.load(sys.stdin).get("token",""))')
@@ -76,12 +81,12 @@ cmp -s "$WORK/tiny.erebus" "$WORK/p1.erebus"; check "pull with bare token byte-i
 expect_code 401 -H "Authorization: Bearer deadbeef$ALICE_TOKEN" "$R/packages/tiny.erebus"
 check "corrupted bearer token → 401" $?
 
-echo "── [3/7] quota exhaustion (quota = 77 MB, tiny bundle ≈ 18.3 MB)"
+echo "── [3/7] quota exhaustion (quota = 4 S, S = bundle size = $SIZE bytes)"
 # Alice pulls her own private package: allowed and metered, and the [2/7]
 # authenticated bootstrap pull already counts once. So by [3/7] she has
-# served S. With quota Q in [3S+S/2, 4S+S/2) (≈ [67, 86] MB for S≈18.3 MB,
-# here Q=77 MB), pulls #1 and #2 fit, the half-size range fits (growing the
-# savings counter), and pull #3 crosses the line.
+# served S. With quota Q in [3S+S/2, 4S+S/2) — here Q = 4 S, mid-window —
+# pulls #1 and #2 fit, the half-size range fits (growing the savings
+# counter), and pull #3 crosses the line.
 expect_code 200 -H "$AUTH" "$R/packages/tiny.erebus"
 check "pull #1 within quota → 200" $?
 expect_code 200 -H "$AUTH" "$R/packages/tiny.erebus"
@@ -89,7 +94,7 @@ check "pull #2 still within quota → 200" $?
 # Delta-style range fetch WHILE inside quota: serves half the bytes but
 # counts the full size as equivalent → savings counter must grow.
 BEFORE_SAVED=$(curl -s --max-time 10 "$R/stats" | python3 -c 'import json,sys; print(json.load(sys.stdin)["bytes_saved"])')
-SIZE=$(stat -c%s "$WORK/tiny.erebus"); HALF=$((SIZE/2))
+HALF=$((SIZE/2))
 curl -s -o /dev/null --max-time 60 -H "$AUTH" -H "Range: bytes=0-$HALF" "$R/packages/tiny.erebus"
 curl -s --max-time 10 "$R/stats" | python3 -c "
 import json,sys

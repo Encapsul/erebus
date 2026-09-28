@@ -1,6 +1,7 @@
 # erebus
 
-[![CI](https://img.shields.io/github/actions/workflow/status/Tednoob17/erebus/ci.yml?branch=main&label=build)](https://github.com/Tednoob17/erebus/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/Tednoob17/erebus/ci.yml?branch=main&label=build)](https://github.com/Tednoob17/erebus/actions/workflows/ci.yml)
+[![Proof chain](https://img.shields.io/github/actions/workflow/status/Tednoob17/erebus/proof.yml?branch=main&label=proof%20chain)](https://github.com/Tednoob17/erebus/actions/workflows/proof.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.6.0--dev-green.svg)](https://github.com/Tednoob17/erebus/releases)
 [![Attestation](https://img.shields.io/badge/receipts-DSSE%20%2B%20in--toto%20%2B%20cosign-blueviolet.svg)](docs/src/spec/attestation.md)
@@ -126,12 +127,19 @@ cosign interop. 650+ Rust tests plus a stdlib Python battery (49 checks,
 including SIGKILL during concurrent publishes → restart → every acknowledged
 receipt still proves into the new tree head).
 
+The **proof chain badge** above is the [`proof.yml`](.github/workflows/proof.yml)
+workflow: on every commit and every day, a fresh Linux runner builds erebus
+from source and runs the entire demo (`scripts/yc_demo.sh` — build, sign,
+enroll, execute with the sandbox on, DSSE receipt, tamper refusals,
+transparency log, offline `--strict --proof`, `cosign … Verified OK`, four
+chaos harnesses) plus the transparency-log battery and the extreme chaos
+battery (native C agent, malformed inputs, 12 concurrent agents). Green means
+every one of those checks passed *today*, not once on a laptop.
+
 **No production users yet.** We publish traction only when it is measurable:
-first the demo (`scripts/yc_demo.sh`) moves into CI so the whole chain is
-re-proven on every commit; then an internal pilot on real enrolled machines
-(receipts anchored, verification failures = 0); then design partners in the
-target sectors. Plan and numbers:
-[ROADMAP §7](ROADMAP.md#7-positioning-and-traction-plan).
+next is an internal pilot on real enrolled machines (receipts anchored,
+verification failures = 0), then design partners in the target sectors. Plan
+and numbers: [ROADMAP §7](ROADMAP.md#7-positioning-and-traction-plan).
 
 ---
 

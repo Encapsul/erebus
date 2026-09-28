@@ -32,6 +32,15 @@ All notable changes to erebus are documented here.
   `execution.prev_attestation_hash`, `verify-attest --chain`.
 - `verify-attest` hardening: display-copy consistency check, `--bundle`
   binding, fingerprint check.
+- **Proof chain in CI** — `.github/workflows/proof.yml` (README badge) runs
+  `scripts/test_transparency_log.py`, the full `scripts/yc_demo.sh` (sandbox
+  on, enroll, `--strict`, cosign, four chaos harnesses) and
+  `scripts/chaos_extreme.sh` on every push and daily.
+
+### Fixed
+
+- `erebus serve --llama-server PATH` no longer requires a `llama-server` on
+  PATH or a runtime pack: the given binary is used as the engine directly.
 
 ### Changed
 

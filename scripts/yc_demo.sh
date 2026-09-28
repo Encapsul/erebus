@@ -117,7 +117,10 @@ for _ in $(seq 1 30); do
     sleep 0.5
 done
 test "$REG_UP" -eq 1 && pass "Registry live on :$REG_PORT (SQLite Merkle transparency log)" || fail "Registry did not start"
-trap 'mkdir -p /tmp/yc-harness-debug && cp "$WORK"/harness-*.log /tmp/yc-harness-debug/ 2>/dev/null; kill $REG_PID 2>/dev/null; rm -rf "$WORK"' EXIT
+# Keep every log on exit so a CI failure can be read from the artifact. The
+# registry is normally already dead here (step 9): under `set -e` a failing
+# `kill` inside the trap would turn a green run into exit 1.
+trap 'set +e; mkdir -p /tmp/yc-harness-debug; cp "$WORK"/*.log /tmp/yc-harness-debug/ 2>/dev/null; kill $REG_PID 2>/dev/null; rm -rf "$WORK"' EXIT
 
 TOKEN=$(python3 -c "
 import urllib.request, json
@@ -413,7 +416,7 @@ step "SUMMARY"
 echo ""
 if [ $FAILURES -eq 0 ]; then
     echo -e "${BOLD}${GREEN}╔══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}${GREEN}║  YC DEMO: ALL CHECKS PASSED                             ║${NC}"
+    echo -e "${BOLD}${GREEN}║  YC DEMO: ALL CHECKS PASSED                              ║${NC}"
     echo -e "${BOLD}${GREEN}║                                                          ║${NC}"
     echo -e "${BOLD}${GREEN}║  ✓ Cryptographic proof of AI agent execution             ║${NC}"
     echo -e "${BOLD}${GREEN}║  ✓ Spec 2.0 receipt: DSSE + in-toto, input/output/exit   ║${NC}"
@@ -421,19 +424,19 @@ if [ $FAILURES -eq 0 ]; then
     echo -e "${BOLD}${GREEN}║  ✓ Tamper detection: binary, receipt, proof all refused  ║${NC}"
     echo -e "${BOLD}${GREEN}║  ✓ Transparency log: offline proof after registry death  ║${NC}"
     echo -e "${BOLD}${GREEN}║  ✓ Sigstore interop: cosign says Verified OK             ║${NC}"
-    echo -e "${BOLD}${GREEN}║  ✓ Chaos monkeys ($CHAOS_PASS/4) — all SURVIVED               ║${NC}"
+    echo -e "${BOLD}${GREEN}║  ✓ Chaos monkeys ($CHAOS_PASS/4) — all SURVIVED                    ║${NC}"
     echo -e "${BOLD}${GREEN}║                                                          ║${NC}"
-    echo -e "${BOLD}${GREEN}║  60-second pitch: \"erebus packages any AI agent into      ║${NC}"
+    echo -e "${BOLD}${GREEN}║  60-second pitch: \"erebus packages any AI agent into     ║${NC}"
     echo -e "${BOLD}${GREEN}║  a single signed binary. Every run leaves a standard,    ║${NC}"
     echo -e "${BOLD}${GREEN}║  signed receipt proving WHAT ran, WHERE (enrolled        ║${NC}"
     echo -e "${BOLD}${GREEN}║  machine), WHEN (public Merkle log + TSA) and WHAT IT    ║${NC}"
     echo -e "${BOLD}${GREEN}║  DID — verifiable offline by erebus or cosign. No infra  ║${NC}"
-    echo -e "${BOLD}${GREEN}║  needed. Evidence your auditor can check, not trust.\"   ║${NC}"
+    echo -e "${BOLD}${GREEN}║  needed. Evidence your auditor can check, not trust.\"    ║${NC}"
     echo -e "${BOLD}${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
     exit 0
 else
     echo -e "${BOLD}${RED}╔══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}${RED}║  YC DEMO: $FAILURES CHECK(S) FAILED                           ║${NC}"
+    echo -e "${BOLD}${RED}║  YC DEMO: $FAILURES CHECK(S) FAILED                              ║${NC}"
     echo -e "${BOLD}${RED}╚══════════════════════════════════════════════════════════╝${NC}"
     exit 1
 fi

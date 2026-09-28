@@ -113,9 +113,14 @@ Use `context: fork` for isolated subagent contexts when running parallel tasks.
 - Function length ≤ 40 lines
 
 ### CI (GitHub Actions)
-- `.github/workflows/ci.yml` runs on push/PR to main
-- Jobs: preflight, rust, python, build (end-to-end)
-- PRs that fail CI cannot be merged
+- `.github/workflows/ci.yml` runs on push/PR to main: build-and-test (musl
+  stub + CLI, `cargo test --workspace`, smoke test), clippy-fmt, cargo-audit,
+  arm-qemu, cross-platform
+- `.github/workflows/proof.yml` ("Proof chain" badge) runs on push/PR and
+  daily: `scripts/test_transparency_log.py`, the full `scripts/yc_demo.sh`
+  (sandbox on, enroll, `--strict`, cosign, 4 chaos harnesses),
+  `scripts/chaos_extreme.sh`. Harness logs uploaded on failure.
+- PRs that fail either workflow cannot be merged
 
 ## Benchmarking
 

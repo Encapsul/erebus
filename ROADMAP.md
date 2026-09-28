@@ -71,7 +71,7 @@ as items land.
 | A8 | Warm start (`main.rs:463-487`) trusts `~/.cache/erebus/<hash>/rootfs` on size+mtime of the bundle; rootfs content is never re-hashed. With `isolation < 2` the payload can rewrite its own rootfs. | Attestation says "bundle X intact" while modified code runs | P0-4 | ✅ 2026-09-17 |
 | A9 | Behavior capture hashes **argv** (`input_hash`) and **stdout‖stderr** (`output_hash`). For an HTTP-serving agent this is the engine's log noise. `erebus serve` launches `llama-server` directly, bypassing the stub — the main LLM path produces **no** attestation. | Capture exists but not where agent behavior lives | P0-3 | ✅ 2026-09-17 |
 | A10 | Signature = Ed25519 over `serde_json::to_vec_pretty(statement)`. No DSSE envelope, no JCS/RFC 8785 canonicalization, predicate URI resolves to nothing. "in-toto compatible" is aspirational: cosign/in-toto-verify/Rekor cannot consume it. | No ecosystem interop, fragile canonical form | P0-7 | ✅ 2026-09-17 |
-| A11 | CI runs `cargo test` + one HTTP smoke test. **None** of the chaos harnesses, `yc_demo.sh`, or an attestation e2e run in CI; "SURVIVED" verdicts are manual VPS runs. | Claims are not continuously proven | P1-1 | ⬜ (CLI-level attest e2e added 2026-09-17) |
+| A11 | CI runs `cargo test` + one HTTP smoke test. **None** of the chaos harnesses, `yc_demo.sh`, or an attestation e2e run in CI; "SURVIVED" verdicts are manual VPS runs. | Claims are not continuously proven | P1-1 | ✅ 2026-09-28 (`proof.yml`: demo + 4 harnesses + log battery + chaos_extreme, on push and daily) |
 | A12 | `docs/src` (mdbook) has zero pages on attestation; README pitches "package anything → OpenAI API" while this file pitches "proof layer". | Two products, two stories | P1-3 | ⬜ |
 | A13 | 37 subcommands; `registry_server.py` = 3 004 lines in one file with Stripe, SAML, webhooks, replication, mirror, MCP, CVE, web UI. Proof code ≈ 2 % of the codebase. | Dilution; every new surface is attack surface and maintenance | §4 freeze | ⬜ |
 
@@ -237,9 +237,20 @@ CI job).
 
 ### 🟠 P1 — Make the claims continuously proven (parallel with late P0)
 
-- [ ] **P1-1 CI runs the demo** (A11): Linux job → build stub → `scripts/yc_demo.sh`
-  (build → sign → run captured → verify → tamper → chain) + `chaos_monkey.sh 10`.
-  Nightly job for the full chaos battery. Any red = no merge.
+- [x] **P1-1 CI runs the demo** (A11) — landed 2026-09-28 as
+  `.github/workflows/proof.yml` ("Proof chain" badge in the README): on every
+  push/PR to `main`, daily (`cron`) and on demand, a fresh Ubuntu runner builds
+  the musl stub + CLI and runs, in order, `scripts/test_transparency_log.py`
+  (49 checks), `scripts/yc_demo.sh` (11 steps: build → sign → enroll → execute
+  with the sandbox **on** → DSSE receipt → tamper refusals → transparency log →
+  offline `--strict --proof` → `cosign … Verified OK` → `chaos_monkey` /
+  `chaos_business` / `chaos_registry_serve` / `chaos_frontends`) and
+  `scripts/chaos_extreme.sh`. Harness logs are uploaded as an artifact on
+  failure. Fixes surfaced by the first Linux run: `serve --llama-server` now
+  bypasses engine resolution (it used to demand a `llama-server` on PATH even
+  when overridden), the quota harness derives its quota from the real bundle
+  size, and the demo's exit trap no longer turns a green run into exit 1.
+  Any red = no merge.
 - [ ] **P1-2 Evidence export**: `erebus evidence export <bundle> -o pack.zip`
   = bundle hashes, receipts, inclusion proofs, checkpoints, TSA tokens,
   trusted public keys. `erebus verify-evidence pack.zip` verifies **offline**.
@@ -284,7 +295,7 @@ Rule: a PR touching a frozen surface must reference a P0/P1 item it unblocks.
 
 ---
 
-## 5. The YC demo (2 minutes, every step green in CI — P1-1)
+## 5. The YC demo (2 minutes, every step green in CI — `proof.yml`)
 
 ```bash
 erebus keygen                                   # Ed25519 key, 0600
@@ -306,7 +317,9 @@ erebus verify agent.erebus                      # TAMPERED: signature does not m
 Extended (P0-5): `erebus attest --push` → `erebus verify-attest --proof` shows
 the receipt is included in a checkpoint timestamped by an independent TSA.
 
-**Current state (2026-09-17):** steps 1–10 work (P0-1, P0-2, P0-3 landed:
+**Current state (2026-09-28):** the full `scripts/yc_demo.sh` (11 steps, incl.
+enroll, `--strict`, cosign and the four chaos harnesses) runs green on a fresh
+Ubuntu runner in `proof.yml` — ≈ 6 min. Earlier state (2026-09-17): steps 1–10 work (P0-1, P0-2, P0-3 landed:
 `serve --attest-key` makes every chat call a chained receipt). The `--proof`
 step works (P0-5): run the registry with `--tsa-url https://freetsa.org/tsr`,
 `erebus attest agent.erebus --push --registry $ERE_REGISTRY --token $T`, then

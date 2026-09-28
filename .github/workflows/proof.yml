@@ -1,0 +1,91 @@
+# Proof chain — re-proves the whole demo on every commit and every day.
+#
+# ci.yml answers "does the code compile and pass its unit tests". This
+# workflow answers the question an auditor would ask: does the complete chain
+# (build → sign → enroll → execute → DSSE receipt → tamper refusal →
+# transparency log → offline proof → cosign interop → chaos) still hold on a
+# fresh Linux host, with nothing but the repository? The README badge points
+# here, so the badge is only green when every step is (ROADMAP P1-1 / T1).
+name: Proof chain
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 5 * * *" # daily; a badge that is green only on push proves less
+  workflow_dispatch:
+
+env:
+  CARGO_TARGET_DIR: /tmp/erebus-stub-target
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  proof-chain:
+    name: build → sign → attest → log → cosign → chaos
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable (2026-08-26)
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools zstd gcc python3 file
+
+      - name: Cache cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            /tmp/erebus-stub-target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # Ubuntu ≥ 23.10 lets AppArmor refuse unprivileged user namespaces; the
+      # stub sandboxes with unshare(CLONE_NEWUSER) so the demo must run with
+      # the sandbox ON, exactly as a customer would.
+      - name: Allow unprivileged user namespaces
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+
+      - name: Build stub (musl static ELF)
+        run: make stub
+
+      - name: Build CLI
+        run: cargo build --release -p erebus-cli
+
+      - name: Transparency log battery (Merkle, checkpoints, TSA, SIGKILL)
+        timeout-minutes: 10
+        run: python3 scripts/test_transparency_log.py
+
+      - name: Demo — the whole chain, every step must be green
+        timeout-minutes: 30
+        env:
+          ERE_BIN: /tmp/erebus-stub-target/release/erebus
+          TERM: dumb
+        run: bash scripts/yc_demo.sh
+
+      - name: Chaos — native agent, malformed inputs, 12 concurrent agents
+        timeout-minutes: 15
+        run: bash scripts/chaos_extreme.sh /tmp/erebus-stub-target/release/erebus
+
+      - name: Upload harness logs on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: proof-chain-logs
+          path: /tmp/yc-harness-debug/
+          if-no-files-found: ignore

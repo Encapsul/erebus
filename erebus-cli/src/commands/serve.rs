@@ -223,35 +223,27 @@ pub(crate) fn start_engine(
             model.path.display()
         );
     }
-    let mut plan = match erebus_core::inference::plan_launch(
-        &rootfs, &model, host, port, ctx_size, ngl, threads,
-    ) {
-        Ok(plan) => plan,
-        // Engine missing? Try the runtime-pack chain (local layer store,
-        // then ERE_REGISTRY) before surfacing the install hint.
-        Err(msg) => match ensure_engine_pack(model.format.native_engine()) {
-            Ok(path) => {
-                eprintln!("[erebus] using runtime pack: {}", path.display());
-                erebus_core::inference::LaunchPlan {
-                    program: path.to_string_lossy().into_owned(),
-                    args: erebus_core::inference::engine_args(
-                        &model, host, port, ctx_size, ngl, threads,
-                    ),
-                }
-            }
-            Err(pack_err) => {
-                eprintln!("[erebus] runtime pack unavailable: {pack_err:#}");
-                anyhow::bail!("{msg}");
-            }
-        },
+    let launch = LaunchParams {
+        host,
+        port,
+        ctx_size,
+        ngl,
+        threads,
     };
-    // Power-user escape hatch: force the server binary over the resolved one.
-    if let Some(bin) = llama_server {
-        if !bin.is_file() {
-            bail!("--llama-server not found at {}", bin.display());
+    let plan = match llama_server {
+        // Power-user escape hatch: the given binary IS the engine, so no
+        // PATH / bundle / runtime-pack resolution must be required for it.
+        Some(bin) => {
+            if !bin.is_file() {
+                bail!("--llama-server not found at {}", bin.display());
+            }
+            erebus_core::inference::LaunchPlan {
+                program: bin.to_string_lossy().into_owned(),
+                args: launch.engine_args(&model),
+            }
         }
-        plan.program = bin.to_string_lossy().into_owned();
-    }
+        None => resolve_plan(&rootfs, &model, &launch)?,
+    };
     if verbose {
         eprintln!("[erebus] exec: {} {}", plan.program, plan.args.join(" "));
     }
@@ -269,6 +261,64 @@ pub(crate) fn start_engine(
             |n| n.to_string_lossy().into_owned(),
         ),
     })
+}
+
+/// Host-side knobs every engine launch needs, whichever binary ends up used.
+struct LaunchParams<'a> {
+    host: &'a str,
+    port: u16,
+    ctx_size: u32,
+    ngl: u32,
+    threads: Option<u32>,
+}
+
+impl LaunchParams<'_> {
+    fn engine_args(&self, model: &erebus_core::inference::FoundModel) -> Vec<String> {
+        erebus_core::inference::engine_args(
+            model,
+            self.host,
+            self.port,
+            self.ctx_size,
+            self.ngl,
+            self.threads,
+        )
+    }
+}
+
+/// Resolve the engine for `model`: bundle / PATH first, then the runtime-pack
+/// chain (local layer store, then `ERE_REGISTRY`) before surfacing the
+/// install hint.
+fn resolve_plan(
+    rootfs: &Path,
+    model: &erebus_core::inference::FoundModel,
+    launch: &LaunchParams<'_>,
+) -> Result<erebus_core::inference::LaunchPlan> {
+    let resolved = erebus_core::inference::plan_launch(
+        rootfs,
+        model,
+        launch.host,
+        launch.port,
+        launch.ctx_size,
+        launch.ngl,
+        launch.threads,
+    );
+    let msg = match resolved {
+        Ok(plan) => return Ok(plan),
+        Err(msg) => msg,
+    };
+    match ensure_engine_pack(model.format.native_engine()) {
+        Ok(path) => {
+            eprintln!("[erebus] using runtime pack: {}", path.display());
+            Ok(erebus_core::inference::LaunchPlan {
+                program: path.to_string_lossy().into_owned(),
+                args: launch.engine_args(model),
+            })
+        }
+        Err(pack_err) => {
+            eprintln!("[erebus] runtime pack unavailable: {pack_err:#}");
+            bail!("{msg}")
+        }
+    }
 }
 
 /// Where downloaded engine packs live, shared across runs.
