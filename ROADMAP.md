@@ -507,7 +507,7 @@ pilot or LOI beside it (§7.3).
 
 ## 10. Changelog (condensed)
 
-- **0.6.0-dev (2026-09-17)** — P0-1 `verify-attest` hardening (consistency
+- **0.6.0 (2026-09-28)** — P0-1 `verify-attest` hardening (consistency
   check, `--bundle`, fingerprint); P0-2 hash-chained append-only local trail
   (`<bundle>.attest.d/`, `prev_attestation_hash`, `--chain`); P0-3 attesting
   reverse proxy in `erebus serve --attest-key` (one signed receipt per

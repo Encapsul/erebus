@@ -11,7 +11,10 @@ name: Release
 #   erebus_0.5.0_darwin_amd64.tar.gz    (erebus + erebus-stub + erebus-crypto)
 #   erebus_0.5.0_darwin_arm64.tar.gz    (erebus + erebus-stub + erebus-crypto)
 #   erebus_0.5.0_windows_amd64.tar.gz   (erebus + erebus-stub + erebus-crypto)
+#   erebus_0.5.0_<os>_<arch>.tar.gz.sha256   (one sidecar per archive, for `erebus upgrade`)
 #   checksums.txt
+#
+# Consumers of this naming: scripts/install.sh and erebus-cli/src/commands/upgrade.rs.
 #
 # Strategy:
 #   - All targets cross-compiled from ubuntu with cargo-zigbuild (zig C
@@ -62,14 +65,14 @@ jobs:
           - { target: armv7-unknown-linux-gnueabihf, arch: armv7-gnu, stub: false, experimental: true }
           - { target: riscv64gc-unknown-linux-gnu, arch: riscv64-gnu, stub: false, experimental: true }
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable (2026-08-26)
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install zig (musl cross C compiler)
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
       - name: Install cargo-zigbuild
         run: cargo install cargo-zigbuild --locked
 
@@ -96,7 +99,7 @@ jobs:
           fi
           find "${D}" -type f -exec chmod +x {} +
           tar -czf "${D}.tar.gz" "${D}"
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: linux-${{ matrix.arch }}
           path: erebus_*.tar.gz
@@ -112,12 +115,12 @@ jobs:
     env:
       CARGO_TARGET_DIR: /tmp/erebus-stub-target
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable (2026-08-26)
         with:
           toolchain: stable
           targets: x86_64-apple-darwin
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
       - name: Install cargo-zigbuild
         run: cargo install cargo-zigbuild --locked
       - name: Download macOS SDK
@@ -150,7 +153,7 @@ jobs:
           cp /tmp/erebus-stub-target/x86_64-apple-darwin/release/erebus-crypto "${D}/erebus-crypto"
           chmod +x "${D}/erebus" "${D}/erebus-stub" "${D}/erebus-crypto"
           tar -czf "${D}.tar.gz" "${D}"
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: darwin-amd64
           path: erebus_*.tar.gz
@@ -162,12 +165,12 @@ jobs:
     env:
       CARGO_TARGET_DIR: /tmp/erebus-stub-target
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable (2026-08-26)
         with:
           toolchain: stable
           targets: aarch64-apple-darwin
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
       - name: Install cargo-zigbuild
         run: cargo install cargo-zigbuild --locked
       - name: Download macOS SDK
@@ -202,7 +205,7 @@ jobs:
           cp /tmp/erebus-stub-target/aarch64-apple-darwin/release/erebus-crypto "${D}/erebus-crypto"
           chmod +x "${D}/erebus" "${D}/erebus-stub" "${D}/erebus-crypto"
           tar -czf "${D}.tar.gz" "${D}"
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: darwin-arm64
           path: erebus_*.tar.gz
@@ -217,12 +220,12 @@ jobs:
     env:
       CARGO_TARGET_DIR: /tmp/erebus-stub-target
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable (2026-08-26)
         with:
           toolchain: stable
           targets: x86_64-pc-windows-gnu
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
       - name: Install cargo-zigbuild
         run: cargo install cargo-zigbuild --locked
 
@@ -248,7 +251,7 @@ jobs:
           cp /tmp/erebus-stub-target/x86_64-pc-windows-gnu/release/erebus-stub.exe "${D}/erebus-stub.exe"
           cp /tmp/erebus-stub-target/x86_64-pc-windows-gnu/release/erebus-crypto.exe "${D}/erebus-crypto.exe"
           tar -czf "${D}.tar.gz" "${D}"
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: windows-amd64
           path: erebus_*.tar.gz
@@ -259,34 +262,59 @@ jobs:
     needs: [linux, darwin-amd64, darwin-arm64, windows-amd64]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
           pattern: "*"
           merge-multiple: true
 
+      # checksums.txt for humans and install.sh; one <archive>.sha256 sidecar
+      # per archive for `erebus upgrade` (fetches the digest before the
+      # download and fails closed).
       - name: Generate checksums
         run: |
           cd dist
           sha256sum erebus_*.tar.gz > checksums.txt
+          for f in erebus_*.tar.gz; do sha256sum "$f" > "$f.sha256"; done
           cat checksums.txt
 
       - name: List artifacts
         run: ls -lh dist/
 
+      # Release notes = the changelog section of this version (first `## `
+      # block whose heading contains the version), else the top section.
+      - name: Release notes
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          awk -v v="$V" '
+            /^## / { if (found) exit; if (index($0, v)) { found = 1 } ; if (found) next }
+            found { print }
+          ' docs/src/CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            awk 'BEGIN{n=0} /^## /{n++; if (n==2) exit; next} n==1{print}' docs/src/CHANGELOG.md > notes.md
+          fi
+          printf '\n---\nInstall: `curl -fsSL https://raw.githubusercontent.com/%s/main/scripts/install.sh | bash`\n' \
+            "$GITHUB_REPOSITORY" >> notes.md
+          cat notes.md
+
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "erebus $GITHUB_REF_NAME" \
-            --notes-file CHANGELOG.md \
-            dist/erebus_*.tar.gz dist/checksums.txt \
-          || gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-             dist/erebus_*.tar.gz dist/checksums.txt --clobber
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --title "erebus $GITHUB_REF_NAME" --notes-file notes.md
+            gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              dist/erebus_*.tar.gz dist/erebus_*.tar.gz.sha256 dist/checksums.txt --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "erebus $GITHUB_REF_NAME" \
+              --notes-file notes.md \
+              dist/erebus_*.tar.gz dist/erebus_*.tar.gz.sha256 dist/checksums.txt
+          fi
 
   # ── QEMU boot test for linux-aarch64 ─────────────────────────────────
   qemu-aarch64:
@@ -294,12 +322,15 @@ jobs:
     runs-on: ubuntu-24.04
     needs: [linux]
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable (2026-08-26)
         with:
           toolchain: stable
           targets: aarch64-unknown-linux-musl
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked
       - name: Install QEMU
         run: sudo apt-get update && sudo apt-get install -y qemu-user-static
       - name: Build aarch64 stub + CLI

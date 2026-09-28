@@ -3,7 +3,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/Tednoob17/erebus/ci.yml?branch=main&label=build)](https://github.com/Tednoob17/erebus/actions/workflows/ci.yml)
 [![Proof chain](https://img.shields.io/github/actions/workflow/status/Tednoob17/erebus/proof.yml?branch=main&label=proof%20chain)](https://github.com/Tednoob17/erebus/actions/workflows/proof.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.6.0--dev-green.svg)](https://github.com/Tednoob17/erebus/releases)
+[![Version](https://img.shields.io/badge/version-0.6.0-green.svg)](https://github.com/Tednoob17/erebus/releases)
 [![Attestation](https://img.shields.io/badge/receipts-DSSE%20%2B%20in--toto%20%2B%20cosign-blueviolet.svg)](docs/src/spec/attestation.md)
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)]()

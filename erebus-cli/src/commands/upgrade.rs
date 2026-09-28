@@ -50,8 +50,9 @@ pub fn run(args: UpgradeArgs) -> Result<()> {
         eprintln!("[erebus] platform: {platform}");
     }
 
+    // Naming contract of .github/workflows/release.yml (shared with install.sh).
     let tag = format!("v{latest}");
-    let asset = format!("erebus-{latest}-{platform}.tar.gz");
+    let asset = format!("erebus_{latest}_{platform}.tar.gz");
     let url = format!("https://github.com/Tednoob17/erebus/releases/download/{tag}/{asset}");
 
     if args.dry_run {
@@ -103,16 +104,7 @@ pub fn run(args: UpgradeArgs) -> Result<()> {
     }
 
     // Find extracted directory
-    let extracted = std::fs::read_dir(tmp.path())
-        .context("failed to read temp dir")?
-        .flatten()
-        .find(|e| e.path().is_dir() && e.file_name().to_string_lossy().starts_with("erebus-"))
-        .context("unexpected archive structure")?;
-
-    let bin_dir = extracted.path().join("bin");
-    if !bin_dir.is_dir() {
-        anyhow::bail!("no bin/ directory in archive");
-    }
+    let bin_dir = find_binaries_dir(tmp.path())?;
 
     // Find install location
     let erebus_path = find_erebus_binary()?;
@@ -150,8 +142,11 @@ pub fn run(args: UpgradeArgs) -> Result<()> {
         }
     }
 
-    for entry in std::fs::read_dir(&bin_dir).context("failed to read bin/ directory")? {
+    for entry in std::fs::read_dir(&bin_dir).context("failed to read archive directory")? {
         let entry = entry?;
+        if !entry.path().is_file() {
+            continue;
+        }
         let dest = install_dir.join(entry.file_name());
         if is_writable(&dest) {
             std::fs::copy(entry.path(), &dest)
@@ -185,24 +180,52 @@ pub fn run(args: UpgradeArgs) -> Result<()> {
     Ok(())
 }
 
+/// Locate the directory holding the binaries inside an extracted release
+/// archive: `erebus_<ver>_<os>_<arch>/` with the binaries at its root
+/// (current layout), or a legacy `erebus-*/bin/`.
+fn find_binaries_dir(tmp: &Path) -> Result<PathBuf> {
+    let extracted = std::fs::read_dir(tmp)
+        .context("failed to read temp dir")?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("erebus"))
+        })
+        .context("unexpected archive structure")?;
+    let legacy_bin = extracted.join("bin");
+    if legacy_bin.is_dir() {
+        return Ok(legacy_bin);
+    }
+    if !extracted.join("erebus").is_file() && !extracted.join("erebus.exe").is_file() {
+        anyhow::bail!("no erebus binary in archive");
+    }
+    Ok(extracted)
+}
+
+/// `<os>_<arch>` exactly as the release archives are named
+/// (`erebus_<ver>_<os>_<arch>.tar.gz`, see .github/workflows/release.yml).
 fn detect_platform() -> Result<String> {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
 
     let os_str = match os {
         "linux" => "linux",
-        "macos" => "macos",
-        "windows" => "win",
+        "macos" => "darwin",
+        "windows" => "windows",
         _ => anyhow::bail!("unsupported OS: {os}"),
     };
 
     let arch_str = match arch {
-        "x86_64" => "x64",
+        "x86_64" => "amd64",
         "aarch64" => "arm64",
+        "x86" => "i386",
+        "arm" => "armv7",
         _ => anyhow::bail!("unsupported architecture: {arch}"),
     };
 
-    Ok(format!("{os_str}-{arch_str}"))
+    Ok(format!("{os_str}_{arch_str}"))
 }
 
 fn fetch_latest_version() -> Result<String> {
@@ -330,15 +353,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_detect_platform_linux_x64() {
-        // This test runs on the current platform, just verify it doesn't panic
-        let p = detect_platform();
-        assert!(p.is_ok());
-        let p = p.unwrap();
-        assert!(p.contains('-'));
-        if std::env::consts::OS == "linux" {
-            assert!(p.starts_with("linux"));
+    fn test_detect_platform_matches_release_naming() {
+        // Runs on the current platform: the value must be a valid
+        // `<os>_<arch>` suffix of a release archive name.
+        let p = detect_platform().unwrap();
+        let (os, arch) = p.split_once('_').unwrap();
+        assert!(["linux", "darwin", "windows"].contains(&os));
+        assert!(["amd64", "arm64", "i386", "armv7"].contains(&arch));
+        if std::env::consts::OS == "macos" {
+            assert_eq!(os, "darwin");
         }
+    }
+
+    #[test]
+    fn test_find_binaries_dir_current_and_legacy_layouts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cur = tmp.path().join("erebus_0.6.0_linux_amd64");
+        std::fs::create_dir(&cur).unwrap();
+        std::fs::write(cur.join("erebus"), b"bin").unwrap();
+        assert_eq!(find_binaries_dir(tmp.path()).unwrap(), cur);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = tmp.path().join("erebus-0.5.0-linux-x64");
+        std::fs::create_dir_all(legacy.join("bin")).unwrap();
+        assert_eq!(find_binaries_dir(tmp.path()).unwrap(), legacy.join("bin"));
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("erebus_empty")).unwrap();
+        assert!(find_binaries_dir(tmp.path()).is_err());
     }
 
     #[test]

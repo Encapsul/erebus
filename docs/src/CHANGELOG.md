@@ -2,7 +2,7 @@
 
 All notable changes to erebus are documented here.
 
-## [Unreleased] — 0.6.0-dev — the proof chain
+## [0.6.0] — 2026-09-28 — the proof chain
 
 ### Added
 

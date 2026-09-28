@@ -54,7 +54,9 @@ pub fn run(args: BillingArgs) -> Result<()> {
 
 fn status(registry: &str, token: Option<&str>) -> Result<()> {
     let url = format!("{}/billing/status", registry);
-    let client = Client::builder().user_agent("erebus-cli/0.5.0").build()?;
+    let client = Client::builder()
+        .user_agent(concat!("erebus-cli/", env!("CARGO_PKG_VERSION")))
+        .build()?;
     let mut req = client.get(&url);
     if let Some(token) = token {
         req = req.bearer_auth(token);
@@ -74,7 +76,9 @@ fn status(registry: &str, token: Option<&str>) -> Result<()> {
 
 fn checkout(registry: &str, plan: &str, token: Option<&str>, open: bool) -> Result<()> {
     let url = format!("{}/billing/checkout", registry);
-    let client = Client::builder().user_agent("erebus-cli/0.5.0").build()?;
+    let client = Client::builder()
+        .user_agent(concat!("erebus-cli/", env!("CARGO_PKG_VERSION")))
+        .build()?;
     let resp = client
         .post(&url)
         .bearer_auth(token.unwrap_or_default())

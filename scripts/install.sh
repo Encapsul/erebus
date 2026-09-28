@@ -18,19 +18,23 @@ detect_platform() {
   os="$(uname -s)"
   arch="$(uname -m)"
 
+  # Same <os>_<arch> vocabulary as the release archives
+  # (erebus_<version>_<os>_<arch>.tar.gz, see .github/workflows/release.yml).
   case "$os" in
     Linux*)  os="linux" ;;
-    Darwin*) os="macos" ;;
+    Darwin*) os="darwin" ;;
     *)       err "unsupported OS: $os" ;;
   esac
 
   case "$arch" in
-    x86_64|amd64)   arch="x64" ;;
+    x86_64|amd64)   arch="amd64" ;;
     aarch64|arm64)  arch="arm64" ;;
+    armv7l)         arch="armv7" ;;
+    i686|i386)      arch="i386" ;;
     *)              err "unsupported architecture: $arch" ;;
   esac
 
-  echo "${os}-${arch}"
+  echo "${os}_${arch}"
 }
 
 verify_checksum() {
@@ -104,7 +108,7 @@ main() {
   tmpdir="$(mktemp -d)"
   trap 'rm -rf "${tmpdir}"' EXIT
 
-  asset="erebus-${platform}.tar.gz"
+  asset="erebus_${version}_${platform}.tar.gz"
   url="${GITHUB}/releases/download/${tag}/${asset}"
 
   info "downloading ${asset}..."
@@ -131,21 +135,22 @@ main() {
   info "extracting..."
   tar xzf "${tmpdir}/${asset}" -C "${tmpdir}"
 
-  local extracted_dir="${tmpdir}/erebus-${platform}"
+  local extracted_dir="${tmpdir}/erebus_${version}_${platform}"
   if [ ! -d "$extracted_dir" ]; then
-    extracted_dir="$(find "${tmpdir}" -maxdepth 1 -type d -name 'erebus-*' | head -1)"
+    extracted_dir="$(find "${tmpdir}" -maxdepth 1 -type d -name 'erebus[_-]*' | head -1)"
   fi
 
   if [ ! -d "$extracted_dir" ]; then
     err "unexpected archive structure — no directory found"
   fi
 
-  # Install binaries
+  # Install binaries (erebus, erebus-stub, erebus-crypto sit at the archive root)
   info "installing to ${INSTALL_DIR}..."
   if [ -w "$INSTALL_DIR" ] 2>/dev/null; then
-    cp "${extracted_dir}/"* "$INSTALL_DIR/"
+    find "$extracted_dir" -maxdepth 1 -type f -exec cp {} "$INSTALL_DIR/" \;
   else
-    sudo cp "${extracted_dir}/"* "$INSTALL_DIR/"
+    sudo mkdir -p "$INSTALL_DIR"
+    find "$extracted_dir" -maxdepth 1 -type f -exec sudo cp {} "$INSTALL_DIR/" \;
   fi
 
   ok "installed erebus ${version} to ${INSTALL_DIR}"

@@ -1,6 +1,6 @@
 [package]
 name = "erebus-stub"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "erebus launcher stub — self-extracting ELF that runs the embedded app"
 

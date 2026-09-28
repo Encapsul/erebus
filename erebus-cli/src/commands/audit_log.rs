@@ -33,7 +33,9 @@ pub fn run(args: AuditLogArgs) -> Result<()> {
         url.push_str(&format!("&org={}", urlencoding::encode(&org)));
     }
 
-    let client = Client::builder().user_agent("erebus-cli/0.5.0").build()?;
+    let client = Client::builder()
+        .user_agent(concat!("erebus-cli/", env!("CARGO_PKG_VERSION")))
+        .build()?;
 
     let mut req = client.get(&url);
     if let Some(token) = args.token {
