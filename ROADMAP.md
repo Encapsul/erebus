@@ -72,7 +72,7 @@ as items land.
 | A9 | Behavior capture hashes **argv** (`input_hash`) and **stdout‖stderr** (`output_hash`). For an HTTP-serving agent this is the engine's log noise. `erebus serve` launches `llama-server` directly, bypassing the stub — the main LLM path produces **no** attestation. | Capture exists but not where agent behavior lives | P0-3 | ✅ 2026-09-17 |
 | A10 | Signature = Ed25519 over `serde_json::to_vec_pretty(statement)`. No DSSE envelope, no JCS/RFC 8785 canonicalization, predicate URI resolves to nothing. "in-toto compatible" is aspirational: cosign/in-toto-verify/Rekor cannot consume it. | No ecosystem interop, fragile canonical form | P0-7 | ✅ 2026-09-17 |
 | A11 | CI runs `cargo test` + one HTTP smoke test. **None** of the chaos harnesses, `yc_demo.sh`, or an attestation e2e run in CI; "SURVIVED" verdicts are manual VPS runs. | Claims are not continuously proven | P1-1 | ✅ 2026-09-28 (`proof.yml`: demo + 4 harnesses + log battery + chaos_extreme, on push and daily) |
-| A12 | `docs/src` (mdbook) has zero pages on attestation; README pitches "package anything → OpenAI API" while this file pitches "proof layer". | Two products, two stories | P1-3 | ⬜ |
+| A12 | `docs/src` (mdbook) has zero pages on attestation; README pitches "package anything → OpenAI API" while this file pitches "proof layer". | Two products, two stories | P1-3 | 🟡 README + `spec/attestation.md` + `concepts/proof.md` done 2026-09-28; `guides/audit.md` left |
 | A13 | 37 subcommands; `registry_server.py` = 3 004 lines in one file with Stripe, SAML, webhooks, replication, mirror, MCP, CVE, web UI. Proof code ≈ 2 % of the codebase. | Dilution; every new surface is attack surface and maintenance | §4 freeze | ⬜ |
 
 ---
@@ -258,6 +258,10 @@ CI job).
 - [ ] **P1-3 One story** (A12): README leads with proof (build → sign → run →
   receipt → verify → tamper), packaging/serve become "how it runs"; mdbook
   gets `concepts/proof.md`, `spec/attestation.md`, `guides/audit.md`.
+  Done 2026-09-28: README proof-first, `spec/attestation.md`,
+  `concepts/proof.md` (boundary + three questions). Left: `guides/audit.md`
+  (the auditor's walkthrough) and pruning the older mdbook pages that still
+  pitch packaging.
 - [ ] **P1-4 Registry hygiene**: split `registry_server.py` into a package
   (`store/`, `auth/`, `log/`, `http/`), SQLite everywhere, remove the O(n)
   scans, keep zero third-party deps.
@@ -397,6 +401,42 @@ Rules: cite only what CI or a third party proves; no star counts; the founder
 story is told as *results* (proof chain complete, Python signer and Merkle
 byte-compatible with Rust, cosign interop, SIGKILL chaos survived), never as a
 module list.
+
+### 7.4 The boundary, and the three questions (2026-09-28)
+
+Full text: [`docs/src/concepts/proof.md`](docs/src/concepts/proof.md). The
+short form every pitch must respect:
+
+- **We prove** what ran, where, when, with what / producing what, and that
+  the record was never edited (L1 + L3 in §1). A flight recorder for agents.
+- **We do not prove** the computation was faithful (L2 — TEE/zkML, roadmap
+  option only if a customer asks), that the agent did the right thing (that is
+  evaluation), the plaintext (digests only), or a root-compromised host
+  (software machine key; TPM2 is roadmap). Never let a slide imply otherwise.
+- **Why this boundary is the product**: Certificate Transparency, Sigstore, a
+  flight recorder, an accounting audit trail — none prove correctness, all
+  make the record undeniable, all changed their industry. Regulators ask for
+  record-keeping and traceability (EU AI Act Art. 12/19/26, SOC 2, ISO 42001),
+  not proofs of correctness.
+- **"And if the agent lies?"** → *We do not judge the agent; we make it
+  impossible to lie about what it did.*
+
+The three questions that decide the outcome, and the answers we hold:
+
+1. *Who needs this now?* Teams deploying agents on machines they don't fully
+   control, answerable to someone who doesn't trust them. Must be a **name**
+   (T2/T3), not a sector.
+2. *Why now?* Agents act without a human in the loop; record-keeping
+   obligations for high-risk AI are becoming enforceable. Editable logs were
+   tolerated for chatbots, not for systems that act.
+3. *Why not a feature of Datadog / LangSmith?* An operator-run tool cannot
+   produce evidence the operator does not control. Traces answer "what
+   happened?" to the operator; an anchored receipt answers it to the auditor.
+   The neutral log is the product; the launcher is where the signature is
+   unbypassable.
+
+What will get us refused is not L2. It is "No production users yet" with no
+pilot or LOI beside it (§7.3).
 
 ---
 

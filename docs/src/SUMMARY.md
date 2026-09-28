@@ -5,6 +5,7 @@
 # Concepts
 
 - [The Problem](./concepts/problem.md)
+- [What erebus proves — and what it does not](./concepts/proof.md)
 - [Positioning](./concepts/positioning.md)
 - [Architecture](./concepts/architecture.md)
 - [SISR Overview](./concepts/sisr-overview.md)

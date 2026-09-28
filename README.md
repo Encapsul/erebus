@@ -85,12 +85,28 @@ What a receipt proves, layer by layer ([spec](docs/src/spec/attestation.md)):
 Every value a verifier prints is read from the **signed** statement, never from
 the human-readable copies. Legacy 1.x receipts stay verifiable.
 
-erebus proves that an execution **happened, unaltered, on a known machine, at a
-time nobody can backdate** — and that the trail was never edited. It does not
-judge whether the agent did the *right* thing (that is evaluation), and it does
-not do your compliance for you: mapping receipts to EU AI Act record-keeping,
-SOC 2 or ISO 42001 stays with your compliance team. erebus gives that team
-evidence instead of screenshots.
+### What a receipt proves — and what it does not
+
+A receipt is a **flight recorder for AI agents**: it establishes *what* ran
+(exact code and weights), *where* (an enrolled, certified host), *when* (a
+time nobody can backdate), *with what and producing what* (input/output
+digests, exit code, one entry per inference call), and that the *record* was
+never edited. Non-repudiation of the execution, tamper evidence for the trail.
+
+It does **not** prove the computation was faithful (`output = f(input,
+weights)` needs a TEE or zkML — roadmap option, not a requirement anyone has),
+nor that the agent did the *right* thing (that is evaluation, before
+deployment), nor the plaintext of inputs and outputs (digests only; the
+operator keeps the data and the digest proves it was not altered). Mapping
+receipts to EU AI Act record-keeping, SOC 2 or ISO 42001 stays with your
+compliance team; erebus gives that team evidence instead of screenshots.
+
+This boundary is the product, not a shortfall: Certificate Transparency does
+not prove a certificate is legitimate, Sigstore does not prove code is
+bug-free, a flight recorder does not prevent the crash — each made the record
+undeniable, and that changed the industry. Regulators ask for exactly this
+(record-keeping and traceability), not for proofs of correctness. Full
+reasoning: [What erebus proves — and what it does not](docs/src/concepts/proof.md).
 
 ## Who pays, and for what
 
@@ -111,6 +127,13 @@ industrial edge (kiosks, factories, vehicles), AI startups selling into
 regulated buyers under the EU AI Act. The buyer is usually the compliance or
 security function; the user is the platform team that ships the agent. Not for
 us: hosting inference, paywalling the client, healthcare (for now).
+
+Why this is not a feature of your observability or agent platform: a tool the
+operator runs cannot, by construction, produce evidence the operator does not
+control. Traces in Datadog, LangSmith or an in-house store answer "what
+happened?" *to the operator*; a receipt anchored in a neutral, externally
+timestamped log answers it *to the auditor*. The launcher is simply the one
+point the operator cannot bypass to get that signature.
 
 Why this is defensible while being open source: a transparency log is worth
 its **accumulated, externally timestamped history**. A fork can copy the code;
