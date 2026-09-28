@@ -338,15 +338,52 @@ viable; lock-in = accumulated anchored history.
 
 ---
 
-## 7. The one-line YC slide
+## 7. Positioning and traction plan
 
-> *« AI agents run on thousands of machines. Nobody can prove what they did.
-> erebus is the launcher that emits a signed, hash-chained, externally
-> anchored receipt of every execution — verifiable offline by an auditor.
-> Open-source MIT client and server; paid hosted compliance trail. »*
+### 7.1 The one-line slide
 
-YC RFS fit: *AI-Native Compliance Infrastructure* (Fall 2026), *DevTools for
-AI agents*. Traction line must only cite what CI proves (P1-1).
+> *« Teams that deploy AI agents on machines they don't fully control cannot
+> prove to an auditor what those agents ran. erebus is the launcher that emits
+> a signed, externally anchored receipt of every execution — verifiable
+> offline with erebus or stock cosign. MIT client and server; paid hosted,
+> anchored proof trail. »*
+
+Problem, solution, for whom — one breath. Never lead with platforms, engines,
+SISR or the registry.
+
+### 7.2 Category — say it right
+
+erebus is **execution provenance for AI agents**: the Sigstore / SLSA /
+in-toto model (signed statement, DSSE, transparency log, `cosign` interop)
+applied to *runs* instead of *builds*. That is the category a technical
+partner recognises, and it is why `cosign verify-blob-attestation → Verified
+OK` matters: we are not a proprietary format.
+
+**Do not claim the YC RFS "AI-Native Compliance Infrastructure" (Fall 2026)
+as our slot.** Verified 2026-09-28: that RFS describes *financial* compliance
+operations — state-by-state licensing, regulatory-change monitoring,
+transaction anomaly detection, reporting headcount — and the companies cited
+in it (Duna, TovenAI, Hadrius) are AI agents that *do* compliance work. We are
+the evidence layer such agents, and any other, would run on. The RFS is an
+**adjacent buyer** (its "tamper-evident audit trails" line), not our category;
+frame it that way or not at all. Same for *DevTools for AI agents*: adjacent.
+
+### 7.3 Traction — what we can produce ourselves, in order
+
+The honest line today is *no production users*. Editing docs cannot change
+that; the steps below can, and each yields a number we are allowed to cite.
+
+| Step | Deliverable | Number we can cite | When |
+|---|---|---|---|
+| T1 | **P1-1**: `scripts/yc_demo.sh` + chaos batteries green in CI, public badge | "the whole proof chain is re-proven on every commit; N consecutive green runs" | next |
+| T2 | **Internal pilot**: one real agent behind `serve --attest-key`, ≥ 3 enrolled machines, ≥ 4 weeks, registry with `--tsa-url` | receipts anchored, machines enrolled, `verify-attest --strict --proof` failures = 0, bytes of evidence per call | after T1 |
+| T3 | **Design partner** in the ICP (defense / administration air-gapped, industrial edge): offline verifier delivered, letter of intent on the Enterprise tier | "1 LOI; air-gapped verification accepted by their auditor" | in parallel |
+| T4 | **Third-party verification**: an auditor or consultancy verifies a trail with nothing but `erebus verify-attest` / `cosign` and public keys, in writing | "verified by someone who does not trust us" | after T2 |
+
+Rules: cite only what CI or a third party proves; no star counts; the founder
+story is told as *results* (proof chain complete, Python signer and Merkle
+byte-compatible with Rust, cosign interop, SIGKILL chaos survived), never as a
+module list.
 
 ---
 

@@ -274,6 +274,7 @@ L'**angle 1 (compliance ICP)** comme colonne vertébrale, avec ces ajustements :
 4. **PEM key support** : à vérifier dans le code si `ed25519_dalek::SigningKey::from_pem()` est réellement utilisé, ou si le claim `[x]` dans la roadmap est prématuré.
 
 5. **YC fit** : l'analyse des RFS (Requests for Startups) YC a identifié des catégories pertinentes (AI-Native Compliance Infrastructure — Summer 2026, DevTools for AI agents — Summer 2026, Vertical AI for compliance-heavy industries — Spring 2026, Infrastructure for AI workloads — Spring 2026). Le fit exact reste à affiner selon le pitch angle choisi. Dataset YC partiel (~367 entreprises scrappées) disponible dans `/home/ubuntu/yc_companies_final.json`.
+   **Tranché le 2026-09-28 (ROADMAP §7.2)** : le RFS « AI-Native Compliance Infrastructure » est daté Fall 2026 (pas Summer) et décrit des agents qui *font* de la conformité financière (licences, veille réglementaire, anomalies de transactions). erebus n'est pas dans cette catégorie ; c'est de la **provenance d'exécution pour agents IA** (modèle Sigstore/SLSA/in-toto appliqué aux runs). Le RFS est un acheteur adjacent, à ne pas revendiquer comme slot.
 
 ---
 

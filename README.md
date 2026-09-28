@@ -8,13 +8,17 @@
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)]()
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Tednoob17/erebus/pulls)
 
-**AI agents run on thousands of machines. Nobody can prove what they did.**
+**Teams that deploy AI agents on machines they don't fully control — defense,
+public sector, industrial edge — cannot prove to an auditor what those agents
+actually ran. erebus is the launcher that emits a signed, externally anchored
+receipt of every execution, verifiable offline with `erebus` or stock `cosign`.**
 
-erebus is the launcher that emits a **signed, hash-chained, externally anchored
-receipt of every execution** — what ran, on which enrolled machine, when, with
-which inputs and outputs — verifiable **offline** by an auditor with `erebus`
-or with stock `cosign`. Open-source MIT client and server; the paid product is
-the hosted compliance trail.
+Execution provenance for AI agents, the way Sigstore / SLSA / in-toto give
+build provenance for software: what ran (exact bundle and weights), on which
+enrolled machine, when (Merkle transparency log + RFC 3161 timestamp), with
+which inputs and outputs — signed at the only point the operator controls, the
+launcher. Open-source MIT client and server; the paid product is the hosted,
+anchored proof trail.
 
 ```bash
 ERE_ATTEST_KEY=ops.key ./agent.erebus < input.json       # runs the agent → agent.erebus.attest
@@ -78,10 +82,14 @@ What a receipt proves, layer by layer ([spec](docs/src/spec/attestation.md)):
 | Local trail | receipts are append-only; editing one breaks every later hash | operator key |
 
 Every value a verifier prints is read from the **signed** statement, never from
-the human-readable copies. Legacy 1.x receipts stay verifiable. Receipts are
-*evidence* of execution; mapping them to a given regulation (EU AI Act
-record-keeping, SOC 2, ISO 42001) is your compliance team's job — erebus makes
-that mapping possible instead of hand-waved.
+the human-readable copies. Legacy 1.x receipts stay verifiable.
+
+erebus proves that an execution **happened, unaltered, on a known machine, at a
+time nobody can backdate** — and that the trail was never edited. It does not
+judge whether the agent did the *right* thing (that is evaluation), and it does
+not do your compliance for you: mapping receipts to EU AI Act record-keeping,
+SOC 2 or ISO 42001 stays with your compliance team. erebus gives that team
+evidence instead of screenshots.
 
 ## Who pays, and for what
 
@@ -99,8 +107,9 @@ verify anything offline. What you pay for is the **hosted, anchored history**:
 First customers: teams that must **prove** agent behaviour to someone who does
 not trust them — defense and public administration (air-gapped by regulation),
 industrial edge (kiosks, factories, vehicles), AI startups selling into
-regulated buyers under the EU AI Act. Not for us: hosting inference,
-paywalling the client, healthcare (for now).
+regulated buyers under the EU AI Act. The buyer is usually the compliance or
+security function; the user is the platform team that ships the agent. Not for
+us: hosting inference, paywalling the client, healthcare (for now).
 
 Why this is defensible while being open source: a transparency log is worth
 its **accumulated, externally timestamped history**. A fork can copy the code;
@@ -115,9 +124,14 @@ trail, attesting proxy, warm-cache re-verification, Merkle transparency log
 with RFC 3161 anchoring, machine identity, standard DSSE/in-toto envelope with
 cosign interop. 650+ Rust tests plus a stdlib Python battery (49 checks,
 including SIGKILL during concurrent publishes → restart → every acknowledged
-receipt still proves into the new tree head). No production users yet; the
-demo (`scripts/yc_demo.sh`) runs every step above and is being moved into CI
-([ROADMAP P1](ROADMAP.md)).
+receipt still proves into the new tree head).
+
+**No production users yet.** We publish traction only when it is measurable:
+first the demo (`scripts/yc_demo.sh`) moves into CI so the whole chain is
+re-proven on every commit; then an internal pilot on real enrolled machines
+(receipts anchored, verification failures = 0); then design partners in the
+target sectors. Plan and numbers:
+[ROADMAP §7](ROADMAP.md#7-positioning-and-traction-plan).
 
 ---
 
