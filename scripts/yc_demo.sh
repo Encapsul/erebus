@@ -428,7 +428,7 @@ if [ $FAILURES -eq 0 ]; then
     echo -e "${BOLD}${GREEN}║  signed receipt proving WHAT ran, WHERE (enrolled        ║${NC}"
     echo -e "${BOLD}${GREEN}║  machine), WHEN (public Merkle log + TSA) and WHAT IT    ║${NC}"
     echo -e "${BOLD}${GREEN}║  DID — verifiable offline by erebus or cosign. No infra  ║${NC}"
-    echo -e "${BOLD}${GREEN}║  needed. EU AI Act / SOC 2 audit trail, by construction.\"║${NC}"
+    echo -e "${BOLD}${GREEN}║  needed. Evidence your auditor can check, not trust.\"   ║${NC}"
     echo -e "${BOLD}${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
     exit 0
 else

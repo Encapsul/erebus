@@ -8,60 +8,37 @@
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)]()
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Tednoob17/erebus/pulls)
 
-**Cryptographic proof of what your AI agent executed. One file. Runs anywhere.**
+**AI agents run on thousands of machines. Nobody can prove what they did.**
 
-erebus packages an AI agent — model weights, inference engine config, runtime,
-dependencies — into a single self-contained, sandboxed binary, and every
-execution leaves a **signed, hash-chained, publicly anchored receipt** of what
-ran, where, when, with which inputs and outputs. Ship it like software, audit it
-like a bank statement:
-
-```bash
-erebus pull demo-agent                 # fetch from any registry
-erebus chat demo-agent.erebus          # terminal chat, zero install on the target
-erebus serve demo-agent.erebus --port 8080 --attest-key ops.key   # OpenAI API, one receipt per call
-erebus verify-attest --chain demo-agent.erebus.attest.d --bundle demo-agent.erebus   # prove it, offline
-```
-
-One `.erebus` file carries **4 native platform slices** (linux-x64, linux-arm64,
-macos-arm64, windows-x64) behind a POSIX-shell polyglot loader — the same 59 MB
-artifact runs natively on all four ([validated](benchmarks/universal.md) on real
-Linux, qemu-arm64 and Windows under Wine).
-
-## Quick start
+erebus is the launcher that emits a **signed, hash-chained, externally anchored
+receipt of every execution** — what ran, on which enrolled machine, when, with
+which inputs and outputs — verifiable **offline** by an auditor with `erebus`
+or with stock `cosign`. Open-source MIT client and server; the paid product is
+the hosted compliance trail.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Tednoob17/erebus/main/scripts/install.sh | bash
-erebus doctor
-
-cd your-app && erebus build . -o myapp.erebus
-./myapp.erebus                       # run it like any executable
+ERE_ATTEST_KEY=ops.key ./agent.erebus < input.json       # runs the agent → agent.erebus.attest
+erebus verify-attest agent.erebus.attest --bundle agent.erebus --strict --proof
+#  OK: attestation verified          format: spec 2.0 (DSSE envelope)
+#  OK: machine sha256:… — enrolled by ops-team at https://registry
+#  OK: transparency log — leaf #41 of 42 … anchor: RFC 3161 token
 ```
 
-Serve a bundled LLM as an OpenAI-compatible endpoint and chat with it:
+## What an auditor gets
 
-```bash
-erebus build . --embed-model models/model.gguf -o agent.erebus
-erebus serve agent.erebus --port 8080        # llama-server / vLLM / … launched for you
-erebus chat agent.erebus                     # or talk to it in the terminal
-erebus chat agent.erebus --web --port 8080   # or from the browser (embedded UI)
-```
+Today, "what did the agent do?" is answered with application logs the operator
+can edit, or with a tracing SaaS the operator controls. erebus answers it with
+evidence that neither the operator, nor the machine, nor erebus itself can
+silently rewrite:
 
-## Why erebus
-
-| | erebus | ollama | llamafile |
+| Question | Application logs | Tracing / observability SaaS | erebus receipt |
 |---|---|---|---|
-| Distribution unit | one `.erebus` per app **× 4 OS/arch inside** | app store + separate models | single binary |
-| Registry | self-hostable, 2 env vars | proprietary cloud default | none |
-| Engine support | GGUF + safetensors/ONNX/TRT-LLM/MLX | GGUF | GGUF |
-| Delta model updates (SISR) | ✅ content-defined chunking | ❌ re-download | ❌ |
-| Declarative builds | `Agentfile.yaml` | Modelfile | ❌ |
-| Signing & trusted keys | Ed25519, fail-closed | ❌ | ❌ |
-| Execution receipts | ✅ signed in-toto/DSSE per run **and per inference call** | ❌ | ❌ |
-| Tamper-evident trail | ✅ local hash chain + Merkle transparency log + RFC 3161 anchor | ❌ | ❌ |
-| Machine identity | ✅ `erebus enroll`, per-host key co-signs, `--strict` | ❌ | ❌ |
-| Verifiable with standard tools | ✅ `cosign verify-blob-attestation` → `Verified OK` | ❌ | ❌ |
-| Chaos/security test suites in-repo | ✅ [benchmarks/security.md](benchmarks/security.md) | ❌ | ❌ |
+| Which exact code and weights ran? | ❌ | ❌ | ✅ bundle + payload SHA-256, rootfs Merkle root, signed |
+| What went in, what came out? | text, editable | yes, in the vendor's DB | ✅ `input_hash` / `output_hash` / `exit_code`, per run **and per inference call** |
+| Which machine? | hostname string | agent metadata | ✅ per-host key co-signs; certificate names the owner |
+| Can the operator edit it after the fact? | yes | yes (their account) | ❌ hash chain + Merkle transparency log + RFC 3161 timestamp |
+| Can I verify it without trusting the vendor? | — | ❌ | ✅ offline, with public keys; or with `cosign verify-blob-attestation` |
+| Does it survive the vendor disappearing? | — | ❌ | ✅ proof files are self-contained |
 
 ## Prove what ran — in 60 seconds
 
@@ -84,6 +61,12 @@ cosign verify-blob-attestation --key keys/<fp>.pem --signature agent.dsse.json \
 #  Verified OK
 ```
 
+Serving a model instead of running a batch agent? `erebus serve agent.erebus
+--attest-key ops.key` exposes an OpenAI-compatible API and writes **one receipt
+per inference call** (request and response bodies hashed, streaming relayed
+unchanged) to `agent.erebus.attest.d/`; `erebus verify-attest --chain` audits
+the whole trail.
+
 What a receipt proves, layer by layer ([spec](docs/src/spec/attestation.md)):
 
 | Layer | Proves | Signed by |
@@ -95,11 +78,76 @@ What a receipt proves, layer by layer ([spec](docs/src/spec/attestation.md)):
 | Local trail | receipts are append-only; editing one breaks every later hash | operator key |
 
 Every value a verifier prints is read from the **signed** statement, never from
-the human-readable copies. Legacy 1.x receipts stay verifiable.
+the human-readable copies. Legacy 1.x receipts stay verifiable. Receipts are
+*evidence* of execution; mapping them to a given regulation (EU AI Act
+record-keeping, SOC 2, ISO 42001) is your compliance team's job — erebus makes
+that mapping possible instead of hand-waved.
 
-## The five-minute tour
+## Who pays, and for what
 
-### 1 · Build — declaratively
+Client **and** server are MIT, forever. Anyone can run their own registry and
+verify anything offline. What you pay for is the **hosted, anchored history**:
+
+| Tier | Includes |
+|---|---|
+| Free | public packages, local receipts, self-hosted registry |
+| Pro · $29/mo | private packages, hosted transparency log, anchored checkpoints |
+| Team · $99/mo | + RBAC, audit log, evidence packs, webhooks |
+| Enterprise · $24k/yr | air-gapped mirror + offline verifier, SSO, SLA, compliance reports |
+| Enterprise+ · $50/node/yr | per-machine identity at fleet scale, fleet dashboard, full history |
+
+First customers: teams that must **prove** agent behaviour to someone who does
+not trust them — defense and public administration (air-gapped by regulation),
+industrial edge (kiosks, factories, vehicles), AI startups selling into
+regulated buyers under the EU AI Act. Not for us: hosting inference,
+paywalling the client, healthcare (for now).
+
+Why this is defensible while being open source: a transparency log is worth
+its **accumulated, externally timestamped history**. A fork can copy the code;
+it cannot re-create three years of anchored checkpoints, and a customer's
+auditors already trust the log key their receipts point at. Same dynamic as
+Certificate Transparency and Sigstore's Rekor.
+
+## Status — what the CI proves, nothing more
+
+The **P0 proof chain is complete** (2026-09-17): hardened verifier, hash-chained
+trail, attesting proxy, warm-cache re-verification, Merkle transparency log
+with RFC 3161 anchoring, machine identity, standard DSSE/in-toto envelope with
+cosign interop. 650+ Rust tests plus a stdlib Python battery (49 checks,
+including SIGKILL during concurrent publishes → restart → every acknowledged
+receipt still proves into the new tree head). No production users yet; the
+demo (`scripts/yc_demo.sh`) runs every step above and is being moved into CI
+([ROADMAP P1](ROADMAP.md)).
+
+---
+
+## The launcher underneath
+
+The receipts are only as good as the thing that produces them, so erebus is
+also the runtime: it packages an agent — code, runtime, dependencies, model
+weights, engine configuration — into a single self-contained, sandboxed
+binary that verifies itself before it runs.
+
+### Quick start
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Tednoob17/erebus/main/scripts/install.sh | bash
+erebus doctor
+
+cd your-app && erebus build . -o myapp.erebus
+./myapp.erebus                       # run it like any executable
+```
+
+Serve a bundled LLM as an OpenAI-compatible endpoint and chat with it:
+
+```bash
+erebus build . --embed-model models/model.gguf -o agent.erebus
+erebus serve agent.erebus --port 8080        # llama-server / vLLM / … launched for you
+erebus chat agent.erebus                     # or talk to it in the terminal
+erebus chat agent.erebus --web --port 8080   # or from the browser (embedded UI)
+```
+
+### Build — declaratively
 
 ```yaml
 # Agentfile.yaml — CLI flags override this file
@@ -120,18 +168,26 @@ erebus build . --universal -o agent.erebus  # → 4 platform slices in one file
 ```
 
 Legacy `.erebus.toml` still works. Precedence: **CLI > Agentfile > detection**.
+One `--universal` file carries **4 native platform slices** (linux-x64,
+linux-arm64, macos-arm64, windows-x64) behind a POSIX-shell polyglot loader —
+the same 59 MB artifact runs natively on all four
+([validated](benchmarks/universal.md) on real Linux, qemu-arm64 and Windows
+under Wine).
 
-### 2 · Run anywhere
+### Run anywhere
 
 The stub verifies its own SHA-256, extracts into a content-addressed cache,
-exports GPU facts (`ERE_GPU`, `ERE_VRAM_MB`, `ERE_NGL`) and execs the entrypoint.
-GPU offload is auto-tuned at launch: `nvidia-smi` probe → ROCm `/dev/kfd` → Metal;
-pins always win (`--ngl off|N`).
+records a Merkle manifest of the rootfs (`rootfs.merkle`, re-checked on every
+warm start — any drift triggers re-extraction and the root is signed into the
+receipt), exports GPU facts (`ERE_GPU`, `ERE_VRAM_MB`, `ERE_NGL`) and execs the
+entrypoint inside Linux namespaces + seccomp/Landlock. GPU offload is
+auto-tuned at launch: `nvidia-smi` probe → ROCm `/dev/kfd` → Metal; pins
+always win (`--ngl off|N`).
 
-### 3 · Serve OpenAI-compatible
+### Serve OpenAI-compatible
 
 ```bash
-erebus serve agent.erebus --port 8080 [--ngl auto] [--ctx-size 4096] [--web]
+erebus serve agent.erebus --port 8080 [--ngl auto] [--ctx-size 4096] [--web] [--attest-key ops.key]
 ```
 
 erebus resolves the engine from the model format and launches it for you:
@@ -144,76 +200,56 @@ erebus resolves the engine from the model format and launches it for you:
 | `*.engine` / `*.plan` | TensorRT-LLM | `trtllm-serve` |
 | MLX weights + config | MLX | `mlx_lm.server` |
 
-Add `--attest-key <key>` (or `ERE_ATTEST_KEY`) and `serve` becomes an
-**attesting reverse proxy**: the engine binds a private loopback port, every
-`POST` is relayed unchanged (streaming included) while its request and
-response bodies are hashed, and one signed, hash-chained spec 2.0 receipt
-(co-signed by the host's machine key when enrolled) is appended to
-`agent.erebus.attest.d/`. Audit later with
-`erebus verify-attest --chain agent.erebus.attest.d --bundle agent.erebus`.
-
-Anchor receipts outside your infrastructure: the registry keeps a **Merkle
-transparency log** (SQLite, RFC 6962) with Ed25519-signed checkpoints,
-optionally timestamped at an RFC 3161 TSA (`--tsa-url`). `erebus attest --push`
-stores the inclusion proof as `<receipt>.proof.json`; `verify-attest --proof`
-checks it **offline**. On every warm start the launcher re-hashes the
-extracted rootfs against `rootfs.merkle`, re-extracts on any drift, and signs
-the root into the receipt (`execution.rootfs_root`).
-
 Missing engine on the target? If `ERE_REGISTRY` points at your registry,
 `serve` transparently downloads `<engine>-<platform>.pack.tar.gz`, verifies its
 SHA-256 sidecar and caches it — no llama.cpp install needed. Offline hosts can
 pre-seed it with `erebus layer push llama-server.tar.gz --name runtime/llama-server`.
-Otherwise you get the exact install hint — or embed it via the Agentfile environment. Measured on CPU: TinyLlama Q4_K_M cold-start < 45 s,
-warm completions ≈ 5 s — full numbers in [benchmarks/serve.md](benchmarks/serve.md).
+Measured on CPU: TinyLlama Q4_K_M cold-start < 45 s, warm completions ≈ 5 s —
+full numbers in [benchmarks/serve.md](benchmarks/serve.md).
 
-### 4 · Distribute via your own registry
+### Your own registry — packages and transparency log
 
 ```bash
-python3 scripts/registry_server.py --dir ~/erebus-registry --host 0.0.0.0 --port 8787
+python3 scripts/registry_server.py --dir ~/erebus-registry --host 0.0.0.0 --port 8787 \
+  --tsa-url https://freetsa.org/tsr --anchor-every 100
 export ERE_REGISTRY=http://your-vps:8787
 erebus publish agent.erebus       # upload (multipart, optional bearer token)
 erebus pull agent-agent           # streamed download, SHA-256 verified against index
+erebus attest agent.erebus --push # receipt → Merkle log, proof stored next to it
 ```
 
-No database, no dependencies — one stdlib Python file, index generated live from
-the packages directory. Hardened against traversal, bad filenames, tampered
-indexes ([chaos-tested](benchmarks/security.md)).
+One stdlib Python file, no dependencies: packages, accounts and quotas (HTTP
+402 when exceeded, never silent throttling), private packages, machine
+enrollment (`/machines/enroll`), and a **SQLite Merkle transparency log**
+(RFC 6962) with Ed25519-signed checkpoints, inclusion/consistency proofs
+(`/log/*`) and RFC 3161 anchoring. Hardened against traversal, bad filenames,
+tampered indexes; chaos-tested — concurrent same-name uploads leave one atomic
+winner, replace-during-read never serves truncated blobs, SIGKILL mid-publish
+loses no acknowledged receipt ([battery](benchmarks/security.md)).
 
-The server also ships accounts and metering: the registry is open until the
-first `POST /auth/register`, then uploads require a bearer token (`--token`),
-packages can be published `private` (owner-only pulls), and every user gets a
-monthly transfer quota — exceeding it returns HTTP 402 instead of silently
-throttling. A public landing page exposes live SISR counters (bytes served vs
-full-equivalent — what delta delivery actually saved), and `/waitlist` collects
-emails with per-IP throttling. All of it chaos-tested: concurrent same-name
-uploads leave one atomic winner, replace-during-read never serves truncated
-blobs, quota races stay crash-consistent ([battery](benchmarks/security.md)).
+### Update without re-shipping gigabytes
 
-### 5 · Update without re-shipping gigabytes
-
-SISR (Self-Incremental Sovereign Reconstruction) splits payloads with content-defined
-chunking; updates transfer only changed chunks. Signed delta manifests verify
-fail-cold at boot.
+SISR (Self-Incremental Sovereign Reconstruction) splits payloads with
+content-defined chunking; updates transfer only changed chunks. Signed delta
+manifests verify fail-cold at boot.
 
 ## Command reference
 
 | Command | Description |
 |---------|-------------|
-| `erebus build <dir>` | Package an app dir (`--universal`, `--embed-model`, `--ngl`, `--sign`, `--encrypt`, `--enable-sisr`, `--target`) |
-| `erebus run <file>` | Execute a bundle (namespace isolation, health gate) |
-| `erebus serve <file>` | Launch the engine as an OpenAI-compatible HTTP API (`--attest-key`: signed receipt per call) |
-| `erebus chat <file>` | Terminal TUI chat; `--web` serves the embedded browser UI |
-| `erebus pull <name>` | Download from a registry (integrity-checked, cached) |
-| `erebus publish <file>` | Upload to a registry |
-| `erebus swap <file> <path> --from <new>` | Replace a file inside an existing bundle (hot-swap) |
-| `erebus inspect <file>` | Metadata, slice tables, JSON output |
-| `erebus layer push/list` | Manage shared runtime packs & models (local CAS) |
 | `erebus attest / verify-attest` | Spec 2.0 execution receipts (DSSE + in-toto, JCS); `--envelope` for cosign, `--push` / `--proof` for the transparency log, `--strict` for machine identity, `--chain` for trails |
 | `erebus enroll` | Per-machine Ed25519 key + registry certificate; every receipt from this host is co-signed |
 | `erebus attest-history` | Query your receipts on a registry (`--query bundle=…,until=…`) |
 | `erebus audit` | Signed compliance report aggregating receipts, SBOM and integrity facts |
-| `erebus keygen/sign/verify/trust` | Ed25519 signing workflow |
+| `erebus keygen/sign/verify/trust` | Ed25519 signing workflow (`keygen` also writes a PEM for cosign/openssl) |
+| `erebus build <dir>` | Package an app dir (`--universal`, `--embed-model`, `--ngl`, `--sign`, `--encrypt`, `--enable-sisr`, `--target`) |
+| `erebus run <file>` | Execute a bundle (namespace isolation, health gate) |
+| `erebus serve <file>` | OpenAI-compatible HTTP API (`--attest-key`: signed receipt per call) |
+| `erebus chat <file>` | Terminal TUI chat; `--web` serves the embedded browser UI |
+| `erebus pull / publish` | Registry download (integrity-checked, cached) / upload |
+| `erebus swap <file> <path> --from <new>` | Replace a file inside an existing bundle (hot-swap) |
+| `erebus inspect <file>` | Metadata, slice tables, JSON output |
+| `erebus layer push/list` | Manage shared runtime packs & models (local CAS) |
 | `erebus dashboard` | Interactive TUI: SISR benchmarks, cache status |
 | `erebus doctor / scan / env / clean / selftest / upgrade / completion / man` | Ops & tooling |
 
@@ -241,7 +277,7 @@ each slice is a complete native bundle for its OS/arch.
 | Python | `requirements.txt`, `pyproject.toml`, … | FastAPI/Flask agents, orchestration, tools |
 | Binary | ELF/executable present | llama.cpp engines, Go/Rust servers |
 
-Cross-compiling the launcher stub uses [`cargo zigbuild`](https://github.com/cross-rs/cross-toolchains)
+Cross-compiling the launcher stub uses [`cargo zigbuild`](https://github.com/rust-cross/cargo-zigbuild)
 (zig as linker). Any host builds any target; universal builds need nothing else.
 
 ## Configuration
@@ -264,21 +300,24 @@ health_port = 8000
 
 ## Security model
 
-- **Ed25519 signatures**, fail-cold verification against `~/.erebus/trusted-keys/`
-  (CVE-2023-48022 mitigated; ed25519-dalek ≥ 2.1 with `zeroize`)
-- **SHA-256 integrity** over payload ‖ metadata at every launch; warm-cache
-  rootfs re-verified against a Merkle manifest (`rootfs.merkle`)
 - **Execution receipts** (spec 2.0): DSSE envelope over the JCS-canonical
   in-toto statement, operator + machine co-signature, hash-chained trail,
   Merkle transparency log with signed checkpoints and RFC 3161 anchoring;
   verifiers read only signed fields and refuse `TAMPERED` documents
-  ([spec](docs/src/spec/attestation.md), [threat notes](ROADMAP.md))
+  ([spec](docs/src/spec/attestation.md), [threat notes](docs/src/spec/attestation.md#8-threat-notes))
+- **Ed25519 signatures**, fail-cold verification against `~/.erebus/trusted-keys/`
+  (CVE-2023-48022 mitigated; ed25519-dalek ≥ 2.1 with `zeroize`)
+- **SHA-256 integrity** over payload ‖ metadata at every launch; warm-cache
+  rootfs re-verified against a Merkle manifest (`rootfs.merkle`)
 - **`--encrypt` is obfuscation only** — the AES-256-GCM key lives in the file's
   metadata by design; use signing for authenticity. Mutually exclusive with SISR.
 - **Isolation**: Linux namespaces + seccomp/Landlock; macOS App Sandbox;
   Windows process isolation. Secrets never baked silently (`.env` rejected unless
   explicit); keys written `0600` atomically; secrets zeroized on drop
   ([audit](benchmarks/security.md)).
+- Known limits, stated plainly: the machine key is a software key (TPM2 quote
+  is roadmap, optional); Rekor upload is roadmap; the TSA token is checked
+  structurally by erebus and cryptographically by `openssl ts -verify`.
 - `cargo audit`: clean (RC 0).
 
 ## Benchmarks
@@ -299,13 +338,13 @@ cargo test --workspace         # 650+ tests (+ scripts/test_transparency_log.py,
 
 | Crate | Purpose |
 |-------|---------|
-| `erebus-core` | Format, compression, detection, encryption, inference-engine resolution, SISR, CAS, attestation (`attest`, `attest_log`, `dsse`, `jcs`, `merkle`, `log_proof`, `machine`, `rootfs_merkle`) |
-| `erebus-stub` | Self-extracting launcher (ELF / Mach-O / PE32+) |
-| `erebus-cli` | Everything you type: build, serve, chat, pull, … |
+| `erebus-core` | Attestation (`attest`, `attest_log`, `dsse`, `jcs`, `merkle`, `log_proof`, `machine`, `rootfs_merkle`), format, compression, detection, encryption, inference-engine resolution, SISR, CAS |
+| `erebus-stub` | Self-extracting launcher (ELF / Mach-O / PE32+) — the only crate with `unsafe` |
+| `erebus-cli` | Everything you type: attest, verify-attest, enroll, build, serve, … |
 
 Before contributing: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
 `cargo test --workspace`. Style: [CODE_STYLE.md](CODE_STYLE.md); ANSSI-Rust rules in
-[RULES.md](RULES.md).
+[RULES.md](RULES.md). Product priorities: [ROADMAP.md](ROADMAP.md).
 
 ## License
 
