@@ -340,14 +340,30 @@ jobs:
         run: |
           cargo zigbuild --release --target aarch64-unknown-linux-musl -p erebus-stub
           cargo zigbuild --release --target aarch64-unknown-linux-musl -p erebus-cli
+      # qemu-user cannot enter a user namespace (`unshare(CLONE_NEWUSER)` →
+      # EINVAL) and the stub fails closed on that, by design. This job checks
+      # that the aarch64 stub boots and execs the app under emulation, so the
+      # bundle is built with `--isolation none`; the sandbox itself is
+      # exercised natively by ci.yml / proof.yml.
       - name: Build hello-web for aarch64
+        env:
+          ERE_STUB_PATH: target/aarch64-unknown-linux-musl/release/erebus-stub
         run: |
-          ./target/aarch64-unknown-linux-musl/release/erebus build examples/hello-web --target aarch64 -o /tmp/hello-web-aarch64.erebus
+          ./target/aarch64-unknown-linux-musl/release/erebus build examples/hello-web \
+            --target aarch64 --isolation none -o /tmp/hello-web-aarch64.erebus
       - name: Run under QEMU
         timeout-minutes: 10
         run: |
-          qemu-aarch64-static -L /usr/aarch64-linux-gnu /tmp/hello-web-aarch64.erebus &
+          ERE_VERBOSE=1 qemu-aarch64-static -L /usr/aarch64-linux-gnu /tmp/hello-web-aarch64.erebus \
+            >/tmp/qemu-boot.log 2>&1 &
           PID=$!
-          sleep 5
-          curl -s http://127.0.0.1:8080 | grep -q "Hello" && echo "QEMU boot test passed" || (echo "QEMU boot test failed" && kill $PID && exit 1)
-          kill $PID || true
+          ok=0
+          # cold start = extract + python under emulation; allow up to 90 s
+          for _ in $(seq 1 45); do
+            sleep 2
+            if curl -s -m 2 http://127.0.0.1:8080 | grep -q "Hello"; then ok=1; break; fi
+            kill -0 "$PID" 2>/dev/null || break
+          done
+          kill "$PID" 2>/dev/null || true
+          echo "--- stub output ---"; cat /tmp/qemu-boot.log
+          if [ "$ok" = 1 ]; then echo "QEMU boot test passed"; else echo "QEMU boot test failed"; exit 1; fi

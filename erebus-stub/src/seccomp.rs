@@ -120,6 +120,14 @@ fn always_deny_syscalls() -> Vec<u32> {
     v
 }
 
+/// i386 never got a direct `accept` syscall (only `accept4`); its legacy
+/// socket API is the `socketcall` multiplexer, which must be blocked as a
+/// whole or every direct socket syscall below has a bypass.
+#[cfg(all(target_os = "linux", target_arch = "x86"))]
+const SYS_ACCEPT_OR_SOCKETCALL: u32 = libc::SYS_socketcall as u32;
+#[cfg(all(target_os = "linux", not(target_arch = "x86")))]
+const SYS_ACCEPT_OR_SOCKETCALL: u32 = libc::SYS_accept as u32;
+
 /// Syscalls blocked when `Capability::Network` is absent.
 #[cfg(target_os = "linux")]
 fn network_syscalls() -> &'static [u32] {
@@ -129,7 +137,7 @@ fn network_syscalls() -> &'static [u32] {
         libc::SYS_connect as u32,
         libc::SYS_bind as u32,
         libc::SYS_listen as u32,
-        libc::SYS_accept as u32,
+        SYS_ACCEPT_OR_SOCKETCALL,
         libc::SYS_accept4 as u32,
         libc::SYS_sendto as u32,
         libc::SYS_recvfrom as u32,
