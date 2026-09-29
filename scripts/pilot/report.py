@@ -107,7 +107,7 @@ def build_report(state: pathlib.Path, erebus: str) -> dict[str, Any]:
     now = dt.datetime.now(dt.timezone.utc)
     evidence_bytes = sum(
         path.stat().st_size + (proof.stat().st_size if proof.is_file() else 0)
-        for path, proof in zip(items, proofs, strict=True)
+        for path, proof in zip(items, proofs)  # noqa: B905 — same length; py3.9
     )
     return {
         "generated_at": now.isoformat(),
