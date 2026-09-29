@@ -397,6 +397,19 @@ that; the steps below can, and each yields a number we are allowed to cite.
 | T3 | **Design partner** in the ICP (defense / administration air-gapped, industrial edge): offline verifier delivered, letter of intent on the Enterprise tier | "1 LOI; air-gapped verification accepted by their auditor" | in parallel |
 | T4 | **Third-party verification**: an auditor or consultancy verifies a trail with nothing but `erebus verify-attest` / `cosign` and public keys, in writing | "verified by someone who does not trust us" | after T2 |
 
+**T2 running (started 2026-09-29, not complete):**
+
+- `erebus serve --push` now publishes every per-inference receipt and stores a
+  locally verified Merkle inclusion proof; missing proofs are repaired from
+  the append-only trail on restart.
+- Reproducible harness: [`scripts/pilot/`](scripts/pilot/README.md), pinned
+  Apache-2.0 Baguettotron Q8 (321 M), persistent registry with RFC 3161
+  anchoring, node enrollment, daily probe and evidence-derived JSON report.
+- Baseline measured on machine 1: 1 real inference, 1 strict+proof verified
+  receipt, 1 TSA anchor, 0 failures, 14,169 bytes of evidence per call.
+- Gates still open: 2 more independently enrolled machines and 28 elapsed
+  days. Do not describe T2 as complete before `pilot-report.json` says so.
+
 Rules: cite only what CI or a third party proves; no star counts; the founder
 story is told as *results* (proof chain complete, Python signer and Merkle
 byte-compatible with Rust, cosign interop, SIGKILL chaos survived), never as a

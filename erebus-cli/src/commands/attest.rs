@@ -168,45 +168,23 @@ pub fn run(args: AttestArgs) -> Result<()> {
         })?;
         let registry = registry.trim_end_matches('/').to_string();
         let token = resolve_token(args.token.as_deref(), args.token_file.as_deref())?;
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .context("failed to build HTTP client")?;
-        let mut req = client
-            .post(format!("{registry}/attestations"))
-            .header("Content-Type", "application/json")
-            .body(json_bytes.clone());
-        if let Some(ref t) = token {
-            req = req.header("Authorization", format!("Bearer {t}"));
-        }
-        let resp = req
-            .send()
-            .context("failed to reach registry")?
-            .error_for_status()
-            .with_context(|| format!("registry rejected attestation at {registry}"))?;
-        let status = resp.status();
-        let body: serde_json::Value = resp.json().context("invalid registry response")?;
-        let id = body.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-        // The registry answers with the leaf position, a signed checkpoint
-        // and (when anchored) the TSA token: stored next to the receipt so
-        // `verify-attest --proof` works offline, forever.
-        let proof_path = store_proof(&registry, &body, &output_path, &json_bytes)?;
+        let published = publish_receipt(&registry, token.as_deref(), &output_path, &json_bytes)?;
         if args.json {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
-                    "id": id,
-                    "status": status.as_u16(),
-                    "recorded": body.get("recorded"),
-                    "proof": proof_path.as_ref().map(|p| p.display().to_string()),
-                    "log": body.get("log"),
+                    "id": published.id,
+                    "status": published.status,
+                    "recorded": published.body.get("recorded"),
+                    "proof": published.proof.as_ref().map(|p| p.display().to_string()),
+                    "log": published.body.get("log"),
                 }))?
             );
         } else if !args.quiet {
             eprintln!("Pushed attestation to {registry}");
-            eprintln!("  id:      {}", id);
-            eprintln!("  status:  {}", status);
-            match (&proof_path, body.get("log")) {
+            eprintln!("  id:      {}", published.id);
+            eprintln!("  status:  {}", published.status);
+            match (&published.proof, published.body.get("log")) {
                 (Some(p), Some(log)) => {
                     eprintln!(
                         "  log:     leaf #{} of {} (root {})",
@@ -227,6 +205,62 @@ pub fn run(args: AttestArgs) -> Result<()> {
     Ok(())
 }
 
+/// Result of publishing an existing receipt to a registry.
+pub(crate) struct PublishedReceipt {
+    pub id: String,
+    pub status: u16,
+    pub proof: Option<PathBuf>,
+    pub body: serde_json::Value,
+}
+
+/// Publish byte-exact receipt data and persist only a locally verified proof.
+///
+/// Shared by `attest --push` and the attesting inference proxy: this is the
+/// single fail-closed path from a local receipt to the transparency log.
+pub(crate) fn publish_receipt(
+    registry: &str,
+    token: Option<&str>,
+    receipt_path: &std::path::Path,
+    receipt_bytes: &[u8],
+) -> Result<PublishedReceipt> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("failed to build HTTP client")?;
+    let mut req = client
+        .post(format!("{registry}/attestations"))
+        .header("Content-Type", "application/json")
+        .body(receipt_bytes.to_vec());
+    if let Some(token) = token {
+        req = req.header("Authorization", format!("Bearer {token}"));
+    }
+    let resp = req.send().context("failed to reach registry")?;
+    let status = resp.status();
+    let body = parse_publish_response(resp, registry)?;
+    let proof = store_proof(registry, &body, receipt_path, receipt_bytes)?;
+    let id = body
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?")
+        .into();
+    Ok(PublishedReceipt {
+        id,
+        status: status.as_u16(),
+        proof,
+        body,
+    })
+}
+
+fn parse_publish_response(
+    resp: reqwest::blocking::Response,
+    registry: &str,
+) -> Result<serde_json::Value> {
+    resp.error_for_status()
+        .with_context(|| format!("registry rejected attestation at {registry}"))?
+        .json()
+        .context("invalid registry response")
+}
+
 /// Conventional proof location: `<receipt>.proof.json`.
 pub fn proof_path_for(receipt: &std::path::Path) -> PathBuf {
     let mut name = receipt
@@ -240,7 +274,7 @@ pub fn proof_path_for(receipt: &std::path::Path) -> PathBuf {
 /// Verify the registry's proof against the bytes we just sent before
 /// persisting it — a registry returning a proof for another leaf would
 /// otherwise be stored as evidence.
-fn store_proof(
+pub(crate) fn store_proof(
     registry: &str,
     body: &serde_json::Value,
     receipt_path: &std::path::Path,

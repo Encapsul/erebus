@@ -2,6 +2,25 @@
 
 All notable changes to erebus are documented here.
 
+## [Unreleased] — 0.6.1-dev — internal pilot
+
+### Added
+
+- `erebus serve --push --registry …`: each inference receipt is published to
+  the transparency log and its verified inclusion proof is stored beside the
+  local trail entry; missing proofs are retried at the next start.
+- Reproducible T2 harness under `scripts/pilot/`: pinned Baguettotron Q8,
+  persistent RFC 3161-anchored registry, enrollment, real probe and
+  evidence-derived report.
+
+### Fixed
+
+- `build --embed-model` now stages the model before payload compression.
+  Previously metadata advertised the ModelLayer, but the assembled payload
+  did not contain the model bytes.
+- Attestation-trail enumeration ignores `.proof.json` sidecars, so publishing
+  per-call proofs cannot corrupt sequence numbering or chain verification.
+
 ## [0.6.0] — 2026-09-28 — the proof chain
 
 ### Added

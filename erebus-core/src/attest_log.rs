@@ -82,7 +82,10 @@ impl AttestationLog {
         let mut entries: Vec<PathBuf> = std::fs::read_dir(&self.dir)?
             .filter_map(Result::ok)
             .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
+            .filter(|p| {
+                p.extension().is_some_and(|ext| ext == "json")
+                    && !p.to_string_lossy().ends_with(".proof.json")
+            })
             .collect();
         entries.sort();
         Ok(entries)
@@ -231,6 +234,15 @@ mod tests {
             default_log_dir(Path::new("/x/agent.erebus.attest")),
             PathBuf::from("/x/agent.erebus.attest.d")
         );
+    }
+
+    #[test]
+    fn entries_ignore_transparency_proof_sidecars() {
+        let dir = tempdir().unwrap();
+        let log = AttestationLog::open(dir.path()).unwrap();
+        std::fs::write(dir.path().join("000001-x.json"), b"{}").unwrap();
+        std::fs::write(dir.path().join("000001-x.json.proof.json"), b"{}").unwrap();
+        assert_eq!(log.entries().unwrap().len(), 1);
     }
 
     #[test]

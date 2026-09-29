@@ -106,6 +106,12 @@ fn free_port() -> u16 {
         .port()
 }
 
+fn proof_path(receipt: &Path) -> PathBuf {
+    let mut name = receipt.file_name().unwrap().to_os_string();
+    name.push(".proof.json");
+    receipt.with_file_name(name)
+}
+
 /// Stop `serve` on drop so a failing assertion never leaks the process.
 /// SIGTERM first: that is the path where `serve` reaps its engine child; a
 /// bare SIGKILL would orphan the fake llama-server.
@@ -126,6 +132,90 @@ impl Drop for Serve {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+/// Real Python registry, used to prove that `serve --push` stores a verified
+/// inclusion proof next to every per-call receipt.
+struct Registry {
+    child: Child,
+    base: String,
+}
+
+impl Registry {
+    fn start(root: &Path) -> Self {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/registry_server.py");
+        let port = free_port();
+        let child = Command::new("python3")
+            .arg(script)
+            .args(["--dir", root.to_str().unwrap(), "--port", &port.to_string()])
+            .args(["--log-origin", "serve-e2e", "--anchor-every", "0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let registry = Self {
+            child,
+            base: format!("http://127.0.0.1:{port}"),
+        };
+        registry.wait_ready();
+        registry
+    }
+
+    fn wait_ready(&self) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if registry_http(&self.base, "GET", "/health", None, None).is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("registry never became healthy");
+    }
+
+    fn register(&self) -> String {
+        let body = br#"{"username":"serve-e2e","password":"pw12345678"}"#;
+        let (_, json) =
+            registry_http(&self.base, "POST", "/auth/register", None, Some(body)).unwrap();
+        json["token"].as_str().unwrap().to_string()
+    }
+
+    fn log_key(&self) -> String {
+        let (_, json) = registry_http(&self.base, "GET", "/log/key", None, None).unwrap();
+        json["public_key_hex"].as_str().unwrap().to_string()
+    }
+}
+
+impl Drop for Registry {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn registry_http(
+    base: &str,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    body: Option<&[u8]>,
+) -> Option<(u16, serde_json::Value)> {
+    let addr = base.trim_start_matches("http://");
+    let mut stream = TcpStream::connect(addr).ok()?;
+    let body = body.unwrap_or(&[]);
+    let auth = token.map_or_else(String::new, |t| format!("Authorization: Bearer {t}\r\n"));
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\n{auth}Connection: close\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    )
+    .ok()?;
+    stream.write_all(body).ok()?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok()?;
+    let status = response.split_whitespace().nth(1)?.parse().ok()?;
+    let json = serde_json::from_str(response.split("\r\n\r\n").nth(1)?).ok()?;
+    Some((status, json))
 }
 
 fn http(port: u16, request: &str) -> String {
@@ -182,6 +272,16 @@ fn serve_attests_every_call_into_a_verifiable_chain() {
     let bundle = make_bundle(dir.path());
     let (key, trusted) = keygen(dir.path());
     let trail = dir.path().join("trail");
+    let registry = Registry::start(&dir.path().join("registry"));
+    let token = registry.register();
+    let log_key = registry.log_key();
+    let machine_dir = dir.path().join("machine");
+    let enrolled = Command::new(erebus_bin())
+        .args(["enroll", "--registry", &registry.base, "--token", &token])
+        .env("ERE_MACHINE_DIR", &machine_dir)
+        .status()
+        .unwrap();
+    assert!(enrolled.success());
     let port = free_port();
 
     let child = Command::new(erebus_bin())
@@ -196,8 +296,14 @@ fn serve_attests_every_call_into_a_verifiable_chain() {
             key.to_str().unwrap(),
             "--attest-log",
             trail.to_str().unwrap(),
+            "--push",
+            "--registry",
+            &registry.base,
+            "--token",
+            &token,
         ])
         .env("XDG_CACHE_HOME", dir.path().join("cache"))
+        .env("ERE_MACHINE_DIR", &machine_dir)
         .env("NO_COLOR", "1")
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -226,7 +332,10 @@ fn serve_attests_every_call_into_a_verifiable_chain() {
         .unwrap()
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .filter(|p| {
+            p.extension().is_some_and(|e| e == "json")
+                && !p.to_string_lossy().ends_with(".proof.json")
+        })
         .collect();
     receipts.sort();
     assert_eq!(
@@ -234,6 +343,12 @@ fn serve_attests_every_call_into_a_verifiable_chain() {
         3,
         "one receipt per POST (health GETs excluded)"
     );
+    for receipt in &receipts {
+        assert!(
+            proof_path(receipt).is_file(),
+            "serve --push must store a verified proof for every receipt"
+        );
+    }
 
     let out = verify_chain(&trail, &trusted, &bundle);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -250,6 +365,25 @@ fn serve_attests_every_call_into_a_verifiable_chain() {
         .as_str()
         .is_some_and(|h| h.starts_with("sha256:")));
     assert!(att["execution"]["prev_attestation_hash"].is_string());
+
+    // Registry is no longer needed: strict identity + transparency proof are
+    // both self-contained and verify offline.
+    drop(registry);
+    let proof = proof_path(&receipts[2]);
+    let verified = Command::new(erebus_bin())
+        .args(["verify-attest", receipts[2].to_str().unwrap()])
+        .args(["--trusted-dir", trusted.to_str().unwrap()])
+        .args(["--bundle", bundle.to_str().unwrap(), "--strict", "--proof"])
+        .args(["--log-key", &log_key])
+        .arg("--proof-file")
+        .arg(&proof)
+        .output()
+        .unwrap();
+    assert!(
+        verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
 
     // Rewriting a recorded response hash is caught.
     let mut doc = att;

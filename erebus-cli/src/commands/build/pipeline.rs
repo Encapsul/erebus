@@ -33,6 +33,20 @@ pub(crate) fn warn_sandbox_noops(isolation_num: u32, seccomp: bool, landlock: bo
     }
 }
 
+fn stage_model(model_path: &Path, rootfs: &Path) -> Result<()> {
+    let name = model_path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("model path has no file name"))?;
+    let dest = rootfs.join("app/models").join(name);
+    std::fs::create_dir_all(
+        dest.parent()
+            .ok_or_else(|| anyhow::anyhow!("model destination has no parent"))?,
+    )?;
+    std::fs::copy(model_path, &dest)
+        .with_context(|| format!("failed to copy model to {}", dest.display()))?;
+    Ok(())
+}
+
 pub(crate) fn build_single_target(
     args: &BuildArgs,
     plan: &BuildPlan,
@@ -425,6 +439,13 @@ pub(crate) fn build_single_target(
     // own or have symlinked (roadmap #36).
     let _ = std::fs::remove_dir_all(cache_dir().join("build-tools"));
 
+    // Model bytes must enter the rootfs before payload compression. Metadata
+    // is assembled later; copying there used to advertise a ModelLayer while
+    // producing a tiny bundle with no model in its payload.
+    if let Some(model_path) = args.embed_model.as_deref() {
+        stage_model(model_path, &rootfs)?;
+    }
+
     // Build the payload: zstd(tar) by default, or a real SquashFS image
     // when `--squashfs` was requested (v5). Before this fix the flag only
     // flipped the metadata's payload_format while the payload stayed a
@@ -793,14 +814,6 @@ pub(crate) fn build_single_target(
                         .to_string();
                     let _model_size = model_bytes.len() as u64;
 
-                    // Copy model to rootfs as well (for extraction)
-                    let model_dest = rootfs.join("app/models").join(&model_name);
-                    if let Some(parent) = model_dest.parent() {
-                        std::fs::create_dir_all(parent).ok();
-                    }
-                    std::fs::write(&model_dest, &model_bytes)
-                        .context("failed to write model to rootfs")?;
-
                     // Reuse `model_name` (already derived from the source
                     // path) instead of re-deriving from the destination — a
                     // path with no filename cannot panic here.
@@ -1069,5 +1082,18 @@ mod tests {
     fn host_triple_is_sane() {
         let triple = host_gnu_triple();
         assert!(triple.contains("linux-gnu"), "triple: {triple}");
+    }
+
+    #[test]
+    fn stage_model_puts_bytes_in_rootfs_before_compression() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("tiny.gguf");
+        std::fs::write(&model, b"GGUF-model-bytes").unwrap();
+        let rootfs = dir.path().join("rootfs");
+        stage_model(&model, &rootfs).unwrap();
+        assert_eq!(
+            std::fs::read(rootfs.join("app/models/tiny.gguf")).unwrap(),
+            b"GGUF-model-bytes"
+        );
     }
 }

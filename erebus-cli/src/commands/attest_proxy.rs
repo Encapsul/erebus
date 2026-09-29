@@ -40,8 +40,15 @@ pub struct CallRecorder {
     template: AttestationTemplate,
     key: SigningKey,
     log: AttestationLog,
+    publisher: Option<ReceiptPublisher>,
     /// Appends read the trail head then advance it: serialize them.
     lock: Mutex<()>,
+}
+
+/// Registry destination for immediate and catch-up publication of receipts.
+pub struct ReceiptPublisher {
+    registry: String,
+    token: Option<String>,
 }
 
 /// What ends up in the signed `execution` block for one call.
@@ -60,8 +67,14 @@ impl CallRecorder {
             template,
             key,
             log,
+            publisher: None,
             lock: Mutex::new(()),
         }
+    }
+
+    pub fn with_publisher(mut self, publisher: ReceiptPublisher) -> Self {
+        self.publisher = Some(publisher);
+        self
     }
 
     pub fn log_dir(&self) -> &Path {
@@ -84,7 +97,52 @@ impl CallRecorder {
             }),
             ..ExecutionCapture::default()
         };
-        append_receipt(&self.template, &self.key, &self.log, &capture).map(|(_, path)| path)
+        let (_, path) = append_receipt(&self.template, &self.key, &self.log, &capture)?;
+        if let Some(publisher) = &self.publisher {
+            publisher.publish(&path)?;
+        }
+        Ok(path)
+    }
+}
+
+impl ReceiptPublisher {
+    pub fn new(registry: &str, token: Option<String>) -> Self {
+        Self {
+            registry: registry.trim_end_matches('/').to_string(),
+            token,
+        }
+    }
+
+    /// Upload receipts that have no verified proof sidecar yet. This makes a
+    /// restart repair any publication interrupted after the local append.
+    pub fn sync(&self, log: &AttestationLog) -> Result<usize> {
+        let mut count = 0usize;
+        for path in log.entries().context("cannot list receipt backlog")? {
+            if !crate::commands::attest::proof_path_for(&path).exists() {
+                self.publish(&path)?;
+                count = count.saturating_add(1);
+            }
+        }
+        Ok(count)
+    }
+
+    fn publish(&self, path: &Path) -> Result<()> {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("cannot read receipt {}", path.display()))?;
+        let published = crate::commands::attest::publish_receipt(
+            &self.registry,
+            self.token.as_deref(),
+            path,
+            &bytes,
+        )?;
+        if std::env::var_os("ERE_VERBOSE").is_some() {
+            eprintln!(
+                "[erebus] published receipt {} → {}",
+                path.display(),
+                published.id
+            );
+        }
+        Ok(())
     }
 }
 

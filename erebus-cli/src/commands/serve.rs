@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::commands::attest_proxy::CallRecorder;
+use crate::commands::attest_proxy::{CallRecorder, ReceiptPublisher};
 use crate::commands::build::NglPolicy;
 
 /// How long to wait for llama-server's /health before giving up. Cold start
@@ -73,6 +73,23 @@ pub struct ServeArgs {
         requires = "attest_key"
     )]
     pub attest_log: Option<PathBuf>,
+
+    /// Publish every inference receipt to the registry transparency log.
+    /// Failed publications remain local and are retried on the next start.
+    #[arg(long, requires = "attest_key", requires = "registry")]
+    pub push: bool,
+
+    /// Registry receiving inference receipts (or serving engine packs)
+    #[arg(long, env = "ERE_REGISTRY")]
+    pub registry: Option<String>,
+
+    /// Bearer token for receipt publication (prefer --token-file)
+    #[arg(long, env = "ERE_TOKEN")]
+    pub token: Option<String>,
+
+    /// File containing the registry bearer token
+    #[arg(long)]
+    pub token_file: Option<PathBuf>,
 }
 
 /// Everything `chat` and `serve` need to talk to a launched engine.
@@ -506,7 +523,7 @@ fn engine_endpoint(
     let recorder = args
         .attest_key
         .as_deref()
-        .map(|key| build_recorder(file, key, args.attest_log.as_deref()))
+        .map(|key| build_recorder(file, key, args))
         .transpose()?;
     match recorder {
         Some(rec) => Ok((Some(rec), "127.0.0.1".to_string(), free_loopback_port()?)),
@@ -515,20 +532,34 @@ fn engine_endpoint(
 }
 
 /// Load the signing key, hash the bundle once, open the trail.
-fn build_recorder(
-    file: &Path,
-    key_path: &Path,
-    log_dir: Option<&Path>,
-) -> Result<Arc<CallRecorder>> {
+fn build_recorder(file: &Path, key_path: &Path, args: &ServeArgs) -> Result<Arc<CallRecorder>> {
     let key = erebus_core::attest::load_signing_key(key_path)
         .with_context(|| format!("cannot load attestation key {}", key_path.display()))?;
     let template = erebus_core::attest::AttestationTemplate::from_bundle(file)
         .context("cannot hash bundle for attestation")?;
-    let dir = log_dir.map_or_else(|| default_serve_trail(file), Path::to_path_buf);
+    let dir = args
+        .attest_log
+        .as_deref()
+        .map_or_else(|| default_serve_trail(file), Path::to_path_buf);
     let log = erebus_core::attest_log::AttestationLog::open(&dir)
         .with_context(|| format!("cannot open trail {}", dir.display()))?;
     eprintln!("[erebus] attesting proxy: receipts → {}", dir.display());
-    Ok(Arc::new(CallRecorder::new(template, key, log)))
+    let mut recorder = CallRecorder::new(template, key, log.clone());
+    if args.push {
+        let token =
+            super::attest::resolve_token(args.token.as_deref(), args.token_file.as_deref())?;
+        let registry = args
+            .registry
+            .as_deref()
+            .context("--push requires --registry")?;
+        let publisher = ReceiptPublisher::new(registry, token);
+        let repaired = publisher
+            .sync(&log)
+            .context("cannot publish receipt backlog")?;
+        eprintln!("[erebus] transparency log: {registry} ({repaired} backlog receipt(s) repaired)");
+        recorder = recorder.with_publisher(publisher);
+    }
+    Ok(Arc::new(recorder))
 }
 
 /// Same trail the stub uses for `erebus run`: `<bundle>.attest.d`.

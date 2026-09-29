@@ -67,10 +67,12 @@ cosign verify-blob-attestation --key keys/<fp>.pem --signature agent.dsse.json \
 ```
 
 Serving a model instead of running a batch agent? `erebus serve agent.erebus
---attest-key ops.key` exposes an OpenAI-compatible API and writes **one receipt
-per inference call** (request and response bodies hashed, streaming relayed
-unchanged) to `agent.erebus.attest.d/`; `erebus verify-attest --chain` audits
-the whole trail.
+--attest-key ops.key --push --registry $ERE_REGISTRY --token-file token`
+exposes an OpenAI-compatible API and writes **one receipt per inference call**
+(request and response bodies hashed, streaming relayed unchanged) to
+`agent.erebus.attest.d/`, then publishes it and stores a verified inclusion
+proof beside it. Missing proofs are retried at the next start;
+`erebus verify-attest --chain` audits the whole local trail.
 
 What a receipt proves, layer by layer ([spec](docs/src/spec/attestation.md)):
 
@@ -159,10 +161,13 @@ chaos harnesses) plus the transparency-log battery and the extreme chaos
 battery (native C agent, malformed inputs, 12 concurrent agents). Green means
 every one of those checks passed *today*, not once on a laptop.
 
-**No production users yet.** We publish traction only when it is measurable:
-next is an internal pilot on real enrolled machines (receipts anchored,
-verification failures = 0), then design partners in the target sectors. Plan
-and numbers: [ROADMAP §7](ROADMAP.md#7-positioning-and-traction-plan).
+**No production users yet.** The T2 internal pilot started 2026-09-29 with
+Baguettotron Q8 on the first enrolled machine: the first real inference
+receipt is strict-verified, published and RFC 3161-anchored (0 verification
+failures, 14,169 bytes of evidence). This is **not T2 complete**: the public
+gate remains ≥3 machines and ≥4 weeks. Reproduce the pilot with the
+[`scripts/pilot`](scripts/pilot/README.md) harness; plan and honest counters:
+[ROADMAP §7](ROADMAP.md#7-positioning-and-traction-plan).
 
 ---
 
@@ -289,7 +294,7 @@ manifests verify fail-cold at boot.
 | `erebus keygen/sign/verify/trust` | Ed25519 signing workflow (`keygen` also writes a PEM for cosign/openssl) |
 | `erebus build <dir>` | Package an app dir (`--universal`, `--embed-model`, `--ngl`, `--sign`, `--encrypt`, `--enable-sisr`, `--target`) |
 | `erebus run <file>` | Execute a bundle (namespace isolation, health gate) |
-| `erebus serve <file>` | OpenAI-compatible HTTP API (`--attest-key`: signed receipt per call) |
+| `erebus serve <file>` | OpenAI-compatible HTTP API (`--attest-key`: signed receipt per call; `--push`: registry proof per call) |
 | `erebus chat <file>` | Terminal TUI chat; `--web` serves the embedded browser UI |
 | `erebus pull / publish` | Registry download (integrity-checked, cached) / upload |
 | `erebus swap <file> <path> --from <new>` | Replace a file inside an existing bundle (hot-swap) |
