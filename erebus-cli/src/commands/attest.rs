@@ -169,6 +169,12 @@ pub fn run(args: AttestArgs) -> Result<()> {
         let registry = registry.trim_end_matches('/').to_string();
         let token = resolve_token(args.token.as_deref(), args.token_file.as_deref())?;
         let published = publish_receipt(&registry, token.as_deref(), &output_path, &json_bytes)?;
+        // The trail entry holds the same bytes, so the proof covers it too;
+        // `evidence export` and `verify-attest --chain` read it from there.
+        if let (Some(entry), Some(proof)) = (&entry, &published.proof) {
+            std::fs::copy(proof, proof_path_for(entry))
+                .with_context(|| format!("failed to store proof beside {}", entry.display()))?;
+        }
         if args.json {
             println!(
                 "{}",

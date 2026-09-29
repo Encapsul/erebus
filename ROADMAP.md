@@ -251,10 +251,21 @@ CI job).
   when overridden), the quota harness derives its quota from the real bundle
   size, and the demo's exit trap no longer turns a green run into exit 1.
   Any red = no merge.
-- [ ] **P1-2 Evidence export**: `erebus evidence export <bundle> -o pack.zip`
+- [x] **P1-2 Evidence export**: `erebus evidence export <bundle> -o pack.zip`
   = bundle hashes, receipts, inclusion proofs, checkpoints, TSA tokens,
   trusted public keys. `erebus verify-evidence pack.zip` verifies **offline**.
   This is the artifact an auditor receives.
+  Done 2026-09-29: export re-verifies the whole trail first (chain, bundle
+  digest, machine co-signature, log proof) and refuses to package anything
+  unverifiable; the pack carries only the keys actually used, raw `.tsr`
+  tokens and DSSE envelopes (for `openssl ts` / `cosign`), a hashed
+  `MANIFEST.json` and a README. `MANIFEST.json` is an index, not a trust root:
+  every receipt is re-verified against its own signature and log leaf.
+  Acceptance: `tests/evidence_e2e.rs` (real registry, enrolled machine,
+  registry stopped before verify) refuses an edited receipt, the same edit
+  with a re-hashed manifest, an erased first execution, a deleted file, an
+  unlisted file, a `../` entry and the wrong bundle. `attest --push` now also
+  stores the proof beside the trail entry.
 - [ ] **P1-3 One story** (A12): README leads with proof (build → sign → run →
   receipt → verify → tamper), packaging/serve become "how it runs"; mdbook
   gets `concepts/proof.md`, `spec/attestation.md`, `guides/audit.md`.

@@ -2,6 +2,22 @@
 
 All notable changes to erebus are documented here.
 
+## [Unreleased]
+
+### Added
+
+- `erebus evidence export <bundle> -o pack.zip` and `erebus verify-evidence
+  pack.zip [--bundle] [--json]`: a self-contained, offline-verifiable audit
+  pack (receipts, inclusion proofs, checkpoints, RFC 3161 tokens, DSSE
+  envelopes, signing keys). Export refuses an unverifiable trail; verify
+  refuses any edited, missing, extra or path-traversing entry and a
+  mismatched bundle (exit 2).
+
+### Fixed
+
+- `attest --push` also stores the inclusion proof beside the trail entry,
+  so trails built with `attest` carry their proofs like `serve --push` ones.
+
 ## [0.6.1] — 2026-09-29 — internal pilot
 
 ### Added

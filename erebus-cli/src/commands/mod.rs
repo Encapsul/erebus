@@ -13,6 +13,7 @@ pub mod doctor;
 pub mod engine;
 pub mod enroll;
 pub mod env;
+pub mod evidence;
 pub mod hf;
 pub mod init;
 pub mod inspect;

@@ -74,6 +74,20 @@ exposes an OpenAI-compatible API and writes **one receipt per inference call**
 proof beside it. Missing proofs are retried at the next start;
 `erebus verify-attest --chain` audits the whole local trail.
 
+Handing it to an auditor is one file:
+
+```bash
+erebus evidence export agent.erebus --log-key $REG -o evidence.zip
+erebus verify-evidence evidence.zip --bundle agent.erebus   # offline, no erebus account
+#  OK: evidence pack verified (erebus-evidence/1)
+#    receipts: 42, hash-chained, head sha256:…
+```
+
+The pack holds the receipts, inclusion proofs, signed checkpoints, RFC 3161
+tokens (`.tsr`, checkable with `openssl ts -verify`), DSSE envelopes (for
+`cosign`) and only the public keys that signed them. Editing, deleting or
+adding any file, or presenting it with another bundle, is refused.
+
 What a receipt proves, layer by layer ([spec](docs/src/spec/attestation.md)):
 
 | Layer | Proves | Signed by |
@@ -290,6 +304,7 @@ manifests verify fail-cold at boot.
 |---------|-------------|
 | `erebus attest / verify-attest` | Spec 2.0 execution receipts (DSSE + in-toto, JCS); `--envelope` for cosign, `--push` / `--proof` for the transparency log, `--strict` for machine identity, `--chain` for trails |
 | `erebus enroll` | Per-machine Ed25519 key + registry certificate; every receipt from this host is co-signed |
+| `erebus evidence export / verify-evidence` | One zip for the auditor: trail, proofs, TSA tokens, keys; verified offline |
 | `erebus attest-history` | Query your receipts on a registry (`--query bundle=…,until=…`) |
 | `erebus audit` | Signed compliance report aggregating receipts, SBOM and integrity facts |
 | `erebus keygen/sign/verify/trust` | Ed25519 signing workflow (`keygen` also writes a PEM for cosign/openssl) |

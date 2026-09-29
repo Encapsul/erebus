@@ -1026,6 +1026,7 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "assert_cmd",
+ "base64",
  "chrono",
  "clap",
  "clap_complete",

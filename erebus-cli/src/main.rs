@@ -179,6 +179,20 @@ enum Commands {
     ///   erebus verify-attest agent.erebus.attest --strict --registry-key <hex> # enrolled machine
     VerifyAttest(commands::verify_attest::VerifyAttestArgs),
 
+    /// Build the evidence pack an auditor receives (receipts, proofs, keys)
+    ///
+    /// Examples:
+    ///   erebus evidence export agent.erebus -o evidence.zip --log-key <hex>
+    Evidence(commands::evidence::EvidenceArgs),
+
+    /// Verify an evidence pack offline: files, signatures, machine
+    /// co-signatures, transparency-log proofs, chain
+    ///
+    /// Examples:
+    ///   erebus verify-evidence evidence.zip
+    ///   erebus verify-evidence evidence.zip --bundle agent.erebus --json
+    VerifyEvidence(commands::evidence::VerifyEvidenceArgs),
+
     /// Trust a public key
     Trust(commands::trust::TrustArgs),
 
@@ -389,6 +403,8 @@ fn main() -> ExitCode {
             commands::verify::run(args)
         }
         Commands::VerifyAttest(args) => commands::verify_attest::run(args),
+        Commands::Evidence(args) => commands::evidence::run(args),
+        Commands::VerifyEvidence(args) => commands::evidence::run_verify(args),
         Commands::Lifecycle(mut args) => {
             if cli.quiet {
                 args.quiet = true;

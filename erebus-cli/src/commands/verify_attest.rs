@@ -125,7 +125,7 @@ pub fn run(args: VerifyAttestArgs) -> Result<()> {
     Ok(())
 }
 
-fn verify_single(
+pub(crate) fn verify_single(
     file: &Path,
     keys: &[VerifyingKey],
     bundle_bytes: Option<&[u8]>,
@@ -158,7 +158,10 @@ fn verify_single(
 
 /// `--strict`: machine co-signature + registry certificate (see
 /// `erebus_core::machine::verify_machine`).
-fn verify_strict(file: &Path, registry_keys: &[VerifyingKey]) -> Result<serde_json::Value> {
+pub(crate) fn verify_strict(
+    file: &Path,
+    registry_keys: &[VerifyingKey],
+) -> Result<serde_json::Value> {
     let data = std::fs::read_to_string(file)
         .with_context(|| format!("failed to read {}", file.display()))?;
     let attestation: Attestation = serde_json::from_str(&data)
@@ -176,7 +179,7 @@ fn verify_strict(file: &Path, registry_keys: &[VerifyingKey]) -> Result<serde_js
 
 /// Offline check of `<receipt>.proof.json`; the receipt's exact bytes are
 /// the leaf preimage, so a re-serialized receipt fails here on purpose.
-fn verify_log_proof(
+pub(crate) fn verify_log_proof(
     receipt: &Path,
     proof_path: &Path,
     log_keys: &[VerifyingKey],
@@ -200,7 +203,7 @@ fn verify_log_proof(
     Ok(value)
 }
 
-fn parse_log_key(hex_key: &str) -> Result<VerifyingKey> {
+pub(crate) fn parse_log_key(hex_key: &str) -> Result<VerifyingKey> {
     let bytes: [u8; 32] = hex::decode(hex_key.trim())
         .ok()
         .and_then(|b| b.try_into().ok())
@@ -208,7 +211,7 @@ fn parse_log_key(hex_key: &str) -> Result<VerifyingKey> {
     VerifyingKey::from_bytes(&bytes).map_err(|e| anyhow::anyhow!("--log-key invalid: {e}"))
 }
 
-fn verify_chain(
+pub(crate) fn verify_chain(
     dir: &Path,
     keys: &[VerifyingKey],
     bundle_bytes: Option<&[u8]>,
@@ -362,7 +365,7 @@ fn print_log_proof(lp: &serde_json::Value) {
     }
 }
 
-fn load_trusted_keys(dir: &Path) -> Result<Vec<VerifyingKey>> {
+pub(crate) fn load_trusted_keys(dir: &Path) -> Result<Vec<VerifyingKey>> {
     let mut keys = Vec::new();
     if !dir.exists() {
         return Ok(keys);
