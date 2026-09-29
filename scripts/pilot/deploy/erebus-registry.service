@@ -1,0 +1,19 @@
+[Unit]
+Description=erebus T2 pilot transparency registry
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=erebus
+Group=erebus
+ExecStart=/usr/bin/python3 /opt/erebus-pilot/src/scripts/registry_server.py --dir /opt/erebus-pilot/state/registry --host 127.0.0.1 --port 8787 --log-origin erebus-t2-pilot --tsa-url https://freetsa.org/tsr --anchor-every 1
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/erebus-pilot/state/registry
+
+[Install]
+WantedBy=multi-user.target

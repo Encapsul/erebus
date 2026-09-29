@@ -1,0 +1,21 @@
+[Unit]
+Description=erebus T2 pilot node (Baguettotron, one signed receipt per call)
+After=network-online.target erebus-registry.service caddy.service
+Wants=network-online.target
+
+[Service]
+User=erebus
+Group=erebus
+Environment=HOME=/opt/erebus-pilot
+Environment=XDG_CACHE_HOME=/opt/erebus-pilot/cache
+Environment=ERE_PILOT_STATE=/opt/erebus-pilot/state/node
+Environment=ERE_BIN=/opt/erebus-pilot/bin/erebus
+Environment=ERE_LLAMA_SERVER=/opt/erebus-pilot/bin/llama-server
+ExecStart=/opt/erebus-pilot/src/scripts/pilot/serve.sh foreground
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

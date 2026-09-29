@@ -1,0 +1,13 @@
+[Unit]
+Description=erebus T2 pilot daily probe and report
+After=erebus-node.service
+
+[Service]
+Type=oneshot
+User=erebus
+Group=erebus
+Environment=HOME=/opt/erebus-pilot
+Environment=ERE_PILOT_STATE=/opt/erebus-pilot/state/node
+Environment=ERE_BIN=/opt/erebus-pilot/bin/erebus
+ExecStart=/opt/erebus-pilot/src/scripts/pilot/probe.sh
+ExecStartPost=/usr/bin/python3 /opt/erebus-pilot/src/scripts/pilot/report.py --state /opt/erebus-pilot/state/node --erebus /opt/erebus-pilot/bin/erebus

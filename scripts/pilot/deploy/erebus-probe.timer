@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the erebus pilot probe every day
+
+[Timer]
+OnCalendar=*-*-* 09:00:00 UTC
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

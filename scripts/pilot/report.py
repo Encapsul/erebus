@@ -8,6 +8,7 @@ import datetime as dt
 import json
 import os
 import pathlib
+import re
 import subprocess
 import urllib.request
 from typing import Any
@@ -75,6 +76,8 @@ def verify_chain(
 
 def timestamp(receipt: pathlib.Path) -> dt.datetime:
     raw = load_json(receipt)["execution"]["attested_at"].replace("Z", "+00:00")
+    # Receipts carry nanoseconds; Python < 3.11 parses at most microseconds.
+    raw = re.sub(r"(\.\d{6})\d+", r"\1", raw)
     return dt.datetime.fromisoformat(raw)
 
 

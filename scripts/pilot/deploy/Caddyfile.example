@@ -1,0 +1,10 @@
+REGISTRY_DOMAIN {
+	encode gzip
+	@pilot path /health /log/* /attestations /attestations/* /machines /machines/*
+	handle @pilot {
+		reverse_proxy 127.0.0.1:8787
+	}
+	handle {
+		respond "not exposed" 403
+	}
+}

@@ -62,6 +62,17 @@ scripts/pilot/probe.sh "Donne trois risques d'un agent autonome."
 Each host generates its own machine key locally; that private key never
 leaves the host. Do not copy machine directories between nodes.
 
+## Server deployment (systemd + TLS)
+
+[`deploy/`](deploy/) holds the units used on the pilot's registry host,
+installed under `/opt/erebus-pilot` and run as a dedicated `erebus` system
+user: `erebus-registry.service` (registry bound to `127.0.0.1:8787`, RFC 3161
+anchoring on every receipt), `erebus-node.service` (`serve.sh foreground`),
+and `erebus-probe.timer` (daily probe + `report.py`). `Caddyfile.example`
+terminates TLS and exposes only `/health`, `/log/*`, `/attestations*` and
+`/machines*`; every other registry surface answers 403. The host firewall
+must allow inbound 80/443 for the ACME certificate.
+
 ## Daily probe and evidence
 
 Run `probe.sh` from cron/launchd at least once a day. The inference response is

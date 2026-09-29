@@ -43,6 +43,8 @@ operator_key() {
 }
 
 main() {
+  # A service user often cannot read the caller's cwd (sudo -u from $HOME).
+  cd "$ROOT"
   test -s "$TOKEN_FILE" || { echo "missing token: $TOKEN_FILE" >&2; exit 1; }
   download_model
   create_app
