@@ -8,7 +8,7 @@ beside it, and measures the pilot from those files.
 The pilot is complete only when `report.py` observes all of:
 
 - at least 3 independently enrolled machines;
-- at least 28 elapsed days;
+- at least 14 elapsed days;
 - at least one real inference receipt;
 - zero `verify-attest --strict --proof` failures.
 

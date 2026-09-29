@@ -13,6 +13,10 @@ import subprocess
 import urllib.request
 from typing import Any
 
+# T2 gate (ROADMAP §7.3). 14 days: the pilot's registry host is leased for 15.
+MIN_MACHINES = 3
+MIN_DAYS = 14
+
 
 def load_json(path: pathlib.Path) -> dict[str, Any]:
     with path.open(encoding="utf-8") as handle:
@@ -123,9 +127,9 @@ def build_report(state: pathlib.Path, erebus: str) -> dict[str, Any]:
         "tsa_anchors_present": anchored,
         "evidence_bytes_total": evidence_bytes,
         "evidence_bytes_per_call": round(evidence_bytes / len(items)) if items else 0,
-        "t2_complete": len(machines) >= 3
+        "t2_complete": len(machines) >= MIN_MACHINES
         and bool(first)
-        and (now - first).days >= 28
+        and (now - first).days >= MIN_DAYS
         and len(items) > 0
         and all(verified),
     }
@@ -133,8 +137,8 @@ def build_report(state: pathlib.Path, erebus: str) -> dict[str, Any]:
 
 def print_report(report: dict[str, Any]) -> None:
     print("erebus T2 pilot")
-    print(f"  machines enrolled:      {report['enrolled_machines']} / 3")
-    print(f"  elapsed:                {report['elapsed_days']} / 28 days")
+    print(f"  machines enrolled:      {report['enrolled_machines']} / {MIN_MACHINES}")
+    print(f"  elapsed:                {report['elapsed_days']} / {MIN_DAYS} days")
     print(f"  receipts local/registry:{report['local_receipts']} / {report['registry_receipts']}")
     print(f"  strict+proof failures:  {report['verification_failures']}")
     print(f"  TSA-anchored proofs:    {report['tsa_anchors_present']}")

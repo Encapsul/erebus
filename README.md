@@ -162,10 +162,11 @@ battery (native C agent, malformed inputs, 12 concurrent agents). Green means
 every one of those checks passed *today*, not once on a laptop.
 
 **No production users yet.** The T2 internal pilot started 2026-09-29 with
-Baguettotron Q8 on the first enrolled machine: the first real inference
-receipt is strict-verified, published and RFC 3161-anchored (0 verification
-failures, 14,169 bytes of evidence). This is **not T2 complete**: the public
-gate remains ≥3 machines and ≥4 weeks. Reproduce the pilot with the
+Baguettotron Q8 on 2 enrolled machines (Linux server, macOS laptop) against a
+public TLS registry: every real inference receipt is strict-verified,
+published and RFC 3161-anchored (0 verification failures, ~14.2 kB of
+evidence per call). This is **not T2 complete**: the public
+gate remains ≥3 machines and ≥14 days. Reproduce the pilot with the
 [`scripts/pilot`](scripts/pilot/README.md) harness; plan and honest counters:
 [ROADMAP §7](ROADMAP.md#7-positioning-and-traction-plan).
 

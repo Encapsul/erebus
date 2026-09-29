@@ -393,7 +393,7 @@ that; the steps below can, and each yields a number we are allowed to cite.
 | Step | Deliverable | Number we can cite | When |
 |---|---|---|---|
 | T1 | **P1-1**: `scripts/yc_demo.sh` + chaos batteries green in CI, public badge | "the whole proof chain is re-proven on every commit; N consecutive green runs" | next |
-| T2 | **Internal pilot**: one real agent behind `serve --attest-key`, ≥ 3 enrolled machines, ≥ 4 weeks, registry with `--tsa-url` | receipts anchored, machines enrolled, `verify-attest --strict --proof` failures = 0, bytes of evidence per call | after T1 |
+| T2 | **Internal pilot**: one real agent behind `serve --attest-key`, ≥ 3 enrolled machines, ≥ 14 days, registry with `--tsa-url` | receipts anchored, machines enrolled, `verify-attest --strict --proof` failures = 0, bytes of evidence per call | after T1 |
 | T3 | **Design partner** in the ICP (defense / administration air-gapped, industrial edge): offline verifier delivered, letter of intent on the Enterprise tier | "1 LOI; air-gapped verification accepted by their auditor" | in parallel |
 | T4 | **Third-party verification**: an auditor or consultancy verifies a trail with nothing but `erebus verify-attest` / `cosign` and public keys, in writing | "verified by someone who does not trust us" | after T2 |
 
@@ -405,10 +405,14 @@ that; the steps below can, and each yields a number we are allowed to cite.
 - Reproducible harness: [`scripts/pilot/`](scripts/pilot/README.md), pinned
   Apache-2.0 Baguettotron Q8 (321 M), persistent registry with RFC 3161
   anchoring, node enrollment, daily probe and evidence-derived JSON report.
-- Baseline measured on machine 1: 1 real inference, 1 strict+proof verified
-  receipt, 1 TSA anchor, 0 failures, 14,169 bytes of evidence per call.
-- Gates still open: 2 more independently enrolled machines and 28 elapsed
-  days. Do not describe T2 as complete before `pilot-report.json` says so.
+- Public registry since 2026-09-29 (TLS, only log/attestation/machine routes
+  exposed), systemd node + daily probe on the registry host. Baseline:
+  2 enrolled machines (Linux VPS, macOS laptop), each with a real inference
+  receipt that is strict+proof verified and RFC 3161-anchored, 0 failures,
+  ~14.2 kB of evidence per call.
+- Gates still open: 1 more independently enrolled machine and 14 elapsed
+  days (the registry host is leased for 15; the gate was 28). Do not
+  describe T2 as complete before `pilot-report.json` says so.
 
 Rules: cite only what CI or a third party proves; no star counts; the founder
 story is told as *results* (proof chain complete, Python signer and Merkle
