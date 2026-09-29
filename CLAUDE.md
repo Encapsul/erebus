@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code when working with the x.bin codebase.
+This file provides guidance to Claude Code when working with the erebus codebase.
 
 ## Project Overview
 

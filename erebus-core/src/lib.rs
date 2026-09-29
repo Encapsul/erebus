@@ -1,4 +1,4 @@
-//! `erebus-core` — core library for the x.bin build tool.
+//! `erebus-core` — core library for the erebus build tool.
 //!
 //! Provides format parsing, compression, runtime detection, and package manager
 //! detection. Used by the Rust CLI (`erebus-cli`) and the launcher stub
