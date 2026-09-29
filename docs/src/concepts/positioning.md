@@ -1,121 +1,56 @@
 # Positioning
 
-## Customer profile
+## Who needs it
 
-Un **opérateur d'IA** qui déploie des agents sur des **flottes de machines**
-(edge, serveurs, kiosques, véhicules) et qui doit **prouver à un auditeur**
-ce qui a exécuté, où, quand, et que le code n'a pas été altéré.
+An **AI operator** that runs agents on machines it does not fully control —
+customer sites, edge fleets, kiosks, factories, vehicles, air-gapped
+networks — and must **prove to an auditor** what ran, where, when, and that
+the record was not edited afterwards.
 
-Il est soumis à des contraintes réglementaires (EU AI Act, SOC 2, ISO 27001,
-marchés publics défense/santé) et n'a **aucun outil** qui produit cette
-preuve automatiquement aujourd'hui.
+| Segment | Why they need evidence, not logs |
+|---|---|
+| Defense and public administration | air-gapped by regulation; verification must work without calling a vendor; supply-chain traceability (SBOM, signatures) is already required |
+| Industrial edge and vehicles | agents on hardware in the field; software update traceability (UNECE R156) |
+| AI companies under the EU AI Act | high-risk systems must log events automatically (Art. 12) and keep those logs (Art. 19, 26) |
 
-## Le segment : conformité IA + flottes
+Out of scope for now: healthcare, and hobbyist developers.
 
-| | Docker | Ollama | llamafile | **erebus** |
-|---|---|---|---|---|
-| Exécution signée | ❌ | ❌ | ❌ | **✅ Ed25519 + attestation** |
-| Delta updates | Layer cache | Store layers | ❌ | **SISR content-defined** |
-| Sandbox | Namespace | ❌ | ❌ | **seccomp + Landlock** |
-| Audit trail | ❌ | ❌ | ❌ | **✅ attestation chain** |
-| Portable format | Image OCI | Store pull | Single file | **Single .erebus file** |
-| Offline verification | ❌ (daemon) | ❌ (daemon) | Partial | **✅ fully offline** |
+## The category
 
-### Qui a ce problème aujourd'hui?
+**Execution provenance for AI agents.** Build provenance (Sigstore, SLSA,
+in-toto) answers "who built this artifact from which source". erebus answers
+the next question — "did *that* artifact run, on which machine, when, with
+what" — using the same standards, so a technical partner recognises it and
+a verifier can use `cosign` instead of trusting our code. See
+[Comparison](../comparison.md).
 
-1. **Hôpitaux / intégrateurs santé** : déploient des agents IA de diagnostic
-   sur des postes médicaux. La HAS/ANSM exige la preuve que le logiciel
-   exécuté correspond à la version validée. Aucun outil ne fournit cette
-   preuve automatiquement.
+## Why now
 
-2. **Intégrateurs défense / administration** : agents IA sur des systèmes
-   air-gapped. L'AANSSI exige la traçabilité complète de la chaîne
-   d'approvisionnement logicielle (SBOM + signatures + preuve d'exécution).
+- The EU AI Act's record-keeping obligations for high-risk systems phase in
+  over 2026–2027, and auditors are asking how logs are protected.
+- Agents increasingly run outside the vendor's own cloud (on-prem, edge,
+  customer VPCs), where the vendor's dashboards are not evidence.
+- The standards to do it properly (DSSE, in-toto, transparency logs,
+  RFC 3161) are mature and have tooling auditors can run themselves.
 
-3. **Fabricants automobiles / industrie** : agents IA embarqués dans des
-   véhicules ou des usines. La réglementation UNECE WP.29 impose la
-   traçabilité des mises à jour logicielles.
+## Why the launcher
 
-4. **Startups IA soumises à l'EU AI Act** : tout système d'IA "high-risk"
-   doit documenter son cycle de vie complet — modèle, code, dépendances,
-   exécutions. Personne ne construit cet outil aujourd'hui.
+A receipt is only as good as the place it is produced. erebus signs at the
+launcher: it verifies the bundle, starts the agent, and records the run, so
+there is no step where the operator could substitute other code and keep a
+clean record. The packaging (one sandboxed binary) exists to make that
+possible on any Linux host, without a daemon or root.
 
-## Pourquoi maintenant?
+## What erebus is not
 
-- **EU AI Act entre en vigueur** : obligatoire pour les systèmes high-risk
-  d'ici 2026-2027. Les entreprises n'ont aucun outil de traçabilité IA.
-- **SOC 2 + ISO 27001** exigent des preuves d'intégrité logicielle.
-- **Marchés publics IA** ($4B+ USA, UE en explosion) imposent la chaîne
-  de traçabilité du modèle.
-- **Modèles GGUF 4-70 GB** : la distribution est le goulot, les deltas
-  SISR réduisent le coût de 100×.
-- **llamafile (25k★)** et **Ollama (176k★)** n'ont aucune功能 de
-  traçabilité ou d'attestation d'exécution.
+- **Not a tracing or observability tool** — it records digests, not content.
+- **Not proof that the output is correct** — see
+  [What erebus proves](./proof.md).
+- **Not a replacement for Docker or Kubernetes** — it can run inside them.
+- **Not an inference host** — we never run your models on our servers.
 
-## Pourquoi erebus?
+## Business model
 
-### Le format comme preuve
-
-Chaque binaire `.erebus` contient :
-- Un **SHA-256** du payload et des métadonnées (vérifié à chaque lancement)
-- Une **signature Ed25519** (fail-cold, anti-downgrade)
-- Un **Merkle tree** des chunks SISR (chaque byte est traçable)
-
-erebus étend cela en générant, à chaque exécution, un **reçu signé**
-(`.erebus.attest`, spec 2.0 — enveloppe DSSE sur un énoncé in-toto canonique
-JCS) qui prouve :
-- quel bundle a été exécuté (hash du bundle et du payload, racine Merkle du rootfs)
-- ce qu'il a fait (`input_hash`, `output_hash`, `exit_code` — ou la requête
-  HTTP proxifiée)
-- sur quelle machine (clé machine enrôlée et certifiée par le registre — jamais
-  le hostname en clair)
-- à quelle date (horodatage signé, ancré par un TSA RFC 3161 via le log de
-  transparence)
-- par quel opérateur (clé publique), et après quel reçu (chaîne de hachage)
-
-Vérifiable avec `erebus verify-attest` **ou avec `cosign`** — le format est
-standard, pas propriétaire.
-
-### Against Ollama
-
-Ollama est un daemon avec un store de modèles. Excellent pour le
-développement local. Mais :
-- Pas de signatures sur les bundles
-- Pas d'attestation d'exécution
-- Pas de sandbox (le modèle tourne avec les droits de l'utilisateur)
-- Pas de delta updates content-defined (layer dedup, pas chunk-level)
-
-### Against llamafile
-
-llamafile = binaire C++ mono-runtime. Excellent pour la portabilité.
-Mais :
-- Pas de delta updates (fichier entier à chaque mise à jour)
-- Pas de sandbox seccomp+Landlock
-- Pas de multi-runtime (C++ only)
-- Pas d'attestation ni de traçabilité
-
-### Against Docker
-
-Docker est fait pour l'orchestration, pas pour la distribution edge.
-erebus = un fichier exécutable, extraction atomique, fonctionne sans
-daemon, sans privilèges root, avec attestation d'exécution intégrée.
-
-## Le format
-
-Le format `.erebus` est :
-- Un **ELF valide** (Linux) — `chmod +x && ./app.erebus` fonctionne
-- Un **payload tar/zstd ou SquashFS** — décompressible avec `tar`
-- Des **signatures Ed25519 standards** — vérifiables offline
-- Un **rootfs POSIX** — pas de kernel features propriétaires
-- Des **reçus d'exécution standards** (`.erebus.attest`, DSSE + in-toto) —
-  vérifiables par `cosign` sans outillage erebus
-
-Versions : v2 (plain) → v3 (signed) → v4 (encrypted) → v5 (squashfs).
-Backward-compatible. Forward-compatible via attestation détachée.
-
-## Ce que erebus n'est PAS
-
-- **Pas un Docker killer** : Docker reste pour l'orchestration.
-- **Pas un package manager** : la registry est optionnelle.
-- **Pas un outil de dev local** : Ollama fait mieux pour ça.
-- **Pas un hébergeur d'infèrement** : on ne touche pas au GPU côté serveur.
+MIT client and server, forever. Paid: the hosted, anchored proof trail,
+fleet features and air-gapped enterprise support. Details in the
+[ROADMAP](https://github.com/Tednoob17/erebus/blob/main/ROADMAP.md) §6.

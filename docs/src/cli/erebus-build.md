@@ -104,7 +104,7 @@ erebus build ./my_app --enable-sisr --update-url https://… --dry-run
 
 ## See also
 
-- [`erebus sign`](./erebus-sign.md), [`erebus verify`](./erebus-verify.md),
-  [`erebus keygen`](./erebus-keygen.md)
+- `erebus sign`, `erebus verify`, `erebus keygen` (`erebus <command> --help`);
+  receipts: [Quickstart §6](../guides/quickstart.md#6-prove-what-ran)
 - [Incremental Updates (SISR)](../guides/incremental-updates.md)
 - [User-facing update workflow](../guides/user-updates.md)

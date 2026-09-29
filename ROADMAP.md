@@ -266,13 +266,20 @@ CI job).
   with a re-hashed manifest, an erased first execution, a deleted file, an
   unlisted file, a `../` entry and the wrong bundle. `attest --push` now also
   stores the proof beside the trail entry.
-- [ ] **P1-3 One story** (A12): README leads with proof (build → sign → run →
+- [x] **P1-3 One story** (A12): README leads with proof (build → sign → run →
   receipt → verify → tamper), packaging/serve become "how it runs"; mdbook
   gets `concepts/proof.md`, `spec/attestation.md`, `guides/audit.md`.
   Done 2026-09-28: README proof-first, `spec/attestation.md`,
-  `concepts/proof.md` (boundary + three questions). Left: `guides/audit.md`
-  (the auditor's walkthrough) and pruning the older mdbook pages that still
-  pitch packaging.
+  `concepts/proof.md` (boundary + three questions). Done 2026-09-29:
+  `guides/audit.md` (pin keys out of band → `verify-evidence` → `openssl ts
+  -verify` on the pack's `.tsr` + `.checkpoint` → `cosign`, each run on the
+  pilot's real freetsa.org tokens); introduction, problem, positioning,
+  comparison and docs roadmap rewritten in English, proof-first, without
+  "no one else does this" claims; mdbook reordered (Proof → Guides → How it
+  runs → Advanced: SISR); CLI help leads with proof. Found on the way and
+  fixed: `verify-evidence` trusted the keys shipped inside the pack —
+  `--operator-key` / `--log-key` now pin them, and unpinned keys are
+  reported `NOT PINNED`.
 - [ ] **P1-4 Registry hygiene**: split `registry_server.py` into a package
   (`store/`, `auth/`, `log/`, `http/`), SQLite everywhere, remove the O(n)
   scans, keep zero third-party deps.

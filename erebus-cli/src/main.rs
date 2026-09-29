@@ -1,4 +1,4 @@
-//! erebus CLI - package any app into a single self-extracting binary
+//! erebus CLI - signed, verifiable receipts of every AI agent execution
 
 #![allow(dead_code)]
 
@@ -20,8 +20,8 @@ use std::process::ExitCode;
     name = "erebus",
     version,
     propagate_version = true,
-    about = "Package any app into a single self-extracting binary",
-    long_about = "erebus packages any application into a single self-extracting ELF binary.\n\nSupported runtimes: Python, Node.js, Go, and static binaries.\nBuild, sign, serve — and prove what executed: every run leaves a signed, hash-chained receipt.\n\nExamples:\n  erebus build ./myapp -o myapp.erebus\n  erebus run myapp.erebus\n  erebus inspect myapp.erebus\n  erebus keygen\n  erebus sign myapp.erebus --key ~/.erebus/keys/*.key\n  erebus verify myapp.erebus\n  erebus attest myapp.erebus --key ~/.erebus/keys/*.key --push\n  erebus verify-attest myapp.erebus.attest --proof --strict\n  erebus enroll --registry http://host:8080 --token $TOKEN\n  erebus audit myapp.erebus\n  erebus doctor\n  erebus scan .\n  erebus serve agent.erebus --port 8080\n  erebus chat agent.erebus\n  erebus completion bash >> ~/.bashrc\n  erebus completion zsh >> ~/.zshrc\n  erebus completion fish > ~/.config/fish/completions/erebus.fish\n\nDocumentation: https://github.com/Tednoob17/erebus\nReport bugs: https://github.com/Tednoob17/erebus/issues\n\nUninstall: rm $(which erebus) && rm -rf ~/.cache/erebus ~/.local/share/erebus"
+    about = "Signed, tamper-evident receipts of every AI agent execution",
+    long_about = "erebus is the proof layer for AI execution: it runs an agent from a single sandboxed binary and leaves a signed, hash-chained, externally anchored receipt of every run and every inference call — verifiable offline with erebus or stock cosign.\n\nSupported runtimes: Python and native binaries.\n\nExamples:\n  erebus build ./myapp -o myapp.erebus\n  erebus run myapp.erebus\n  erebus inspect myapp.erebus\n  erebus keygen\n  erebus sign myapp.erebus --key ~/.erebus/keys/*.key\n  erebus verify myapp.erebus\n  erebus attest myapp.erebus --key ~/.erebus/keys/*.key --push\n  erebus verify-attest myapp.erebus.attest --proof --strict\n  erebus evidence export myapp.erebus --log-key $REG -o evidence.zip\n  erebus verify-evidence evidence.zip --bundle myapp.erebus\n  erebus enroll --registry http://host:8080 --token $TOKEN\n  erebus audit myapp.erebus\n  erebus doctor\n  erebus scan .\n  erebus serve agent.erebus --port 8080\n  erebus chat agent.erebus\n  erebus completion bash >> ~/.bashrc\n  erebus completion zsh >> ~/.zshrc\n  erebus completion fish > ~/.config/fish/completions/erebus.fish\n\nDocumentation: https://github.com/Tednoob17/erebus\nReport bugs: https://github.com/Tednoob17/erebus/issues\n\nUninstall: rm $(which erebus) && rm -rf ~/.cache/erebus ~/.local/share/erebus"
 )]
 struct Cli {
     /// Enable verbose output
@@ -329,20 +329,26 @@ fn main() -> ExitCode {
     // with no arguments, display concise help text."
     let args: Vec<String> = std::env::args().collect();
     if args.len() == 1 {
-        eprintln!("erebus — package any app into a single self-extracting binary");
+        eprintln!("erebus — signed, tamper-evident receipts of every AI agent execution");
         eprintln!();
         eprintln!("Usage: erebus <COMMAND> [OPTIONS]");
         eprintln!();
-        eprintln!("Most used commands:");
-        eprintln!("  build       Build a .erebus binary from an app directory");
-        eprintln!("  run         Execute a .erebus file");
-        eprintln!("  inspect     Inspect a .erebus file's metadata");
-        eprintln!("  serve       Serve a bundle model as an OpenAI-compatible API");
-        eprintln!("  chat        Interactive chat with a bundled model");
-        eprintln!("  attest      Sign an execution receipt (DSSE + in-toto); --push to the log");
-        eprintln!("  verify-attest  Verify receipts: --chain, --proof, --strict");
-        eprintln!("  enroll      Give this host a certified machine identity");
-        eprintln!("  audit       Generate or verify a signed compliance audit report");
+        eprintln!("Prove what ran:");
+        eprintln!("  keygen           Create an operator signing key");
+        eprintln!("  enroll           Give this host a certified machine identity");
+        eprintln!(
+            "  attest           Sign an execution receipt (DSSE + in-toto); --push to the log"
+        );
+        eprintln!("  verify-attest    Verify receipts: --chain, --proof, --strict");
+        eprintln!("  evidence         Export a trail as an offline-verifiable audit pack");
+        eprintln!("  verify-evidence  Verify an audit pack, offline");
+        eprintln!();
+        eprintln!("How it runs:");
+        eprintln!("  build            Build a sandboxed .erebus binary from an app directory");
+        eprintln!("  sign             Sign a .erebus binary; `verify` checks it");
+        eprintln!("  run              Execute a .erebus file");
+        eprintln!("  serve            OpenAI-compatible API, one receipt per inference call");
+        eprintln!("  inspect          Inspect a .erebus file's metadata");
         eprintln!();
         eprintln!("Use 'erebus --help' for the full listing of commands and options.");
         return ExitCode::SUCCESS;

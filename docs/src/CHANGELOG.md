@@ -12,6 +12,15 @@ All notable changes to erebus are documented here.
   envelopes, signing keys). Export refuses an unverifiable trail; verify
   refuses any edited, missing, extra or path-traversing entry and a
   mismatched bundle (exit 2).
+- `verify-evidence --operator-key <fingerprint> --log-key <hex>` pins the
+  keys an auditor obtained out of band; any other key in the pack is
+  refused, and the report lists every key as pinned or `NOT PINNED`.
+- Evidence packs carry `anchors/<receipt>.checkpoint`, the exact bytes the
+  RFC 3161 token covers, so `openssl ts -verify -data` checks the TSA
+  signature without erebus.
+- Docs: `guides/audit.md` (auditor walkthrough); proof-first introduction,
+  problem, positioning and comparison pages, in English; CLI help leads
+  with the proof commands.
 
 ### Fixed
 

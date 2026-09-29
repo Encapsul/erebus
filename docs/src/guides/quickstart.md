@@ -81,6 +81,37 @@ cp $XDG_DATA_HOME/erebus/keys/<fingerprint>.pub $XDG_DATA_HOME/erebus/trusted-ke
 erebus verify hello-web.erebus
 ```
 
+## 6. Prove what ran
+
+```bash
+KEY=$XDG_DATA_HOME/erebus/keys/<fingerprint>.key
+
+# Run with a receipt: the launcher signs it and appends it to the trail
+ERE_ATTEST_KEY=$KEY ./hello-web.erebus
+# or sign one for the bundle without running it
+erebus attest hello-web.erebus --key $KEY
+#  output: hello-web.erebus.attest
+#  trail:  hello-web.erebus.attest.d/000001-….json
+
+erebus verify-attest hello-web.erebus.attest --bundle hello-web.erebus
+#  OK: attestation verified (key: …)
+erebus verify-attest --chain hello-web.erebus.attest.d
+#  OK: chain verified — 1 receipt(s)
+erebus verify-attest hello-web.erebus.attest --bundle other.erebus
+#  TAMPERED: bundle mismatch (attestation covers sha256:…, file is sha256:…)
+
+# One file for an auditor
+erebus evidence export hello-web.erebus -o evidence.zip
+erebus verify-evidence evidence.zip --bundle hello-web.erebus
+```
+
+Receipts become third-party evidence once the host is enrolled (`erebus
+enroll`, machine co-signature, `--strict`) and receipts are pushed to a
+registry transparency log (`--push`, `--proof`); `evidence export` then
+needs the registry's `--log-key`. See
+[Auditing an erebus trail](./audit.md) and the
+[spec](../spec/attestation.md).
+
 ## Debug
 
 ```bash

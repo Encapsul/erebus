@@ -100,6 +100,6 @@ install is cheap and leaves the running binary untouched.
 
 ## Related
 
-- [Runtime Launcher](./runtime-launcher.md) — the launcher flow this gate slots into.
-- [SISR: Self-Incremental Sovereign Reconstruction](./sisr-spec.md) — trust model.
+- [Runtime Launcher](../architecture/runtime-launcher.md) — the launcher flow this gate slots into.
+- [SISR: Self-Incremental Sovereign Reconstruction](../architecture/sisr-spec.md) — trust model.
 - [Incremental Updates (SISR)](../guides/incremental-updates.md) — publisher workflow.

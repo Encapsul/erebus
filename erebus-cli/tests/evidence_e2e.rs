@@ -288,6 +288,36 @@ fn evidence_pack_verifies_offline_and_refuses_every_doctored_copy() {
     assert_eq!(report["machine_cosigned"], 2);
     assert_eq!(report["log_proofs"], 2);
     assert_eq!(report["bundle"]["file_checked"], true);
+    assert_eq!(report["keys"]["operator_pinned"], false);
+
+    // The pack carries its own keys: an auditor pins them out of band.
+    let op_fp = report["keys"]["operator"][0].as_str().unwrap().to_string();
+    let pinned = |op: &str, log: &str| {
+        let mut cmd = erebus();
+        cmd.args(["verify-evidence", pack.to_str().unwrap(), "--json"])
+            .args(["--operator-key", op, "--log-key", log]);
+        cmd
+    };
+    let json = pinned(&op_fp, &log_key)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(report["keys"]["operator_pinned"], true);
+    assert_eq!(report["keys"]["registry_pinned"], true);
+    let stranger = format!("sha256:{}", "ab".repeat(32));
+    pinned(&stranger, &log_key)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("operator key"))
+        .stderr(predicate::str::contains("not one of the pinned keys"));
+    let other_log = "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29";
+    pinned(&op_fp, other_log)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("registry key"));
 
     // 1. A receipt edited inside the pack.
     let receipt_name = |n: &str| {

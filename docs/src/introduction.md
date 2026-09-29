@@ -1,92 +1,80 @@
 # erebus
 
-> **Sign. Track. Prove. — Ship AI agents with verifiable attestation.**
+> **The proof layer for AI execution.**
 
-**erebus** packages an AI agent — model weights, inference engine config,
-runtime and dependencies — into a single self-contained `.erebus` binary.
-Every execution leaves a **signed receipt** (`.erebus.attest`, spec 2.0:
-DSSE envelope over an in-toto statement) proving what executed, where, when,
-with which inputs and outputs — hash-chained locally, anchored in a Merkle
-transparency log, co-signed by an enrolled machine key, and verifiable with
-`erebus verify-attest` **or stock `cosign`**.
+Teams that deploy AI agents on machines they don't fully control cannot
+prove to an auditor what those agents ran. **erebus** is the launcher that
+emits a signed, externally anchored receipt of every execution — verifiable
+offline with erebus or stock `cosign`.
+
+Each receipt (`.erebus.attest`, [spec 2.0](./spec/attestation.md): DSSE
+envelope over an in-toto statement) states which exact code and weights ran,
+on which enrolled machine, when, and with which input and output digests. It
+is signed by the operator, co-signed by the machine, hash-chained to the
+previous receipt, and logged in a Merkle transparency log whose checkpoints
+are timestamped by an independent RFC 3161 authority.
 
 ```bash
-# Build — runtime, app, libraries, weights
-erebus build ./my-agent --embed-model models/model.gguf -o agent.erebus
+erebus keygen --key-dir keys                            # operator key
+erebus enroll --registry $ERE_REGISTRY --token $TOKEN   # once per host
+erebus build ./my-agent -o agent.erebus && erebus sign agent.erebus --key keys/<fp>.key
 
-# Sign — Ed25519, fail-cold verification
-erebus sign agent.erebus --key my-key.pem
+ERE_ATTEST_KEY=keys/<fp>.key ./agent.erebus < input.json    # run → signed receipt
+erebus serve agent.erebus --attest-key keys/<fp>.key --push # or: one receipt per inference call
 
-# Enroll this host once — receipts produced here are co-signed by a machine key
-erebus enroll --registry $ERE_REGISTRY --token $TOKEN
-
-# Run with a receipt (or `serve --attest-key`: one receipt per inference call)
-ERE_ATTEST_KEY=my-key ./agent.erebus < input.json
-
-# Verify — operator signature, machine identity, transparency-log proof, offline
-erebus verify-attest agent.erebus.attest --bundle agent.erebus --strict --proof
-
-# Distribute through any registry
-erebus publish agent.erebus
-
-# Run / serve / chat on any machine
-erebus serve agent.erebus --port 8080
-erebus chat agent.erebus
+erebus verify-attest agent.erebus.attest --bundle agent.erebus --strict --proof --log-key $REG
+erebus evidence export agent.erebus --log-key $REG -o evidence.zip   # hand it to the auditor
+erebus verify-evidence evidence.zip --bundle agent.erebus --operator-key sha256:<fp> --log-key $REG
 ```
 
-## What happens under the hood
+Where to go next:
 
-| Step | What happens | Who runs it |
+- [The problem](./concepts/problem.md) — the auditor's question erebus answers.
+- [What erebus proves — and what it does not](./concepts/proof.md) — the
+  honest boundary.
+- [Auditing an erebus trail](./guides/audit.md) — for the person receiving
+  the evidence.
+- [Execution attestation — spec 2.0](./spec/attestation.md) — byte formats.
+
+## What happens, and who does it
+
+| Step | What happens | Who |
 |---|---|---|
-| `build` | detects runtime, resolves deps, chunks model layers, compresses rootfs | developer |
-| `sign` | Ed25519 signature over SHA-256(payload ‖ metadata ‖ footer), anti-downgrade | developer |
-| exec / `serve --attest-key` | signs a spec 2.0 receipt (artifact hashes, provenance, `input_hash`/`output_hash`/`exit_code`, `rootfs_root`, previous receipt hash) with the operator key and the enrolled machine key | end user (automatically) |
-| `attest --push` | detached receipt, published to the registry's Merkle transparency log; inclusion proof + signed checkpoint + RFC 3161 token stored as `<receipt>.proof.json` | developer / auditor |
-| `verify-attest` | 1.x and 2.0 receipts; `--chain` trails, `--proof` log proofs, `--strict` machine identity — all offline | auditor |
-| `publish` / `pull` | registry upload; streamed download verified against index SHA-256 | developer ↔ users |
-| `serve` / exec | stub verifies SHA-256 → mmap-lazy payload → cache extraction → GPU probe → engine launch | end user |
+| `build` / `sign` | app, runtime, libraries and weights in one sandboxed binary; Ed25519 signature over SHA-256(payload ‖ metadata ‖ footer), anti-downgrade | developer |
+| run / `serve --attest-key` | the launcher verifies the bundle, then signs a receipt: artifact hashes, `rootfs_root`, `input_hash` / `output_hash` / `exit_code` (or request/response digests per inference call), previous receipt hash; co-signed by the enrolled machine key | automatic, on every run |
+| `--push` | receipt published to the registry's transparency log; inclusion proof, signed checkpoint and RFC 3161 token stored beside it | automatic, or `attest --push` |
+| `verify-attest` | one receipt or a whole trail: `--chain`, `--proof`, `--strict` — offline | anyone |
+| `evidence export` / `verify-evidence` | one zip with receipts, proofs, TSA tokens and keys; verified offline against pinned keys | operator → auditor |
 
-## Key features
+## How it runs
 
-- **Verifiable receipts** — spec 2.0 DSSE/in-toto envelopes (JCS canonical),
-  operator + machine co-signature, hash-chained trail, Merkle transparency
-  log with RFC 3161 anchoring; `cosign verify-blob-attestation` says
-  `Verified OK` ([spec](./spec/attestation.md)).
-- **Universal binaries** — `--universal` packs four native slices
-  (linux-x64, linux-arm64, macos-arm64, windows-x64 PE32+) into one file.
-- **Multi-format inference** — GGUF via llama.cpp; safetensors/ONNX via
-  vLLM; TensorRT-LLM; Apple MLX.
-- **GPU auto-tuning** — nvidia-smi/ROCm/Metal probes export `ERE_GPU`,
-  `ERE_VRAM_MB` and a suggested `ERE_NGL`.
-- **Integrity first** — SHA-256 over payload‖metadata at every launch,
-  Ed25519 signing against trusted keys, fail-cold behavior.
-- **SISR delta updates** — content-defined chunking ships only changed
-  chunks; signed manifests verify before reconstruction.
-- **Declarative builds** — `Agentfile.yaml` (or legacy `.erebus.toml`).
-- **Chaos-tested** — adversarial harnesses ship in-repo; latest verdicts
-  SURVIVED ([benchmarks](https://github.com/Tednoob17/erebus/tree/main/benchmarks)).
+The receipt is only worth something if it is produced where the code runs,
+by something the operator cannot silently bypass. That is why erebus is also
+a launcher:
 
-## Supported runtimes
+- **Single binary** — `chmod +x && ./agent.erebus`; no daemon, no root.
+  Runtimes: Python and native binaries.
+- **Integrity at every launch** — SHA-256 over payload ‖ metadata, Ed25519
+  against trusted keys, fail-cold; warm starts re-check the rootfs Merkle
+  root.
+- **Sandbox** — user namespaces, seccomp and Landlock on Linux.
+- **Model serving** — `erebus serve` exposes an OpenAI-compatible API in
+  front of the bundled engine (GGUF via llama.cpp) and writes one receipt per
+  call, streaming relayed unchanged.
+- **Chaos-tested** — the full proof chain and adversarial harnesses
+  (SIGKILL, tampering, registry faults, cold-start storms) run in CI on every
+  commit.
 
-| Runtime | Detection | Use case |
-|---|---|---|
-| Python | `requirements.txt`, `pyproject.toml`, `app.py`, `main.py`, ... | FastAPI/Flask agents, tools |
-| Binary | executable present (ELF/PE) | llama.cpp engines, Go/Rust servers |
-
-Cross-platform launcher stubs are built with cargo-zigbuild; any host can
-target any platform.
+Advanced and optional: universal multi-platform binaries, SISR delta
+updates, `Agentfile.yaml` declarative builds. They are documented in the
+Architecture and Guides sections and are not needed for the proof chain.
 
 ## Status
 
-The **P0 proof chain is complete** (2026-09-17): hardened verifier, hash-chained
-trail, attesting proxy, warm-cache re-verification, Merkle transparency log
-with external anchoring, machine identity, standard DSSE/in-toto envelope
-with cosign interop. Distribution features (universal binary,
-OpenAI-compatible serving, registry, Agentfile, GPU auto-detect, chat UI,
-SISR deltas, sandboxing) are implemented and validated. Next: P1 — the demo
-and chaos batteries run in CI, evidence export. See
-[ROADMAP](https://github.com/Tednoob17/erebus/blob/main/ROADMAP.md) and
-[benchmarks](https://github.com/Tednoob17/erebus/tree/main/benchmarks).
+The P0 proof chain is complete and re-proven in CI on every commit
+(`proof.yml`). P1: evidence export shipped; an internal multi-machine pilot
+with a public, TSA-anchored registry is running. See the
+[ROADMAP](https://github.com/Tednoob17/erebus/blob/main/ROADMAP.md).
 
 ## Get started
 
@@ -96,5 +84,4 @@ cargo build --release
 ./target/release/erebus doctor
 ```
 
-Continue with [The Problem](./concepts/problem.md) for the why, or jump to
-the [SISR overview](./concepts/sisr-overview.md) for delta updates.
+Then follow the [Quickstart](./guides/quickstart.md).

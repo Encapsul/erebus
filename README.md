@@ -78,15 +78,19 @@ Handing it to an auditor is one file:
 
 ```bash
 erebus evidence export agent.erebus --log-key $REG -o evidence.zip
-erebus verify-evidence evidence.zip --bundle agent.erebus   # offline, no erebus account
+erebus verify-evidence evidence.zip --bundle agent.erebus \
+  --operator-key sha256:<fp> --log-key $REG                # offline, no erebus account
 #  OK: evidence pack verified (erebus-evidence/1)
 #    receipts: 42, hash-chained, head sha256:…
 ```
 
 The pack holds the receipts, inclusion proofs, signed checkpoints, RFC 3161
-tokens (`.tsr`, checkable with `openssl ts -verify`), DSSE envelopes (for
-`cosign`) and only the public keys that signed them. Editing, deleting or
-adding any file, or presenting it with another bundle, is refused.
+responses with the exact checkpoint bytes they cover (`openssl ts -verify`
+passes on the pilot's freetsa.org tokens), DSSE envelopes (for `cosign`) and
+only the public keys that signed them — which the auditor pins, obtained out
+of band. Editing, deleting or adding any file, a key other than the pinned
+ones, or another bundle is refused. Walkthrough:
+[Auditing an erebus trail](docs/src/guides/audit.md).
 
 What a receipt proves, layer by layer ([spec](docs/src/spec/attestation.md)):
 

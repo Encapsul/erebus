@@ -241,7 +241,9 @@ cosign verify-blob-attestation \
 
 `--insecure-ignore-tlog` only means "this envelope was not uploaded to
 Rekor"; erebus receipts are anchored in the erebus transparency log instead
-(`verify-attest --proof`). Rekor upload is planned (P1).
+(`verify-attest --proof`). Rekor upload is planned (P1). cosign refuses
+blobs over 128 MiB unless `COSIGN_MAX_ATTACHMENT_SIZE` is raised (e.g.
+`16GiB`); bundles with embedded weights usually need it.
 
 ## 6. Compatibility matrix
 

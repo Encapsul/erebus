@@ -14,7 +14,8 @@ fn test_help_output() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("erebus packages"));
+        .stdout(predicate::str::contains("proof layer for AI execution"))
+        .stdout(predicate::str::contains("verify-evidence"));
 }
 
 #[test]

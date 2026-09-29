@@ -1,71 +1,61 @@
 # The Problem
 
-## Comment prouver ce qui a exécuté?
+## "Prove what ran"
 
-Une entreprise déploie un agent IA sur 500 machines de terrain.
-L'agent contient : un modèle GGUF (4 GB), un serveur Python (FastAPI),
-des outils système, et une configuration.
+A company runs an AI agent on 500 field machines. The agent is a GGUF model,
+a Python server, a few tools and a configuration. An auditor asks:
 
-**La question de l'auditeur :**
+> "Show me that the agent that ran on machine #247 on 15 September was
+> exactly the version you validated in July, what it was given and what it
+> answered — and that this record was not edited since."
 
-> « Prouvez-moi que l'agent exécuté sur la machine #247 le 15 septembre
-> correspond exactement à la version que vous avez validée en juillet,
-> et qu'aucun code n'a été altéré entre-temps. »
+Today the honest answer is a set of application logs and a tracing
+dashboard. Both are controlled by the operator being audited: they can be
+edited, filtered or regenerated, and neither ties the log line to the exact
+bytes that executed or to a specific machine.
 
-**La réponse aujourd'hui :** aucune. Il n'existe aucun outil qui produit
-cette preuve automatiquement.
+## Why the usual tools do not answer it
 
-## Pourquoi les solutions existantes ne suffisent pas
+Each of these is good at what it does; none produces the evidence above on
+its own.
 
-| Outil | Ce qu'il fait | Ce qu'il ne fait PAS |
+| Tool | What it gives | What it does not give |
 |---|---|---|
-| Docker | Container avec layers signés | Daemon requis, pas d'attestation d'exécution, pas d'air-gap |
-| Ollama | Store de modèles avec pull | Pas de signatures, pas de sandbox, pas de traçabilité |
-| llamafile | Binaire unique portable | Pas de delta, pas d'audit trail, mono-runtime |
-| Git LFS / rsync | Transfert de fichiers | Pas de format d'artefact, pas de signature, pas d'attestation |
+| Application logs | text lines written by the app | a signature, a binding to the executed bytes, protection from the operator |
+| LLM tracing / observability (hosted or self-hosted) | rich traces in the vendor's or operator's database | tamper evidence against the account owner; offline verification by a third party |
+| Build provenance (Sigstore, SLSA, in-toto) | who built which artifact from which source | anything about *runs*: when, where, with what input |
+| Container signing (OCI + cosign) | the image was signed before deployment | that this image is what actually ran on a given host at a given time |
+| Tamper-evident log stores | append-only, verifiable storage | what is appended: it records what the application tells it |
+| TEE remote attestation | the platform and code measured by hardware | per-run records; it needs specific hardware and cloud support |
 
-Le problème n'est pas le packaging. Le problème est **l'absence de preuve**.
+erebus reuses the first four's standards (DSSE, in-toto, transparency logs,
+`cosign`) and applies them to **executions**, produced by the launcher
+itself. See [Comparison](../comparison.md) for the full picture.
 
-## Le contexte réglementaire
+## Why it matters now
 
-- **EU AI Act** : obligatoire pour les systèmes high-risk d'ici 2026-2027.
-  Exige la documentation du cycle de vie complet de l'IA.
-- **SOC 2 / ISO 27001** : exigent des preuves d'intégrité logicielle
-  et de contrôle d'accès aux déploiements.
-- **Marchés publics** (USA, UE) : imposent la SBOM (Software Bill of
-  Materials) et la chaîne de traçabilité du modèle.
-- **UNECE WP.29** (automobile) : traçabilité obligatoire des mises à jour
-  logicielles embarquées.
+- **EU AI Act** — high-risk systems must automatically record events over
+  their lifetime (Art. 12), and providers and deployers must keep those logs
+  (Art. 19, Art. 26); obligations phase in over 2026–2027. erebus gives the
+  compliance team evidence for these logs; it is not a certification.
+- **SOC 2 / ISO 27001** — auditors ask for evidence of software integrity
+  and change control on deployed systems.
+- **Public procurement and defense** — air-gapped deployments must be
+  verifiable without calling a vendor.
+- **Vehicles and industry** — UNECE R156 requires traceability of software
+  updates on embedded systems.
 
-## L'idée erebus
+## The erebus answer
 
-Un format binaire qui contient tout (runtime + modèle + code + config)
-et qui génère **automatiquement** une preuve signée de ce qui a exécuté :
-
-```bash
-erebus build ./mon-agent --embed-model model.gguf -o agent.erebus
-erebus sign agent.erebus --key keys/<fp>.key
-erebus enroll --registry $ERE_REGISTRY --token $TOKEN   # une fois par machine
-ERE_ATTEST_KEY=keys/<fp>.key ./agent.erebus < input.json  # → agent.erebus.attest
-erebus attest agent.erebus --key keys/<fp>.key --push      # → <reçu>.proof.json
-```
-
-L'auditeur reçoit quatre fichiers :
-1. `agent.erebus` — le bundle exécutable
-2. `agent.erebus.attest` — le reçu signé (spec 2.0 : enveloppe DSSE sur un
-   énoncé in-toto, co-signé par la clé machine de l'hôte enrôlé)
-3. `agent.erebus.attest.proof.json` — la preuve d'inclusion dans le log de
-   transparence du registre (checkpoint signé, jeton RFC 3161)
-4. Les clés publiques — opérateur (`<fp>.pub` / `<fp>.pem`) et registre
-
-Vérification offline, sans daemon, sans internet :
+The auditor receives one file and verifies it without an account or network:
 
 ```bash
-erebus verify agent.erebus --trusted-dir ./trusted
-erebus verify-attest agent.erebus.attest --trusted-dir ./trusted \
-  --bundle agent.erebus --strict --proof --registry-key <hex>
-cosign verify-blob-attestation --key keys/<fp>.pem --signature agent.dsse.json \
-  --type https://erebus.dev/attestation/execution/v2 --insecure-ignore-tlog agent.erebus
+erebus evidence export agent.erebus --log-key $REG -o evidence.zip   # operator
+erebus verify-evidence evidence.zip --bundle agent.erebus \
+  --operator-key sha256:<fp> --log-key $REG                          # auditor
 ```
 
-**Zéro installation. Zéro configuration. La preuve est le produit.**
+What that establishes, and its limits, are on
+[What erebus proves](./proof.md); the auditor's walkthrough, including
+checking the timestamps with `openssl` and the signatures with `cosign`, is
+[Auditing an erebus trail](../guides/audit.md).
