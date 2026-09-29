@@ -45,15 +45,18 @@ jobs:
   linux:
     name: linux ${{ matrix.arch }}
     runs-on: ubuntu-24.04
-    continue-on-error: ${{ matrix.experimental }}
+    # Must always evaluate to a boolean: with `${{ matrix.experimental }}`
+    # the legs without the key resolved to null and GitHub silently dropped
+    # the whole job (no linux archives, publish skipped) since v0.5.0.
+    continue-on-error: ${{ matrix.experimental == true }}
     strategy:
       fail-fast: false
       matrix:
         include:
           # stub builds only where the seccomp/landlock constants exist:
           # x86_64, aarch64, i686, armv7, arm. Everything else is CLI-only.
-          - { target: x86_64-unknown-linux-musl, arch: amd64, stub: true }
-          - { target: aarch64-unknown-linux-musl, arch: arm64, stub: true }
+          - { target: x86_64-unknown-linux-musl, arch: amd64, stub: true, experimental: false }
+          - { target: aarch64-unknown-linux-musl, arch: arm64, stub: true, experimental: false }
           - { target: i686-unknown-linux-musl, arch: i386, stub: true, experimental: true }
           - { target: armv7-unknown-linux-musleabihf, arch: armv7, stub: true, experimental: true }
           - { target: arm-unknown-linux-musleabihf, arch: arm, stub: true, experimental: true }
