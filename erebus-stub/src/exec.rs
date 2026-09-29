@@ -1088,7 +1088,9 @@ pub fn exec_app(
     }
 
     // Health server: spawn AFTER entering the namespaces — a live thread makes
-    // `unshare(CLONE_NEWUSER)` fail with EINVAL. On the pivot path this line
+    // `unshare(CLONE_NEWUSER)` fail with EINVAL (already-joined workers can
+    // too, for a few microseconds; `namespace::enter_userns` waits for the
+    // thread group to drain). On the pivot path this line
     // runs in the executor child (its thread vanishes at exec, as before the
     // supervisor fork); the parent already spawned its own inside the branch.
     crate::health_gate::maybe_start_health(meta);

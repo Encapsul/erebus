@@ -10,6 +10,8 @@
 #  4. Cache hit: second run of the same bundle still proves behavior
 #  5. Signature edges: wrong key refuses, unsigned bundle runs, signature binds
 #     to the CURRENT bytes (tampered file refused everywhere, fresh re-sign ok)
+#  6. Cold-start storm: 40 first launches with private caches, 8 at a time,
+#     so the post-hash unshare(CLONE_NEWUSER) never sees a lingering thread
 #
 # input_hash semantics: it fingerprints the LAUNCH VECTOR (entrypoint + argv),
 # NOT the piped stdin bytes — see erebus-core/src/attest.rs launch_vector_hash.
@@ -199,6 +201,34 @@ V2=$?
 "$ERE" verify "$WORK/fresh.erebus" --trusted-dir "$WORK/trusted-onlyB" -q 2>/dev/null
 V3=$?
 [ "$V3" -eq 0 ] && check "fresh build + re-sign covers new bytes (verifies)" 0 || check "fresh build + re-sign covers new bytes" 1
+
+# ── [6/6] cold-start storm ────────────────────────────────────────────
+# Every launch below is a true cold start (private, empty cache): extract,
+# hash the rootfs with one worker per core, then unshare(CLONE_NEWUSER).
+# Joined workers may still sit in the thread group for a few microseconds
+# and turn that unshare into EINVAL — seen once in CI as a first-run
+# "Invalid argument (os error 22)". Load the host with parallel cold starts
+# to widen the window; not a single run may fail or mention EINVAL.
+echo "── [6/6] cold-start storm: 40 first launches under load"
+STORM="$WORK/storm"; mkdir -p "$STORM"
+for batch in 1 2 3 4 5; do
+  for n in 1 2 3 4 5 6 7 8; do
+    i=$(( (batch - 1) * 8 + n ))
+    mkdir -p "$STORM/cache$i"
+    ( XDG_CACHE_HOME="$STORM/cache$i" ERE_TRUSTED_DIR="$WORK/trusted" \
+        "$WORK/native.erebus" >"$STORM/out$i" 2>"$STORM/err$i"; echo $? >"$STORM/rc$i" ) &
+  done
+  wait
+done
+STORM_BAD=0
+for i in $(seq 1 40); do
+  if [ "$(cat "$STORM/rc$i")" != "0" ] || [ "$(cat "$STORM/out$i")" != "native-agent-ok" ]; then
+    STORM_BAD=$((STORM_BAD+1)); echo "  run $i: rc=$(cat "$STORM/rc$i") stderr=$(head -c 200 "$STORM/err$i")"
+  fi
+done
+[ "$STORM_BAD" -eq 0 ]; check "40/40 cold starts succeed under load" $?
+EINVAL_HITS=$(cat "$STORM"/err* 2>/dev/null | grep -c 'os error 22')
+[ "$EINVAL_HITS" -eq 0 ]; check "no EINVAL from unshare on any cold start" $?
 
 # ── summary ────────────────────────────────────────────────────────────
 echo ""

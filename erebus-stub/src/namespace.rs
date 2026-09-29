@@ -41,14 +41,7 @@ pub fn enter_userns() -> io::Result<()> {
     // of many container runtimes, whereas a user namespace followed by a
     // mount namespace is allowed once uid/gid are mapped. So we split the
     // two into sequential calls.
-    // SAFETY: unshare(2) with CLONE_NEWUSER creates a new user namespace and
-    // does not require CAP_SYS_ADMIN (ANSSI DENV-STABLE: no nightly).
-    unsafe {
-        let rc = libc::unshare(libc::CLONE_NEWUSER);
-        if rc != 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
+    unshare_userns_when_single_threaded()?;
 
     write_proc("/proc/self/uid_map", &format!("0 {uid} 1"))?;
     write_proc("/proc/self/setgroups", "deny")?;
@@ -68,6 +61,51 @@ pub fn enter_userns() -> io::Result<()> {
     }
 
     Ok(())
+}
+
+/// Upper bound on the wait for the thread group to drain. The window is a
+/// few microseconds in practice; a bound keeps a genuinely threaded caller
+/// from hanging and lets the real EINVAL surface.
+#[cfg(target_os = "linux")]
+const SINGLE_THREAD_ATTEMPTS: u32 = 200;
+
+/// `unshare(CLONE_NEWUSER)` implies `CLONE_THREAD` and is refused with
+/// EINVAL while the thread group has more than one member. A worker thread
+/// that was *just joined* still counts: the kernel wakes the joiner from
+/// `mm_release` before `release_task` unlinks the thread, so the cold-start
+/// rootfs hashing (one worker per core, then joined) races the unshare that
+/// follows and makes a fresh bundle fail its first launch on a busy host.
+/// Wait for `/proc/self/task` to show a single entry and retry on EINVAL.
+#[cfg(target_os = "linux")]
+fn unshare_userns_when_single_threaded() -> io::Result<()> {
+    let mut attempts = 0;
+    loop {
+        wait_single_threaded();
+        // SAFETY: unshare(2) with CLONE_NEWUSER creates a new user namespace
+        // and does not require CAP_SYS_ADMIN (ANSSI DENV-STABLE: no nightly).
+        if unsafe { libc::unshare(libc::CLONE_NEWUSER) } == 0 {
+            return Ok(());
+        }
+        let err = io::Error::last_os_error();
+        attempts += 1;
+        if err.raw_os_error() != Some(libc::EINVAL) || attempts >= SINGLE_THREAD_ATTEMPTS {
+            return Err(err);
+        }
+        std::thread::sleep(std::time::Duration::from_micros(200));
+    }
+}
+
+/// Spin (bounded) until this process has a single task, i.e. every joined
+/// worker has been unlinked from the thread group by the kernel.
+#[cfg(target_os = "linux")]
+fn wait_single_threaded() {
+    for _ in 0..SINGLE_THREAD_ATTEMPTS {
+        match std::fs::read_dir("/proc/self/task").map(|d| d.count()) {
+            Ok(n) if n > 1 => std::thread::sleep(std::time::Duration::from_micros(200)),
+            // One task, or no procfs to ask: let unshare(2) be the judge.
+            _ => return,
+        }
+    }
 }
 
 /// Enter a new PID namespace (`CLONE_NEWPID`).

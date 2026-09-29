@@ -20,6 +20,13 @@ All notable changes to erebus are documented here.
   did not contain the model bytes.
 - Attestation-trail enumeration ignores `.proof.json` sidecars, so publishing
   per-call proofs cannot corrupt sequence numbering or chain verification.
+- Stub: a fresh bundle could fail its very first launch with `Invalid
+  argument (os error 22)`. The cold-start rootfs hashing joins one worker per
+  core, and the kernel wakes the joiner before the thread leaves the thread
+  group, so the `unshare(CLONE_NEWUSER)` that follows was refused with
+  EINVAL. `enter_userns` now waits for `/proc/self/task` to drain and retries
+  the unshare; `scripts/chaos_extreme.sh` gained a 40-launch cold-start storm
+  that reproduces the window under load.
 
 ## [0.6.0] — 2026-09-28 — the proof chain
 
