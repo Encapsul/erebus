@@ -10,7 +10,8 @@ use super::args::parse_target;
 /// 2. `target/<triple>/release/erebus-stub` (workspace build)
 /// 3. `/tmp/erebus-stub-target/<triple>/release/erebus-stub` (AGENTS.md path)
 /// 4. `stub/target/<triple>/release/erebus-stub` (legacy layout)
-/// 5. `which erebus-stub` (system install, with warning)
+/// 5. `erebus-stub` next to the running `erebus` (release archive), host target only
+/// 6. `which erebus-stub` (system install, with warning)
 pub(crate) fn find_stub(target: &Option<String>) -> Result<PathBuf> {
     if let Ok(path) = std::env::var("ERE_STUB_PATH") {
         let p = PathBuf::from(path);
@@ -59,6 +60,12 @@ pub(crate) fn find_stub(target: &Option<String>) -> Result<PathBuf> {
         }
     }
 
+    if targets_host(target) {
+        if let Some(p) = sibling_stub(stub_name) {
+            return Ok(p);
+        }
+    }
+
     if let Ok(p) = which::which("erebus-stub") {
         eprintln!(
             "[erebus] warning: found erebus-stub on PATH at {}; prefer 'make stub' for reproducible builds",
@@ -67,7 +74,30 @@ pub(crate) fn find_stub(target: &Option<String>) -> Result<PathBuf> {
         return Ok(p);
     }
 
-    anyhow::bail!("erebus-stub not found — run: make stub")
+    anyhow::bail!(
+        "erebus-stub not found — reinstall erebus (the release archive ships it next to \
+         the erebus binary), set ERE_STUB_PATH, or run `make stub` in a source checkout"
+    )
+}
+
+/// Release archives ship `erebus-stub` beside `erebus`; that stub is built
+/// for the host only, so it is a valid candidate only when building for it.
+fn targets_host(target: &Option<String>) -> bool {
+    let Some(t) = target.as_deref() else {
+        return true;
+    };
+    let host_os = match std::env::consts::OS {
+        "macos" => "darwin",
+        other => other,
+    };
+    parse_target(t) == (std::env::consts::ARCH.to_string(), host_os.to_string())
+}
+
+fn sibling_stub(stub_name: &str) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let p = exe.parent()?.join(stub_name);
+    p.is_file().then_some(p)
 }
 
 /// Read `app_hash` and `rt_deps_hash` from an existing `.erebus` file's metadata.
@@ -104,6 +134,26 @@ mod tests {
     fn find_stub_darwin_suffix() {
         let result = find_stub(&Some("aarch64-apple-darwin".into()));
         assert!(result.is_err() || result.is_ok(), "should not panic");
+    }
+
+    #[test]
+    fn sibling_stub_only_for_host_target() {
+        assert!(targets_host(&None));
+        let os = if cfg!(target_os = "macos") {
+            "apple-darwin"
+        } else if cfg!(windows) {
+            "pc-windows-gnu"
+        } else {
+            "unknown-linux-musl"
+        };
+        let host = format!("{}-{os}", std::env::consts::ARCH);
+        assert!(targets_host(&Some(host)));
+        let foreign = if cfg!(target_arch = "aarch64") {
+            "x86_64-unknown-linux-musl"
+        } else {
+            "aarch64-unknown-linux-musl"
+        };
+        assert!(!targets_host(&Some(foreign.into())));
     }
 
     #[test]
