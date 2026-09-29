@@ -425,6 +425,7 @@ pub(crate) fn build_single_target(
     // payloads already get libc+friends from the interpreter embed.
     if runtime_name == "binary"
         && embedded_interpreter_str.is_none()
+        && app_has_elf(&rootfs)
         && !rootfs
             .join("usr/lib")
             .join(host_gnu_triple())
@@ -987,6 +988,21 @@ fn host_gnu_triple() -> &'static str {
         "riscv64" => "riscv64-linux-gnu",
         other => other,
     }
+}
+
+/// Mach-O and PE payloads load the target OS's own libraries; only an ELF
+/// entry needs a glibc base inside the rootfs.
+fn app_has_elf(rootfs: &Path) -> bool {
+    use std::io::Read;
+    let Ok(entries) = std::fs::read_dir(rootfs.join("app")) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        let mut magic = [0u8; 4];
+        std::fs::File::open(e.path())
+            .and_then(|mut f| f.read_exact(&mut magic))
+            .is_ok_and(|()| &magic == b"\x7fELF")
+    })
 }
 
 /// Copy the minimal glibc base (dynamic loader + core libc) from the build

@@ -118,13 +118,26 @@ fn detect_binary(dir: &Path) -> bool {
     native_count == 1
 }
 
-/// True if `path` is an ELF or PE (`.exe`) executable by magic bytes.
+/// True if `path` is an ELF, PE (`.exe`) or Mach-O executable by magic bytes.
 fn is_native_binary(path: &Path) -> bool {
-    let mut magic = [0u8; 4];
-    std::fs::File::open(path)
-        .and_then(|mut f| f.read_exact(&mut magic))
-        .map(|()| &magic[..] == b"\x7fELF" || (magic[0] == b'M' && magic[1] == b'Z'))
-        .unwrap_or(false)
+    let mut buf = Vec::with_capacity(8);
+    let Ok(n) = std::fs::File::open(path).and_then(|f| f.take(8).read_to_end(&mut buf)) else {
+        return false;
+    };
+    let mut head = [0u8; 8];
+    head[..n].copy_from_slice(&buf);
+    n >= 4 && is_native_magic(&head)
+}
+
+fn is_native_magic(head: &[u8; 8]) -> bool {
+    let magic = &head[..4];
+    // A Java class shares the fat Mach-O magic; its next word is a class
+    // file version (≥ 45), a fat header's is an arch count — file(1) splits at 20.
+    let fat_arches = u32::from_be_bytes([head[4], head[5], head[6], head[7]]);
+    magic == b"\x7fELF"
+        || magic[..2] == *b"MZ"
+        || magic == [0xcf, 0xfa, 0xed, 0xfe]
+        || (magic == [0xca, 0xfe, 0xba, 0xbe] && (1..20).contains(&fat_arches))
 }
 
 /// Resolve the entrypoint argv for a detected runtime.
@@ -404,6 +417,35 @@ mod tests {
         assert_eq!(detect_runtime(dir.path()), Some(Runtime::Python));
         let ep = resolve_entrypoint(dir.path(), Runtime::Python);
         assert_eq!(ep, Some(vec!["python3".into(), "/app/app.py".into()]));
+    }
+
+    #[test]
+    fn detect_macho_binaries_but_not_java_classes() {
+        let thin = TempDir::new().unwrap();
+        std::fs::write(
+            thin.path().join("agent"),
+            b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01",
+        )
+        .unwrap();
+        assert_eq!(detect_runtime(thin.path()), Some(Runtime::Binary));
+        assert_eq!(
+            resolve_entrypoint(thin.path(), Runtime::Binary),
+            Some(vec!["/app/agent".to_string()])
+        );
+        let fat = TempDir::new().unwrap();
+        std::fs::write(
+            fat.path().join("agent"),
+            b"\xca\xfe\xba\xbe\x00\x00\x00\x02",
+        )
+        .unwrap();
+        assert_eq!(detect_runtime(fat.path()), Some(Runtime::Binary));
+        let class = TempDir::new().unwrap();
+        std::fs::write(
+            class.path().join("Main.class"),
+            b"\xca\xfe\xba\xbe\x00\x00\x00\x41",
+        )
+        .unwrap();
+        assert_eq!(detect_runtime(class.path()), None);
     }
 
     #[test]

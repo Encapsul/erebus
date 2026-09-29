@@ -74,8 +74,9 @@ erebus keygen --key-dir $XDG_DATA_HOME/erebus/keys
 # Sign a .erebus
 erebus sign hello-web.erebus --key $XDG_DATA_HOME/erebus/keys/<fingerprint>.key
 
-# Copy public key to trusted directory
-cp $XDG_DATA_HOME/erebus/keys/<fingerprint>.pub $XDG_DATA_HOME/erebus/trusted-keys/
+# Trust the public key (~/.erebus/trusted-keys, or $ERE_TRUSTED_DIR);
+# a signed bundle refuses to start without it
+erebus trust $XDG_DATA_HOME/erebus/keys/<fingerprint>.pub
 
 # Verify
 erebus verify hello-web.erebus

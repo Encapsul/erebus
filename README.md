@@ -22,7 +22,7 @@ launcher. Open-source MIT client and server; the paid product is the hosted,
 anchored proof trail.
 
 ```bash
-ERE_ATTEST_KEY=ops.key ./agent.erebus < input.json       # runs the agent → agent.erebus.attest
+ERE_ATTEST_KEY=ops.key ./agent.erebus --task nightly     # runs the agent → agent.erebus.attest
 erebus verify-attest agent.erebus.attest --bundle agent.erebus --strict --proof
 #  OK: attestation verified          format: spec 2.0 (DSSE envelope)
 #  OK: machine sha256:… — enrolled by ops-team at https://registry
@@ -39,7 +39,7 @@ silently rewrite:
 | Question | Application logs | Tracing / observability SaaS | erebus receipt |
 |---|---|---|---|
 | Which exact code and weights ran? | ❌ | ❌ | ✅ bundle + payload SHA-256, rootfs Merkle root, signed |
-| What went in, what came out? | text, editable | yes, in the vendor's DB | ✅ `input_hash` / `output_hash` / `exit_code`, per run **and per inference call** |
+| What went in, what came out? | text, editable | yes, in the vendor's DB | ✅ per inference call: request and response body digests; per batch run: arguments, stdout/stderr digests, exit code |
 | Which machine? | hostname string | agent metadata | ✅ per-host key co-signs; certificate names the owner |
 | Can the operator edit it after the fact? | yes | yes (their account) | ❌ hash chain + Merkle transparency log + RFC 3161 timestamp |
 | Can I verify it without trusting the vendor? | — | ❌ | ✅ offline, with public keys; or with `cosign verify-blob-attestation` |
@@ -52,7 +52,7 @@ erebus keygen --key-dir keys                      # operator key (+ <fp>.pem for
 erebus enroll --registry $ERE_REGISTRY --token $T # once per host: machine key, certified
 erebus build ./agent -o agent.erebus && erebus sign agent.erebus --key keys/<fp>.key
 
-ERE_ATTEST_KEY=keys/<fp>.key ./agent.erebus < input.json   # run → agent.erebus.attest (+ trail)
+ERE_ATTEST_KEY=keys/<fp>.key ./agent.erebus --task nightly # run → agent.erebus.attest (+ trail)
 erebus verify-attest agent.erebus.attest --bundle agent.erebus --strict --registry-key $REG
 #  OK: attestation verified (key: …)      format: spec 2.0 (DSSE envelope)
 #  OK: machine sha256:… — enrolled by alice at https://registry (2026-09-17T…)
@@ -79,7 +79,7 @@ Handing it to an auditor is one file:
 ```bash
 erebus evidence export agent.erebus --log-key $REG -o evidence.zip
 erebus verify-evidence evidence.zip --bundle agent.erebus \
-  --operator-key sha256:<fp> --log-key $REG                # offline, no erebus account
+  --operator-key <fp> --log-key $REG                       # offline, no erebus account
 #  OK: evidence pack verified (erebus-evidence/1)
 #    receipts: 42, hash-chained, head sha256:…
 ```

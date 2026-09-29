@@ -21,7 +21,7 @@ opening the pack, obtain:
 
 | Key | Who gives it to you | What it looks like |
 |---|---|---|
-| Operator key fingerprint | the operator (contract annex, signed email, call) | `sha256:d830f417…` (64 hex) |
+| Operator public key | the operator (contract annex, signed email, call) — the value `erebus keygen` printed | 64 hex, or its `sha256:` fingerprint |
 | Transparency-log key | the registry, at `GET /log/key` → `public_key_hex` | 64 hex |
 
 These two values are your only trust inputs. Write down where they came from.
@@ -31,7 +31,7 @@ These two values are your only trust inputs. Write down where they came from.
 ```bash
 erebus verify-evidence evidence.zip \
   --bundle agent.erebus \
-  --operator-key sha256:<operator fingerprint> \
+  --operator-key <operator public key hex> \
   --log-key <registry log key hex>
 ```
 
@@ -43,6 +43,7 @@ OK: evidence pack verified (erebus-evidence/1)
   log:        42/42 inclusion proofs under signed checkpoints, 42 RFC 3161 anchor(s)
   files:      320 hashed — none missing, none extra
   operator    sha256:d830f417… (pinned)
+              public key 5f1c02e9…
   registry    sha256:9d3a805b… (pinned)
 ```
 
@@ -115,9 +116,11 @@ You cannot conclude, from the pack alone:
 
 - that the output is *correct* or the agent behaved well — see
   [What erebus proves](../concepts/proof.md);
-- what the inputs and outputs *were* — receipts hold digests; ask the
-  operator for the data and hash it yourself (SHA-256) to match
-  `input_hash` / `output_hash`;
+- what the inputs and outputs *were* — receipts hold digests. For a served
+  call, `input_hash` / `output_hash` are the SHA-256 of the request and
+  response bodies: ask the operator for them and hash them yourself. For a
+  batch run, `input_hash` covers the launch arguments only (not stdin) and
+  `output_hash` combines the stdout and stderr digests;
 - that **no later** execution was left out. The chain proves nothing was
   removed *before* the head; runs after the head are only visible in the
   transparency log. To close that gap, ask the registry for the current

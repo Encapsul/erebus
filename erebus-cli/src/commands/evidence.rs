@@ -85,9 +85,10 @@ pub struct VerifyEvidenceArgs {
     #[arg(long, value_name = "FILE")]
     pub bundle: Option<PathBuf>,
 
-    /// Operator key fingerprint (sha256:…) obtained out of band; every
-    /// operator key in the pack must be one of these (repeatable)
-    #[arg(long = "operator-key", value_name = "FINGERPRINT")]
+    /// Operator public key obtained out of band: the 64-hex key `erebus
+    /// keygen` prints, or its `sha256:` fingerprint. Every operator key in
+    /// the pack must be one of these (repeatable)
+    #[arg(long = "operator-key", value_name = "KEY")]
     pub operator_keys: Vec<String>,
 
     /// Transparency-log public key (64 hex, as served at /log/key) obtained
@@ -439,7 +440,7 @@ fn readme(tally: &Tally) -> String {
          {} execution receipt(s), {} transparency-log proof(s), {} RFC 3161 token(s).\n\n\
          Verify everything offline (no network, no account):\n  \
          erebus verify-evidence <this-pack>.zip --bundle <bundle file> \\\n    \
-         --operator-key <sha256:fingerprint> --log-key <registry /log/key hex>\n\n\
+         --operator-key <operator public key hex> --log-key <registry /log/key hex>\n\n\
          The keys under keys/ come with the pack. Obtain the operator fingerprint\n\
          and the registry log key from them directly (not from this pack) and pin\n\
          them as above; without pins the report says NOT PINNED.\n\n\
@@ -582,7 +583,11 @@ fn check_pins(
 ) -> Result<serde_json::Value> {
     let ids = |ks: &[VerifyingKey]| ks.iter().map(key_fingerprint).collect::<Vec<_>>();
     let (op_ids, log_ids) = (ids(operator), ids(log_keys));
-    let want_op: BTreeSet<String> = args.operator_keys.iter().map(|f| normalize_fp(f)).collect();
+    let want_op = args
+        .operator_keys
+        .iter()
+        .map(|k| operator_pin(k))
+        .collect::<Result<BTreeSet<_>>>()?;
     let want_log = args
         .log_keys
         .iter()
@@ -601,15 +606,22 @@ fn check_pins(
     }
     Ok(serde_json::json!({
         "operator": op_ids,
+        "operator_public_keys": operator.iter().map(|k| hex::encode(k.as_bytes())).collect::<Vec<_>>(),
         "registry": log_ids,
         "operator_pinned": !want_op.is_empty(),
         "registry_pinned": !want_log.is_empty(),
     }))
 }
 
-fn normalize_fp(fp: &str) -> String {
-    let hex = fp.trim().trim_start_matches("sha256:").to_ascii_lowercase();
-    format!("sha256:{hex}")
+/// `sha256:<hex>` is a fingerprint; bare hex is the public key itself.
+fn operator_pin(key: &str) -> Result<String> {
+    let key = key.trim().to_ascii_lowercase();
+    match key.strip_prefix("sha256:") {
+        Some(hex) => Ok(format!("sha256:{hex}")),
+        None => va::parse_log_key(&key)
+            .map(|k| key_fingerprint(&k))
+            .context("--operator-key must be a 64-hex public key or sha256:<fingerprint>"),
+    }
 }
 
 /// Hash the real bundle (given, or embedded) against the pack's digest; the
@@ -696,6 +708,11 @@ fn print_keys(k: &serde_json::Value) {
         };
         for id in k[role].as_array().into_iter().flatten() {
             eprintln!("  {role:<9}   {} ({state})", id.as_str().unwrap_or("?"));
+        }
+        if role == "operator" {
+            for pk in k["operator_public_keys"].as_array().into_iter().flatten() {
+                eprintln!("              public key {}", pk.as_str().unwrap_or("?"));
+            }
         }
     }
     if k["operator_pinned"] != true || k["registry_pinned"] != true {

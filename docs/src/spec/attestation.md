@@ -182,8 +182,8 @@ The registry key that signs certificates is the transparency-log key
                                    "description": "fingerprint of the enrolled machine key that co-signed the envelope" },
         "os":                    { "type": "string" },
         "arch":                  { "type": "string" },
-        "input_hash":            { "type": ["string", "null"], "description": "sha256 of argv‖env allowlist‖stdin, or of the proxied request body" },
-        "output_hash":           { "type": ["string", "null"], "description": "sha256 of stdout‖stderr, or of the proxied response body" },
+        "input_hash":            { "type": ["string", "null"], "description": "served call: sha256 of the proxied request body; batch run: sha256 of the launch vector (entrypoint then argv, NUL-joined) — stdin is not hashed" },
+        "output_hash":           { "type": ["string", "null"], "description": "served call: sha256 of the proxied response body; batch run: sha256(stdout digest \":\" stderr digest), Linux isolation ≥ 2 only, else null" },
         "exit_code":             { "type": ["integer", "null"] },
         "prev_attestation_hash": { "type": ["string", "null"], "description": "sha256 of the previous receipt bytes in the local trail" },
         "request": {

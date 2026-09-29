@@ -52,7 +52,7 @@ The auditor receives one file and verifies it without an account or network:
 ```bash
 erebus evidence export agent.erebus --log-key $REG -o evidence.zip   # operator
 erebus verify-evidence evidence.zip --bundle agent.erebus \
-  --operator-key sha256:<fp> --log-key $REG                          # auditor
+  --operator-key <fp> --log-key $REG                                 # auditor
 ```
 
 What that establishes, and its limits, are on

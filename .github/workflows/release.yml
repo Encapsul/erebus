@@ -25,7 +25,7 @@ name: Release
 #     never blocks the release (fail-open expansion, not a gate). The stub
 #     (seccomp/landlock) builds only on x86_64/aarch64/i686/armv7/arm — other
 #     targets are CLI-only (see ROADMAP.md).
-#   - macOS amd64/arm64: CLI + stub (stub has a macos_sandbox Seatbelt port).
+#   - macOS amd64/arm64: CLI + stub (Seatbelt sandbox not enforced yet, ROADMAP P1-5).
 #   - Windows amd64: CLI + stub (stub has a win.rs FFI layer).
 
 on:

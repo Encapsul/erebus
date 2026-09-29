@@ -307,6 +307,11 @@ fn evidence_pack_verifies_offline_and_refuses_every_doctored_copy() {
     let report: serde_json::Value = serde_json::from_slice(&json).unwrap();
     assert_eq!(report["keys"]["operator_pinned"], true);
     assert_eq!(report["keys"]["registry_pinned"], true);
+    // What the operator actually sees: the key hex `keygen` prints and names
+    // the key file after.
+    let op_hex = key.file_stem().unwrap().to_str().unwrap().to_string();
+    assert_eq!(report["keys"]["operator_public_keys"][0], op_hex.as_str());
+    pinned(&op_hex, &log_key).assert().success();
     let stranger = format!("sha256:{}", "ab".repeat(32));
     pinned(&stranger, &log_key)
         .assert()

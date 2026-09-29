@@ -194,3 +194,32 @@ jobs:
             file "$CARGO_TARGET_DIR/$T/release/erebus-stub" | grep -q "Mach-O"
           fi
           echo "artifact OK: $T"
+
+  # ROADMAP P1-5: the macOS slice executed on real Apple Silicon, not only
+  # cross-compiled. Native stub + CLI, the Rust suites, then
+  # scripts/macos_slice.sh (launch, receipts, chain, tamper refusal, evidence).
+  macos-arm64:
+    name: macOS arm64 (Apple Silicon)
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable (2026-08-26)
+        with:
+          toolchain: stable
+
+      - name: Host
+        run: uname -m && sw_vers && sysctl -n machdep.cpu.brand_string
+
+      - name: Build native stub + CLI
+        run: cargo build --release -p erebus-stub -p erebus-cli
+
+      - name: Test erebus-core + erebus-cli
+        run: cargo test -p erebus-core -p erebus-cli
+
+      - name: macOS slice
+        run: |
+          bash scripts/macos_slice.sh \
+            "$CARGO_TARGET_DIR/release/erebus" "$CARGO_TARGET_DIR/release/erebus-stub"

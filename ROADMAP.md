@@ -284,6 +284,20 @@ CI job).
   (`store/`, `auth/`, `log/`, `http/`), SQLite everywhere, remove the O(n)
   scans, keep zero third-party deps.
 - [ ] **P1-5 macOS slice validated on real Apple Silicon** (never run to date).
+  2026-09-29: first real run (Intel macOS 14.8, native stub) + CI job
+  `macos-arm64` on `macos-15` (Apple Silicon) running the Rust suites and
+  `scripts/macos_slice.sh`. Works: Mach-O agents detected (was ELF/PE only,
+  so `erebus build` refused every native macOS app), no Linux glibc staged,
+  fail-cold without trusted keys, receipts written and chained, edited
+  receipt and payload byte flip refused on a warm cache, evidence pack
+  verified with a pinned key. **Two gaps, both in the stub (ask first):**
+  (1) the Seatbelt sandbox is a no-op — `apply_sandbox` only runs a
+  `sandbox-exec` probe (with a file path where a profile string is
+  expected) and never confines the payload; a canary outside the rootfs is
+  read. (2) no output/exit capture on macOS: receipts are pre-launch only.
+  Also found: batch `input_hash` covers the launch vector, not stdin — the
+  spec said stdin; docs corrected, stdin capture needs a stub change.
+  Done when both gaps are fixed and the job is green on Apple Silicon.
 
 ### 🟡 P2 — Differentiators once the chain is trustworthy
 
@@ -520,8 +534,8 @@ pilot or LOI beside it (§7.3).
 ### Known constraints
 - VPS disk chronically tight; purge `target/`, `~/.cache/erebus` before
   heavy builds. qemu-user: `unshare` → EINVAL (test ARM with
-  `--isolation none`). Wine < 7 lacks WMI. macOS slice never run on
-  hardware. `serve`: encrypted and squashfs bundles unsupported.
+  `--isolation none`). Wine < 7 lacks WMI. macOS: Seatbelt sandbox
+  not enforced and no output capture (P1-5). `serve`: encrypted and squashfs bundles unsupported.
 
 ### Measured
 - FastCDC ~390 MB/s, SHA-256 ~50 MB/s (i5-7300U). 100 MB payload, 1 %

@@ -12,7 +12,7 @@ All notable changes to erebus are documented here.
   envelopes, signing keys). Export refuses an unverifiable trail; verify
   refuses any edited, missing, extra or path-traversing entry and a
   mismatched bundle (exit 2).
-- `verify-evidence --operator-key <fingerprint> --log-key <hex>` pins the
+- `verify-evidence --operator-key <key> --log-key <hex>` pins the
   keys an auditor obtained out of band; any other key in the pack is
   refused, and the report lists every key as pinned or `NOT PINNED`.
 - Evidence packs carry `anchors/<receipt>.checkpoint`, the exact bytes the
@@ -24,8 +24,24 @@ All notable changes to erebus are documented here.
 
 ### Fixed
 
+- `erebus build` detects Mach-O (thin and universal) agents as the binary
+  runtime; it only knew ELF and PE, so native macOS apps were refused. Java
+  class files, which share the fat magic, are not mistaken for them.
+- `erebus build` no longer stages a Linux glibc base (and warns about it)
+  for non-ELF payloads.
+- `verify-evidence --operator-key` accepts the public key hex that
+  `erebus keygen` prints, as well as the `sha256:` fingerprint.
 - `attest --push` also stores the inclusion proof beside the trail entry,
   so trails built with `attest` carry their proofs like `serve --push` ones.
+- Spec and docs: a batch run's `input_hash` covers the launch vector
+  (entrypoint + arguments), not stdin, and `output_hash` needs Linux
+  isolation ≥ 2; the spec claimed stdin. Quickstart trusted-keys path fixed.
+
+### Known gaps (macOS, ROADMAP P1-5)
+
+- The Seatbelt sandbox is not enforced; receipts carry no output digest
+  or exit code. `scripts/macos_slice.sh` reports both as KNOWN GAP; CI
+  runs it on Apple Silicon.
 
 ## [0.6.1] — 2026-09-29 — internal pilot
 

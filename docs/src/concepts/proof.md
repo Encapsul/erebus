@@ -13,7 +13,7 @@ trusts nobody — not the operator, not the machine, not erebus — establish:
 | 1 | **What ran** — exactly this code and these weights, unmodified at launch | `artifact.bundle_hash`, `artifact.payload_hash`, `execution.rootfs_root` (Merkle root of the extracted rootfs, re-checked on every warm start) |
 | 2 | **Where** — on a host whose key was enrolled and certified for a named owner | machine co-signature in the DSSE envelope + registry-signed certificate (`erebus enroll`, `verify-attest --strict`) |
 | 3 | **When** — at a time nobody can backdate | leaf in a public Merkle transparency log, signed checkpoint, RFC 3161 timestamp from an independent TSA (`verify-attest --proof`) |
-| 4 | **With what, producing what** — digests of input and output and the exit code; for a served model, one receipt per inference call with request and response digests | `execution.input_hash`, `execution.output_hash`, `execution.exit_code`, `execution.request` |
+| 4 | **With what, producing what** — for a served model, one receipt per inference call with the SHA-256 of the request and response bodies; for a batch run, the launch arguments, stdout/stderr digests and exit code (stdin is not hashed; output capture needs Linux isolation ≥ 2) | `execution.input_hash`, `execution.output_hash`, `execution.exit_code`, `execution.request` |
 | 5 | **That the trail is intact** — no receipt was deleted, reordered or edited afterwards | `execution.prev_attestation_hash` chain (`verify-attest --chain`) contradicted by the public log if anything changes |
 
 In one sentence: **a flight recorder for AI agents** — non-repudiation of
