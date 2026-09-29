@@ -520,6 +520,9 @@ pilot or LOI beside it (§7.3).
 
 ## 10. Changelog (condensed)
 
+- **0.6.1 (2026-09-29)** — T2 pilot tooling (`serve --push`, `scripts/pilot/`);
+  fixes: `--embed-model` payload staging, cold-start `unshare` EINVAL race,
+  `erebus build` finds the stub shipped with a release install.
 - **0.6.0 (2026-09-28)** — P0-1 `verify-attest` hardening (consistency
   check, `--bundle`, fingerprint); P0-2 hash-chained append-only local trail
   (`<bundle>.attest.d/`, `prev_attestation_hash`, `--chain`); P0-3 attesting

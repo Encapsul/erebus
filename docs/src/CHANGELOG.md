@@ -2,7 +2,7 @@
 
 All notable changes to erebus are documented here.
 
-## [Unreleased] — 0.6.1-dev — internal pilot
+## [0.6.1] — 2026-09-29 — internal pilot
 
 ### Added
 
@@ -27,6 +27,10 @@ All notable changes to erebus are documented here.
   EINVAL. `enter_userns` now waits for `/proc/self/task` to drain and retries
   the unshare; `scripts/chaos_extreme.sh` gained a 40-launch cold-start storm
   that reproduces the window under load.
+- `erebus build` right after a release install: the CLI now finds the
+  `erebus-stub` shipped next to the `erebus` binary (host-target builds).
+  It used to search only source-tree build dirs and `PATH`, and failed with
+  "erebus-stub not found".
 
 ## [0.6.0] — 2026-09-28 — the proof chain
 
