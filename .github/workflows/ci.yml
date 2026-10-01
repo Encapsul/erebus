@@ -217,6 +217,9 @@ jobs:
         run: cargo build --release -p erebus-stub -p erebus-cli
 
       - name: Test erebus-core + erebus-cli
+        env:
+          # cargo test builds a debug CLI; the stub was built --release above.
+          ERE_STUB_PATH: ${{ env.CARGO_TARGET_DIR }}/release/erebus-stub
         run: cargo test -p erebus-core -p erebus-cli
 
       - name: macOS slice

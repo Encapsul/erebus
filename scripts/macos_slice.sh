@@ -155,4 +155,48 @@ out="$(run_agent ./canary.erebus '' 2>&1)"
 grep -q BLOCKED <<<"$out" || die "sandbox lost under capture: $out"
 ok "Seatbelt: canary outside the rootfs blocked (control without --landlock reads it), also under capture"
 
+python3 -c '
+import socket, sys, time
+s = [socket.create_server(("127.0.0.1", 0)) for _ in range(2)]
+open(sys.argv[1], "w").write(" ".join(str(x.getsockname()[1]) for x in s) + "\n")
+time.sleep(300)' "$W/ports" &
+LISTENERS=$!
+trap 'kill $LISTENERS 2>/dev/null; wait $LISTENERS 2>/dev/null; rm -rf "$W"' EXIT
+for _ in $(seq 50); do [[ -s "$W/ports" ]] && break; sleep 0.1; done
+read -r PA PB <"$W/ports"
+cat >"$W/net.c" <<'EOF'
+#include <arpa/inet.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
+static const char *try_port(int port) {
+  int s = socket(AF_INET, SOCK_STREAM, 0);
+  struct sockaddr_in a; memset(&a, 0, sizeof a);
+  a.sin_family = AF_INET; a.sin_port = htons(port); a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  int r = connect(s, (struct sockaddr *)&a, sizeof a); close(s);
+  return r == 0 ? "OK" : "BLOCKED";
+}
+int main(void) { printf("A=%s B=%s\n", try_port(PA), try_port(PB)); return 0; }
+EOF
+mkdir -p net-app && cc -O2 -DPA="$PA" -DPB="$PB" -o net-app/app "$W/net.c"
+ERE_STUB_PATH="$STUB" "$EREBUS" build net-app -o net.erebus >/dev/null 2>&1
+chmod +x net.erebus
+out="$(XDG_CACHE_HOME="$W/cache" ./net.erebus 2>/dev/null)"
+[[ "$out" == "A=OK B=OK" ]] || die "control: unconfined agent could not reach both listeners: $out"
+out="$(ERE_EGRESS="$PA" XDG_CACHE_HOME="$W/cache" ./net.erebus 2>/dev/null)"
+[[ "$out" == "A=OK B=BLOCKED" ]] || die "egress: agent reached a port outside ERE_EGRESS: $out"
+out="$(ERE_EGRESS="$PA" run_agent ./net.erebus '' 2>/dev/null)"
+[[ "$out" == "A=OK B=BLOCKED" ]] || die "egress lost under capture: $out"
+python3 - net.erebus.attest "$PA" <<'EOF' || die "egress policy not signed"
+import json, sys
+e = json.load(open(sys.argv[1]))["statement"]["predicate"]["execution"]
+assert e["egress"] == {"tcp_ports": [int(sys.argv[2])], "scope": "loopback"}, e.get("egress")
+EOF
+if out="$(ERE_EGRESS="all" XDG_CACHE_HOME="$W/cache" ./net.erebus 2>&1)"; then
+  die "invalid ERE_EGRESS ran unconfined: $out"
+fi
+grep -q "bad egress policy, refusing to run" <<<"$out" || die "unexpected egress refusal: $out"
+ok "egress: only the ERE_EGRESS port reachable (control reaches both), signed in the receipt, invalid policy refused"
+
 echo "VERDICT: macOS slice OK ($PASS checks)"

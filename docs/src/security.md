@@ -170,6 +170,10 @@ Blocked: ptrace, mount, umount2, pivot_root, reboot, kexec_load,
 
 **Graceful degradation:** If seccomp is unavailable (kernel without `CONFIG_SECCOMP`, container that blocks `prctl`), the launcher prints a warning and continues without the filter. Isolation is defense-in-depth, not the primary security boundary.
 
+**macOS has no equivalent.** There is no public syscall-filter API on macOS: Seatbelt (`sandbox_init`) filters operations (file, network, IPC), not syscalls, and Endpoint Security needs an Apple entitlement and root and authorizes events rather than filtering syscalls. On macOS the launcher therefore applies Seatbelt for the filesystem (`--landlock`) and for egress (`ERE_EGRESS`) only.
+
+**Egress confinement (`ERE_EGRESS`).** `ERE_EGRESS=PORT[,PORT…]` (or `none`) limits the payload's outbound TCP to those ports, typically the port of an `erebus attest-tool http` boundary so that tools are reachable only through it. macOS: Seatbelt, `localhost:<port>` only. Linux 6.7+: Landlock `CONNECT_TCP` port rules (any address) plus a seccomp filter refusing UDP, raw and packet sockets, TCP Fast Open (which connects from `sendto` and bypasses Landlock's connect check) and `io_uring`. Unlike the filter above it never degrades: an invalid value or an older kernel refuses the launch. The enforced policy is signed in the receipt as `execution.egress`. Unix-domain sockets and processes the payload spawns over stdio are not confined.
+
 ## 6. Payload encryption — AES-256-GCM
 
 **Attack:** A `.erebus` file is intercepted at rest (stolen laptop, shared storage, leaked artifact). Without encryption, anyone can extract the embedded application with `tar` after stripping the stub.

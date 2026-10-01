@@ -56,6 +56,9 @@ pub enum AnomalyKind {
     ResultNotFromTool,
     /// With tool trails: a tool executed a call the engine never issued.
     ExecutionWithoutCall,
+    /// With tool trails: the tool signed this call's id but ran another tool
+    /// name or other arguments than the engine asked for.
+    ExecutionAltered,
 }
 
 impl AnomalyKind {
@@ -63,7 +66,10 @@ impl AnomalyKind {
     pub fn is_execution(self) -> bool {
         matches!(
             self,
-            Self::ResultWithoutExecution | Self::ResultNotFromTool | Self::ExecutionWithoutCall
+            Self::ResultWithoutExecution
+                | Self::ResultNotFromTool
+                | Self::ExecutionWithoutCall
+                | Self::ExecutionAltered
         )
     }
 }
@@ -99,6 +105,11 @@ pub struct ExecutionReport {
     pub verbatim: usize,
     /// Issued calls no tool receipt matches.
     pub not_executed: usize,
+    /// Calls resolved through the id the tool signed (`call_id`) rather
+    /// than by arguments alone.
+    pub bound: usize,
+    /// Bound calls the tool ran with another name or other arguments.
+    pub altered: usize,
     /// Calls or tool receipts without canonical arguments (non-JSON, partial
     /// extraction): cannot be matched either way.
     pub unverifiable: usize,
@@ -132,6 +143,55 @@ pub struct LinkageReport {
     /// Present when tool trails were linked (`--tool-trail`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution: Option<ExecutionReport>,
+}
+
+/// The tool receipt an issued call resolves to.
+enum Found {
+    /// The tool signed this call's id (`tool_invocation.call_id`).
+    Bound(usize),
+    /// Unbound receipt with the same name and canonical arguments.
+    Matched(usize),
+    /// No canonical arguments and no bound receipt: cannot be decided.
+    Unverifiable,
+    None,
+}
+
+/// A receipt bound to the call's id wins; otherwise the first unused
+/// *unbound* receipt with the same arguments and name. A bound receipt is
+/// never matched to another id: that is what makes identical calls
+/// distinguishable.
+fn find_execution(call: &ToolCall, executions: &[ToolExecution], used: &[bool]) -> Found {
+    let free = |i: &usize| !used[*i];
+    let bound = call.id.as_deref().and_then(|id| {
+        (0..executions.len())
+            .filter(free)
+            .find(|i| executions[*i].invocation.call_id.as_deref() == Some(id))
+    });
+    if let Some(i) = bound {
+        return Found::Bound(i);
+    }
+    let Some(want) = call.arguments_jcs_hash.as_deref() else {
+        return Found::Unverifiable;
+    };
+    (0..executions.len())
+        .filter(free)
+        .find(|i| {
+            let inv = &executions[*i].invocation;
+            inv.call_id.is_none() && same_args_and_name(call, inv, want)
+        })
+        .map_or(Found::None, Found::Matched)
+}
+
+fn same_args_and_name(call: &ToolCall, inv: &ToolInvocation, want: &str) -> bool {
+    inv.arguments_jcs_hash.as_deref() == Some(want)
+        && inv.name.as_deref().is_none_or(|n| n == call.name)
+}
+
+/// The tool ran exactly what the model asked for.
+fn same_call(call: &ToolCall, inv: &ToolInvocation) -> bool {
+    call.arguments_jcs_hash
+        .as_deref()
+        .is_some_and(|want| same_args_and_name(call, inv, want))
 }
 
 struct Issued {
@@ -220,39 +280,72 @@ impl Linker {
         };
         let mut used = vec![false; executions.len()];
         for (receipt, call) in std::mem::take(&mut self.instances) {
-            let Some(want) = call.arguments_jcs_hash.as_deref() else {
-                out.unverifiable = out.unverifiable.saturating_add(1);
-                continue;
-            };
-            let found = executions.iter().enumerate().position(|(i, e)| {
-                !used[i]
-                    && e.invocation.arguments_jcs_hash.as_deref() == Some(want)
-                    && e.invocation.name.as_deref().is_none_or(|n| n == call.name)
-            });
-            match found {
-                Some(i) => {
+            match find_execution(&call, executions, &used) {
+                Found::Bound(i) if call.arguments_jcs_hash.is_none() => {
                     used[i] = true;
-                    out.executed = out.executed.saturating_add(1);
-                    if self.result_is_verbatim(&call, &executions[i], receipt) {
-                        out.verbatim = out.verbatim.saturating_add(1);
-                    }
+                    out.unverifiable = out.unverifiable.saturating_add(1);
                 }
-                None => {
+                Found::Bound(i) if !same_call(&call, &executions[i].invocation) => {
+                    used[i] = true;
+                    self.altered(&call, executions[i].receipt, receipt, &mut out);
+                }
+                Found::Bound(i) | Found::Matched(i) => {
+                    used[i] = true;
+                    if executions[i].invocation.call_id.is_some() {
+                        out.bound = out.bound.saturating_add(1);
+                    }
+                    self.executed(&call, &executions[i], receipt, &mut out);
+                }
+                Found::Unverifiable => out.unverifiable = out.unverifiable.saturating_add(1),
+                Found::None => {
                     out.not_executed = out.not_executed.saturating_add(1);
                     self.check_unexecuted_result(&call, receipt);
                 }
             }
         }
-        for (e, _) in executions.iter().zip(&used).filter(|(_, u)| !**u) {
-            if e.invocation.arguments_jcs_hash.is_none() || self.responses_incomplete {
+        self.flag_unused(executions, &used, &mut out);
+        out
+    }
+
+    fn altered(&mut self, call: &ToolCall, tool: usize, receipt: usize, out: &mut ExecutionReport) {
+        out.bound = out.bound.saturating_add(1);
+        out.altered = out.altered.saturating_add(1);
+        let (kind, id) = (AnomalyKind::ExecutionAltered, call.id.clone());
+        self.flag_at(receipt, kind, id, Some(&call.name), Some(tool));
+    }
+
+    fn executed(
+        &mut self,
+        call: &ToolCall,
+        exec: &ToolExecution,
+        receipt: usize,
+        out: &mut ExecutionReport,
+    ) {
+        out.executed = out.executed.saturating_add(1);
+        if self.result_is_verbatim(call, exec, receipt) {
+            out.verbatim = out.verbatim.saturating_add(1);
+        }
+    }
+
+    /// Tool receipts no issued call accounts for.
+    fn flag_unused(
+        &mut self,
+        executions: &[ToolExecution],
+        used: &[bool],
+        out: &mut ExecutionReport,
+    ) {
+        for (e, _) in executions.iter().zip(used).filter(|(_, u)| !**u) {
+            let inv = &e.invocation;
+            // A bound id is a claim on its own, even without readable arguments.
+            let matchable = inv.arguments_jcs_hash.is_some() || inv.call_id.is_some();
+            if !matchable || self.responses_incomplete {
                 out.unverifiable = out.unverifiable.saturating_add(1);
             } else {
                 let id = Some(format!("tool#{}", e.receipt));
                 let kind = AnomalyKind::ExecutionWithoutCall;
-                self.flag_at(0, kind, id, e.invocation.name.as_deref(), Some(e.receipt));
+                self.flag_at(0, kind, id, inv.name.as_deref(), Some(e.receipt));
             }
         }
-        out
     }
 
     /// The fed-back result of `call`, if any.
@@ -571,6 +664,88 @@ mod tests {
 
     fn result_of(id: &str, content: &str) -> ToolResult {
         result(id, content)
+    }
+
+    fn bound(mut e: ToolExecution, id: &str) -> ToolExecution {
+        e.invocation.call_id = Some(id.to_string());
+        e
+    }
+
+    /// Two identical calls answered differently, executed in reverse order.
+    fn twin_calls() -> Vec<RequestInfo> {
+        let (a, b) = (
+            call("call_a", "get_weather", "a1"),
+            call("call_b", "get_weather", "a1"),
+        );
+        vec![
+            turn(vec![], vec![], vec![a.clone(), b.clone()]),
+            turn(
+                vec![a, b],
+                vec![result_of("call_a", "18C"), result_of("call_b", "35C")],
+                vec![],
+            ),
+        ]
+    }
+
+    #[test]
+    fn identical_calls_are_told_apart_only_by_the_signed_call_id() {
+        let tools = || {
+            [
+                exec(1, Some("get_weather"), "a1", "35C"),
+                exec(2, Some("get_weather"), "a1", "18C"),
+            ]
+        };
+        // Arguments alone pair them in order and wrongly accuse the agent.
+        let unbound = link_with(&twin_calls(), tools().to_vec());
+        assert!(
+            kinds(&unbound).contains(&(1, AnomalyKind::ResultNotFromTool)),
+            "{unbound:?}"
+        );
+        let [first, second] = tools();
+        let r = link_with(
+            &twin_calls(),
+            vec![bound(first, "call_b"), bound(second, "call_a")],
+        );
+        assert!(r.anomalies.is_empty(), "{r:?}");
+        let e = r.execution.unwrap();
+        assert_eq!((e.executed, e.verbatim, e.bound, e.altered), (2, 2, 2, 0));
+    }
+
+    #[test]
+    fn a_bound_execution_with_other_arguments_is_an_altered_call() {
+        let tampered = bound(exec(1, Some("get_weather"), "evil", "18C"), "call_w");
+        let r = link_with(&agent_loop("18C"), vec![tampered]);
+        assert_eq!(kinds(&r), vec![(1, AnomalyKind::ExecutionAltered)], "{r:?}");
+        assert_eq!(r.anomalies[0].tool_receipt, Some(1));
+        let e = r.execution.unwrap();
+        assert_eq!((e.executed, e.altered, e.bound), (0, 1, 1));
+        // A bound execution is never reused for another id.
+        let other = bound(exec(1, Some("get_weather"), "a1", "18C"), "call_zzz");
+        let r = link_with(&agent_loop("18C"), vec![other]);
+        assert_eq!(
+            kinds(&r),
+            vec![
+                (1, AnomalyKind::ResultWithoutExecution),
+                (0, AnomalyKind::ExecutionWithoutCall)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bound_call_with_non_canonical_arguments_is_unverifiable_not_altered() {
+        let w = ToolCall {
+            arguments_jcs_hash: None,
+            ..call("call_w", "get_weather", "a1")
+        };
+        let turns = [
+            turn(vec![], vec![], vec![w.clone()]),
+            turn(vec![w], vec![result_of("call_w", "18C")], vec![]),
+        ];
+        let tool = bound(exec(1, Some("get_weather"), "a1", "18C"), "call_w");
+        let r = link_with(&turns, vec![tool]);
+        assert!(r.anomalies.is_empty(), "{r:?}");
+        let e = r.execution.unwrap();
+        assert_eq!((e.executed, e.unverifiable, e.altered), (0, 1, 0));
     }
 
     #[test]

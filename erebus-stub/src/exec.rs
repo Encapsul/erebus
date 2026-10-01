@@ -721,15 +721,47 @@ fn relay_exit_status(status: libc::c_int) -> io::Result<()> {
     std::process::exit(128 + 1)
 }
 
-/// Seatbelt for `--landlock` bundles; fail-closed like Landlock on Linux.
-#[cfg(target_os = "macos")]
-fn apply_macos_sandbox(rootfs: &Path) -> io::Result<()> {
-    crate::macos_sandbox::apply_sandbox(rootfs).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("seatbelt unavailable, refusing to run without filesystem sandbox: {e}"),
-        )
-    })
+/// Last confinement before exec, fail-closed: Seatbelt on macOS (filesystem
+/// for `--landlock` bundles, egress for `ERE_EGRESS`), the egress ruleset on
+/// Linux (the filesystem sandbox is installed with the pivot).
+#[cfg(unix)]
+fn apply_launch_confinement(rootfs: &Path, meta: &Metadata) -> io::Result<()> {
+    let refuse = |what: &str, e: io::Error| {
+        io::Error::new(e.kind(), format!("{what}, refusing to run: {e}"))
+    };
+    let egress = crate::egress::Policy::from_env().map_err(|e| refuse("bad egress policy", e))?;
+    #[cfg(target_os = "macos")]
+    if meta.landlock || egress.is_some() {
+        let ports = egress.as_ref().map(|p| p.ports.as_slice());
+        crate::macos_sandbox::apply_sandbox(meta.landlock.then_some(rootfs), ports)
+            .map_err(|e| refuse("seatbelt sandbox unavailable", e))?;
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(policy) = &egress {
+        let _ = (rootfs, meta);
+        policy
+            .prepare()
+            .apply()
+            .map_err(|e| refuse("egress confinement unavailable", e))?;
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    if egress.is_some() {
+        let _ = (rootfs, meta);
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "ERE_EGRESS cannot be enforced on this platform, refusing to run",
+        ));
+    }
+    Ok(())
+}
+
+/// The egress policy the launch enforces, as the receipt signs it.
+#[cfg(unix)]
+fn signed_egress() -> Option<erebus_core::attest::EgressPolicy> {
+    crate::egress::Policy::from_env()
+        .ok()
+        .flatten()
+        .map(|p| p.signed())
 }
 
 /// Whether behavior capture is requested (opt-in) via `ERE_ATTEST_KEY`.
@@ -1068,6 +1100,7 @@ fn exec_app_captured(
             request: None,
             rootfs_root: rootfs_root_of(rootfs),
             stdin_hash,
+            egress: signed_egress(),
         };
         let phase = format!(
             "updated (exit {})",
@@ -1191,10 +1224,8 @@ pub fn exec_app(
     // supervisor fork); the parent already spawned its own inside the branch.
     crate::health_gate::maybe_start_health(meta);
 
-    #[cfg(target_os = "macos")]
-    if meta.landlock {
-        apply_macos_sandbox(rootfs)?;
-    }
+    #[cfg(unix)]
+    apply_launch_confinement(rootfs, meta)?;
 
     // ── Platform-specific argv build + process launch ─────────────────────
     #[cfg(unix)]
@@ -1382,6 +1413,8 @@ fn write_auto_attestation_if_requested(bin_path: &Path, rootfs: &Path) {
     };
     let capture = erebus_core::attest::ExecutionCapture {
         rootfs_root: rootfs_root_of(rootfs),
+        #[cfg(unix)]
+        egress: signed_egress(),
         ..Default::default()
     };
     write_receipt_or_warn(bin_path, &key_path, &out_path, &capture, "written");
@@ -1584,10 +1617,7 @@ pub fn supervise_services(
         enter_pivot_sandbox(rootfs, meta)?;
     }
 
-    #[cfg(target_os = "macos")]
-    if meta.landlock {
-        apply_macos_sandbox(rootfs)?;
-    }
+    apply_launch_confinement(rootfs, meta)?;
 
     let base_env = setup_env(meta, rootfs, use_pivot, None, app_config)?;
     let resolve = make_resolve(rootfs, use_pivot);
@@ -1893,12 +1923,9 @@ mod tests {
     use super::*;
     use crate::config::DatabaseConfig;
     #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
+    use crate::FORK_TEST_LOCK;
     #[cfg(unix)]
-    use std::sync::Mutex;
-
-    /// Serializes fork-based tests (see `wait_for_children` docs).
-    static FORK_TEST_LOCK: Mutex<()> = Mutex::new(());
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn make_resolve_returns_absolute_when_pivot() {

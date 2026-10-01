@@ -26,7 +26,7 @@ mod arch_consts {
 }
 
 #[cfg(target_os = "linux")]
-use arch_consts::AUDIT_ARCH;
+pub(crate) use arch_consts::AUDIT_ARCH;
 
 /// Install a seccomp-bpf denylist (backward compatible — no capabilities).
 ///

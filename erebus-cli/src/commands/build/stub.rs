@@ -7,11 +7,12 @@ use super::args::parse_target;
 ///
 /// Search order:
 /// 1. `ERE_STUB_PATH` env var (explicit override)
-/// 2. `target/<triple>/release/erebus-stub` (workspace build)
-/// 3. `/tmp/erebus-stub-target/<triple>/release/erebus-stub` (AGENTS.md path)
-/// 4. `stub/target/<triple>/release/erebus-stub` (legacy layout)
-/// 5. `erebus-stub` next to the running `erebus` (release archive), host target only
-/// 6. `which erebus-stub` (system install, with warning)
+/// 2. Host-native `target/release|debug/erebus-stub` (when building for the host)
+/// 3. `target/<triple>/release/erebus-stub` (cross / musl workspace build)
+/// 4. `/tmp/erebus-stub-target/...` (AGENTS.md / CI `CARGO_TARGET_DIR`)
+/// 5. `stub/target/<triple>/release/erebus-stub` (legacy layout)
+/// 6. `erebus-stub` next to the running `erebus` (release archive), host only
+/// 7. `which erebus-stub` (system install, with warning)
 pub(crate) fn find_stub(target: &Option<String>) -> Result<PathBuf> {
     if let Ok(path) = std::env::var("ERE_STUB_PATH") {
         let p = PathBuf::from(path);
@@ -21,17 +22,18 @@ pub(crate) fn find_stub(target: &Option<String>) -> Result<PathBuf> {
     }
 
     let target_dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".into());
-
+    let host = targets_host(target);
     let is_windows = target
         .as_deref()
-        .is_some_and(|t| parse_target(t).1 == "windows");
+        .is_some_and(|t| parse_target(t).1 == "windows")
+        || (target.is_none() && cfg!(windows));
 
     let arch_suffix = match target.as_deref().map(parse_target) {
         Some((arch, os)) if os == "linux" => format!("{arch}-unknown-linux-musl"),
         Some((arch, os)) if os == "darwin" => format!("{arch}-apple-darwin"),
         Some((arch, os)) if os == "windows" => format!("{arch}-pc-windows-gnu"),
         Some((arch, _)) => format!("{arch}-unknown-linux-musl"),
-        None => String::from("x86_64-unknown-linux-musl"),
+        None => host_stub_triple(),
     };
 
     let stub_name = if is_windows {
@@ -39,7 +41,21 @@ pub(crate) fn find_stub(target: &Option<String>) -> Result<PathBuf> {
     } else {
         "erebus-stub"
     };
-    let candidates = [
+
+    let mut candidates = Vec::new();
+    // A host-native `cargo build -p erebus-stub` (no --target) lands here —
+    // that is what the macOS CI job and `macos_slice.sh` produce.
+    if host {
+        for profile in ["release", "debug"] {
+            candidates.push(PathBuf::from(&target_dir).join(profile).join(stub_name));
+            candidates.push(
+                PathBuf::from("/tmp/erebus-stub-target")
+                    .join(profile)
+                    .join(stub_name),
+            );
+        }
+    }
+    candidates.extend([
         PathBuf::from(&target_dir)
             .join(&arch_suffix)
             .join("release")
@@ -52,7 +68,7 @@ pub(crate) fn find_stub(target: &Option<String>) -> Result<PathBuf> {
             .join(&arch_suffix)
             .join("release")
             .join(stub_name),
-    ];
+    ]);
 
     for candidate in &candidates {
         if candidate.exists() {
@@ -60,7 +76,7 @@ pub(crate) fn find_stub(target: &Option<String>) -> Result<PathBuf> {
         }
     }
 
-    if targets_host(target) {
+    if host {
         if let Some(p) = sibling_stub(stub_name) {
             return Ok(p);
         }
@@ -80,6 +96,17 @@ pub(crate) fn find_stub(target: &Option<String>) -> Result<PathBuf> {
     )
 }
 
+/// Triple directory where a host stub is usually built (`make stub` → musl
+/// on Linux; native Darwin/Windows otherwise).
+fn host_stub_triple() -> String {
+    let arch = std::env::consts::ARCH;
+    match std::env::consts::OS {
+        "macos" => format!("{arch}-apple-darwin"),
+        "windows" => format!("{arch}-pc-windows-gnu"),
+        _ => format!("{arch}-unknown-linux-musl"),
+    }
+}
+
 /// Release archives ship `erebus-stub` beside `erebus`; that stub is built
 /// for the host only, so it is a valid candidate only when building for it.
 fn targets_host(target: &Option<String>) -> bool {
@@ -96,8 +123,20 @@ fn targets_host(target: &Option<String>) -> bool {
 fn sibling_stub(stub_name: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
-    let p = exe.parent()?.join(stub_name);
-    p.is_file().then_some(p)
+    let parent = exe.parent()?;
+    let beside = parent.join(stub_name);
+    if beside.is_file() {
+        return Some(beside);
+    }
+    // `cargo test` runs the debug CLI after a release stub build: look one
+    // profile up (`…/debug/erebus` → `…/release/erebus-stub`).
+    if parent.file_name().is_some_and(|n| n == "debug") {
+        let release = parent.parent()?.join("release").join(stub_name);
+        if release.is_file() {
+            return Some(release);
+        }
+    }
+    None
 }
 
 /// Read `app_hash` and `rt_deps_hash` from an existing `.erebus` file's metadata.
@@ -119,7 +158,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn find_stub_default_is_x86_64() {
+    fn host_stub_triple_matches_this_platform() {
+        let t = host_stub_triple();
+        assert!(t.starts_with(std::env::consts::ARCH), "{t}");
+        if cfg!(target_os = "macos") {
+            assert!(t.ends_with("-apple-darwin"), "{t}");
+        } else if cfg!(windows) {
+            assert!(t.ends_with("-pc-windows-gnu"), "{t}");
+        } else {
+            assert!(t.ends_with("-unknown-linux-musl"), "{t}");
+        }
+    }
+
+    #[test]
+    fn find_stub_default_does_not_panic() {
         let result = find_stub(&None);
         assert!(result.is_err() || result.is_ok(), "should not panic");
     }

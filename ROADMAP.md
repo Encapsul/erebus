@@ -379,11 +379,20 @@ one. Same rule as P0: done only when the acceptance test runs in CI.
   exit 2). Acceptance: e2e
   `tool_boundary_proves_calls_were_executed_and_results_relayed_verbatim`
   (real `serve` + MCP stdio server + HTTP tool: honest loop 2/2 executed
-  and verbatim; withheld trail, lying tool and rogue run → exit 2), each
-  detector mutation-checked. Remaining boundary: what crossed the boundary
-  is proven, not the tool's effect on the outside world, and a tool called
-  around the boundary is only seen through `result_without_execution`
-  (spec §8).
+  and verbatim; withheld trail, lying tool, rogue run and a call executed
+  with altered arguments → exit 2), each detector mutation-checked. Call-id
+  binding (`_meta["dev.erebus/call_id"]` / `Erebus-Call-Id` → signed
+  `call_id`) disambiguates identical calls and reports
+  `execution_altered`. `--tool-trusted-dir` verifies tool trails with the
+  tool operator's own keys (disjoint from the agent's; a tool trail forged
+  with the agent key is refused). `ERE_EGRESS` confines the payload's
+  outbound TCP to the boundary port (macOS: localhost only; Linux 6.7+:
+  port only, UDP/TFO/io_uring refused; older kernels refuse to launch) and
+  signs it. Remaining boundary: what crossed the boundary
+  is proven, not the tool's effect on the outside world; without
+  `ERE_EGRESS` a tool called around the boundary is only seen through
+  `result_without_execution`, and with it Unix sockets, stdio subprocesses
+  and (Linux) other hosts on an allowed port stay open (spec §8).
 - [ ] **R3 Stop receipts** — Klaimee: "its stop button doesn't stop it".
   `serve` / the stub sign a final receipt on SIGTERM with the time the stop
   was requested and the time the process group was reaped (or `kill
@@ -694,7 +703,13 @@ companies as T3, audit firms as T4), not just a competitor list.
 - VPS disk chronically tight; purge `target/`, `~/.cache/erebus` before
   heavy builds. qemu-user: `unshare` → EINVAL (test ARM with
   `--isolation none`). Wine < 7 lacks WMI. macOS: Seatbelt confines the
-  filesystem only (no syscall filter like seccomp). `serve`: encrypted and squashfs bundles unsupported.
+  filesystem (`--landlock`) and outbound network (`ERE_EGRESS`), but there
+  is no syscall filter like seccomp: macOS has no public API for one
+  (Endpoint Security observes and authorizes events, it needs an Apple
+  entitlement and root, and does not filter arbitrary syscalls), so the
+  seccomp layer has no macOS equivalent. Linux egress needs 6.7+ (Landlock
+  ABI 4) and refuses to launch below. `serve`: encrypted and squashfs
+  bundles unsupported.
 
 ### Measured
 - FastCDC ~390 MB/s, SHA-256 ~50 MB/s (i5-7300U). 100 MB payload, 1 %

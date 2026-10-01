@@ -14,8 +14,9 @@
 //!
 //! The home directory, `/private/var/folders` (per-user temp), `/tmp`,
 //! `/Volumes` and every other path are unreadable. Metadata (`stat`) stays
-//! readable, and network, IPC and process operations are not restricted —
-//! like Landlock, this confines the filesystem only.
+//! readable. With `ERE_EGRESS` (see `egress`) the same profile also limits
+//! outbound connections to `localhost:<port>` (Unix sockets stay open);
+//! IPC and process operations are not restricted.
 //!
 //! `sandbox_init` with SBPL text is a deprecated but supported API (it backs
 //! `sandbox-exec`). Failure is fatal: a bundle that asked for a filesystem
@@ -62,17 +63,36 @@ fn sbpl_string(s: &str) -> String {
     out
 }
 
-/// The Seatbelt profile confining the payload to `rootfs` and `tmp`.
-/// Both must be canonical: Seatbelt matches resolved paths (`/private/var`,
-/// never the `/var` symlink).
-pub fn profile(rootfs: &Path, tmp: &Path) -> String {
+/// The Seatbelt profile: filesystem confinement to `fs = (rootfs, tmp)`
+/// and/or outbound connections only to `localhost:<port>` for each egress
+/// port. Paths must be canonical: Seatbelt matches resolved paths
+/// (`/private/var`, never the `/var` symlink).
+pub fn profile(fs: Option<(&Path, &Path)>, egress: Option<&[u16]>) -> String {
+    let mut out = String::from("(version 1)\n(allow default)\n");
+    if let Some((rootfs, tmp)) = fs {
+        out.push_str(&fs_rules(rootfs, tmp));
+    }
+    if let Some(ports) = egress {
+        let remotes: Vec<String> = ports
+            .iter()
+            .map(|p| format!("(remote ip \"localhost:{p}\")"))
+            .collect();
+        out.push_str(&format!(
+            "(deny network-outbound)\n(allow network-outbound (remote unix-socket) {})\n",
+            remotes.join(" ")
+        ));
+    }
+    out
+}
+
+fn fs_rules(rootfs: &Path, tmp: &Path) -> String {
     let sub = |p: &str| format!("(subpath {})", sbpl_string(p));
     let lit = |p: &str| format!("(literal {})", sbpl_string(p));
     let own = [rootfs, tmp].map(|p| sub(&p.to_string_lossy()));
     let reads: Vec<String> = SYSTEM_READ.iter().map(|p| sub(p)).collect();
     let devices: Vec<String> = DEVICE_WRITE.iter().map(|p| lit(p)).collect();
     format!(
-        "(version 1)\n(allow default)\n(deny file-read-data file-write*)\n\
+        "(deny file-read-data file-write*)\n\
          (allow file-read-data {} {} {})\n(allow file-write* {} {})\n",
         lit("/"),
         reads.join(" "),
@@ -91,15 +111,27 @@ fn private_tmp(rootfs: &Path) -> io::Result<PathBuf> {
     tmp.canonicalize()
 }
 
-/// Confine this process (and the payload it is about to exec) to the
-/// rootfs. Sets `TMPDIR` to the private temp directory.
-pub fn apply_sandbox(rootfs: &Path) -> io::Result<()> {
-    let root = rootfs.canonicalize()?;
-    let tmp = private_tmp(&root)?;
-    let text = CString::new(profile(&root, &tmp))
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL byte in rootfs path"))?;
+/// Confine this process (and the payload it is about to exec): to the
+/// rootfs when `rootfs` is given (setting `TMPDIR` to the private temp
+/// directory), to the egress ports when `egress` is given. One profile:
+/// Seatbelt profiles cannot be installed twice.
+pub fn apply_sandbox(rootfs: Option<&Path>, egress: Option<&[u16]>) -> io::Result<()> {
+    let fs = rootfs
+        .map(|r| {
+            let root = r.canonicalize()?;
+            let tmp = private_tmp(&root)?;
+            Ok::<_, io::Error>((root, tmp))
+        })
+        .transpose()?;
+    let text = CString::new(profile(
+        fs.as_ref().map(|(r, t)| (r.as_path(), t.as_path())),
+        egress,
+    ))
+    .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL byte in rootfs path"))?;
     install(&text)?;
-    std::env::set_var("TMPDIR", &tmp);
+    if let Some((_, tmp)) = &fs {
+        std::env::set_var("TMPDIR", tmp);
+    }
     Ok(())
 }
 
@@ -137,9 +169,13 @@ mod tests {
     #[test]
     fn profile_quotes_paths_and_scopes_writes_to_owned_trees() {
         let p = profile(
-            Path::new("/private/x/ro\"o\\t"),
-            Path::new("/private/x/tmp"),
+            Some((
+                Path::new("/private/x/ro\"o\\t"),
+                Path::new("/private/x/tmp"),
+            )),
+            None,
         );
+        assert!(!p.contains("network"), "no egress rules unless asked: {p}");
         assert!(p.contains(r#"(subpath "/private/x/ro\"o\\t")"#), "{p}");
         assert!(p.contains("(deny file-read-data file-write*)"));
         let writes = p
@@ -157,6 +193,9 @@ mod tests {
     /// unconfined: inside the rootfs is readable, a file beside it is not.
     #[test]
     fn seatbelt_blocks_reads_outside_the_rootfs() {
+        let _guard = crate::FORK_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         let rootfs = dir.path().join("rootfs");
         std::fs::create_dir_all(&rootfs).unwrap();
@@ -173,11 +212,46 @@ mod tests {
         );
         let out = std::process::Command::new("sandbox-exec")
             .arg("-p")
-            .arg(profile(&root, &tmp))
+            .arg(profile(Some((&root, &tmp)), None))
             .args(["/bin/sh", "-c", &script])
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert_eq!(stdout, "insideBLOCKED\nTMP-OK\n", "{out:?}");
+    }
+
+    /// The real kernel check for `ERE_EGRESS`: the listed loopback port
+    /// connects, another loopback port and a public address do not.
+    #[test]
+    fn seatbelt_limits_egress_to_the_listed_localhost_ports() {
+        let _guard = crate::FORK_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let a = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let b = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let (pa, pb) = (
+            a.local_addr().unwrap().port(),
+            b.local_addr().unwrap().port(),
+        );
+        let probe = |port: String, host: &str| {
+            format!("/usr/bin/nc -z -G 2 {host} {port} 2>/dev/null && echo OPEN || echo CLOSED")
+        };
+        let script = [
+            probe(pa.to_string(), "127.0.0.1"),
+            probe(pb.to_string(), "127.0.0.1"),
+            probe("443".into(), "1.1.1.1"),
+        ]
+        .join("; ");
+        let run = |p: String| {
+            let out = std::process::Command::new("sandbox-exec")
+                .args(["-p", &p, "/bin/sh", "-c", &script])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).replace('\n', " ")
+        };
+        assert_eq!(run(profile(None, Some(&[pa]))), "OPEN CLOSED CLOSED ");
+        assert_eq!(run(profile(None, Some(&[]))), "CLOSED CLOSED CLOSED ");
+        // Control: the same probes unconfined reach both local listeners.
+        assert!(run(profile(None, None)).starts_with("OPEN OPEN "));
     }
 }

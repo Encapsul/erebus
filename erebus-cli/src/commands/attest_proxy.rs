@@ -301,6 +301,7 @@ impl Relay {
             target,
             status,
             request_encoding: req.header("Content-Encoding"),
+            call_id: req.header(tool_exec::CALL_ID_HEADER),
             request_body: &req_body,
         };
         Ok(Some(exchange.summarize(body.finish())))
@@ -314,6 +315,7 @@ struct Exchange<'a> {
     target: String,
     status: Option<u16>,
     request_encoding: Option<&'a str>,
+    call_id: Option<&'a str>,
     request_body: &'a [u8],
 }
 
@@ -329,11 +331,12 @@ impl Exchange<'_> {
             ),
             ProxyMode::Tool => (
                 RequestToolReport::default(),
-                tool_exec::from_http_exchange(
-                    self.request_body,
-                    observed.body.as_deref(),
-                    self.status,
-                ),
+                tool_exec::from_http_exchange(&tool_exec::HttpExchange {
+                    request: self.request_body,
+                    response: observed.body.as_deref(),
+                    status: self.status,
+                    call_id_header: self.call_id,
+                }),
             ),
         };
         CallSummary {

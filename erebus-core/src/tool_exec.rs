@@ -41,6 +41,25 @@ pub struct ToolInvocation {
     /// Part of the exchange could not be read: fields may be missing.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub incomplete: bool,
+    /// The engine call id the agent declared it was executing
+    /// ([`CALL_ID_META`] / [`CALL_ID_HEADER`]). Lets the verifier tell
+    /// identical calls apart and prove a call ran with altered arguments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+}
+
+/// MCP `params._meta` key carrying the engine call id (reverse-DNS prefix,
+/// as MCP reserves for implementation metadata).
+pub const CALL_ID_META: &str = "dev.erebus/call_id";
+
+/// HTTP request header carrying the engine call id for plain HTTP tools.
+pub const CALL_ID_HEADER: &str = "Erebus-Call-Id";
+
+/// A declared call id, if it is a usable label.
+fn call_id_label(s: Option<&str>) -> Option<String> {
+    s.map(str::trim)
+        .filter(|s| !s.is_empty() && s.len() <= MAX_LABEL)
+        .map(str::to_string)
 }
 
 /// `sha256:` of raw bytes.
@@ -77,11 +96,16 @@ pub fn mcp_tool_call(request: &[u8]) -> Option<(Value, ToolInvocation)> {
         .and_then(Value::as_str)
         .filter(|n| !n.is_empty() && n.len() <= MAX_LABEL);
     let arguments_jcs_hash = canonical_arguments_digest(params.and_then(|p| p.get("arguments")));
+    let call_id = params
+        .and_then(|p| p.get("_meta"))
+        .and_then(|m| m.get(CALL_ID_META))
+        .and_then(Value::as_str);
     let invocation = ToolInvocation {
         protocol: "mcp".to_string(),
         incomplete: name.is_none() || arguments_jcs_hash.is_none(),
         name: name.map(str::to_string),
         arguments_jcs_hash,
+        call_id: call_id_label(call_id),
         ..ToolInvocation::default()
     };
     Some((id, invocation))
@@ -214,24 +238,35 @@ pub fn http_invocation(
         is_error: status.is_none_or(|s| s >= 400),
         incomplete: response.is_none(),
         result_hashes,
+        call_id: None,
     }
+}
+
+/// One HTTP exchange in front of a tool, as the boundary relayed it.
+pub struct HttpExchange<'a> {
+    pub request: &'a [u8],
+    pub response: Option<&'a [u8]>,
+    pub status: Option<u16>,
+    /// Value of the [`CALL_ID_HEADER`] request header.
+    pub call_id_header: Option<&'a str>,
 }
 
 /// The invocation of one HTTP exchange in front of a tool: MCP when the
 /// request is JSON-RPC (`None` unless it is a `tools/call`), plain HTTP
-/// otherwise.
-pub fn from_http_exchange(
-    request: &[u8],
-    response: Option<&[u8]>,
-    status: Option<u16>,
-) -> Option<ToolInvocation> {
-    if !is_json_rpc(request) {
-        return Some(http_invocation(request, response, status));
-    }
-    let (id, mut invocation) = mcp_tool_call(request)?;
-    match response {
-        Some(body) => mcp_attach_response(&mut invocation, &id, body),
-        None => invocation.incomplete = true,
+/// otherwise. An MCP `_meta` call id wins over the header.
+pub fn from_http_exchange(x: &HttpExchange<'_>) -> Option<ToolInvocation> {
+    let mut invocation = if is_json_rpc(x.request) {
+        let (id, mut inv) = mcp_tool_call(x.request)?;
+        match x.response {
+            Some(body) => mcp_attach_response(&mut inv, &id, body),
+            None => inv.incomplete = true,
+        }
+        inv
+    } else {
+        http_invocation(x.request, x.response, x.status)
+    };
+    if invocation.call_id.is_none() {
+        invocation.call_id = call_id_label(x.call_id_header);
     }
     Some(invocation)
 }
@@ -242,6 +277,44 @@ mod tests {
 
     fn h(s: &str) -> String {
         raw_digest(s.as_bytes())
+    }
+
+    fn from_http_exchange(
+        request: &[u8],
+        response: Option<&[u8]>,
+        status: Option<u16>,
+    ) -> Option<ToolInvocation> {
+        super::from_http_exchange(&HttpExchange {
+            request,
+            response,
+            status,
+            call_id_header: None,
+        })
+    }
+
+    #[test]
+    fn the_declared_call_id_is_signed_from_mcp_meta_or_the_header() {
+        let call = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"get_weather","arguments":{"city":"Paris"},"_meta":{"dev.erebus/call_id":"call_w"}}}"#;
+        let mcp = super::from_http_exchange(&HttpExchange {
+            request: call.as_bytes(),
+            response: Some(RESULT.as_bytes()),
+            status: Some(200),
+            call_id_header: Some("ignored"),
+        })
+        .unwrap();
+        assert_eq!(mcp.call_id.as_deref(), Some("call_w"), "_meta wins");
+        let http = super::from_http_exchange(&HttpExchange {
+            request: br#"{"to":"ops"}"#,
+            response: Some(b"queued"),
+            status: Some(200),
+            call_id_header: Some(" call_e "),
+        })
+        .unwrap();
+        assert_eq!(http.call_id.as_deref(), Some("call_e"));
+        let blank = from_http_exchange(CALL.as_bytes(), Some(RESULT.as_bytes()), Some(200));
+        assert_eq!(blank.unwrap().call_id, None);
+        let json = serde_json::to_value(&http).unwrap();
+        assert_eq!(json["call_id"], "call_e", "signed in the invocation");
     }
 
     const CALL: &str = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"get_weather","arguments":{"city":"Paris"}}}"#;

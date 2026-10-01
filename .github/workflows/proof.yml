@@ -79,6 +79,12 @@ jobs:
           TERM: dumb
         run: bash scripts/yc_demo.sh
 
+      - name: Egress — ERE_EGRESS confines the agent to the listed port (or refuses)
+        timeout-minutes: 5
+        run: >-
+          bash scripts/egress_e2e.sh /tmp/erebus-stub-target/release/erebus
+          /tmp/erebus-stub-target/x86_64-unknown-linux-musl/release/erebus-stub
+
       - name: Chaos — native agent, malformed inputs, 12 concurrent agents
         timeout-minutes: 15
         run: bash scripts/chaos_extreme.sh /tmp/erebus-stub-target/release/erebus

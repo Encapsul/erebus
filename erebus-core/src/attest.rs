@@ -136,7 +136,26 @@ pub struct ExecutionInfo {
     /// a terminal or not captured, so such receipts keep the 2.0 bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stdin_hash: Option<String>,
+    /// Spec 2.1: outbound network policy the launcher enforced on the
+    /// payload (`ERE_EGRESS`). Omitted when the payload ran unconfined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress: Option<EgressPolicy>,
 }
+
+/// Outbound connections a confined payload could make. The launcher refuses
+/// to run rather than run with a weaker policy than the one signed here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressPolicy {
+    /// TCP ports the payload could connect to; empty means no egress.
+    pub tcp_ports: Vec<u16>,
+    /// [`EGRESS_LOOPBACK`] or [`EGRESS_ANY_ADDRESS`].
+    pub scope: String,
+}
+
+/// macOS Seatbelt: connections only to `localhost:<port>`.
+pub const EGRESS_LOOPBACK: &str = "loopback";
+/// Linux Landlock: the port is enforced, the destination address is not.
+pub const EGRESS_ANY_ADDRESS: &str = "any_address";
 
 /// One HTTP call through the attesting proxy.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,6 +228,7 @@ pub struct ExecutionCapture {
     pub request: Option<RequestInfo>,
     pub rootfs_root: Option<String>,
     pub stdin_hash: Option<String>,
+    pub egress: Option<EgressPolicy>,
 }
 
 /// Bundle facts hashed once, reusable for many receipts.
@@ -443,6 +463,7 @@ impl AttestationTemplate {
             request: capture.request.clone(),
             rootfs_root: capture.rootfs_root.clone(),
             stdin_hash: capture.stdin_hash.clone(),
+            egress: capture.egress.clone(),
             machine_id: signers.machine.map(MachineIdentity::machine_id),
         };
 
@@ -488,7 +509,7 @@ fn spec_version_for(execution: &ExecutionInfo) -> &'static str {
         .request
         .as_ref()
         .is_some_and(RequestInfo::uses_tool_calls);
-    if tools || execution.stdin_hash.is_some() {
+    if tools || execution.stdin_hash.is_some() || execution.egress.is_some() {
         ATTESTATION_SPEC_VERSION_TOOL_CALLS
     } else {
         ATTESTATION_SPEC_VERSION
@@ -665,6 +686,9 @@ pub fn build_statement(
     // Inserted only when present: a 2.0 predicate must keep its exact bytes.
     if let Some(h) = &execution.stdin_hash {
         predicate["execution"]["stdin_hash"] = h.as_str().into();
+    }
+    if let Some(e) = &execution.egress {
+        predicate["execution"]["egress"] = serde_json::json!(e);
     }
     InTotoStatement {
         statement_type: INTOTO_STATEMENT_TYPE.to_string(),
@@ -1181,6 +1205,7 @@ mod tests {
                 rootfs_root: None,
                 machine_id: None,
                 stdin_hash: None,
+                egress: None,
             },
         )
     }
@@ -1531,6 +1556,7 @@ mod tests {
             request: None,
             rootfs_root: None,
             stdin_hash: None,
+            egress: None,
         };
         let att =
             write_captured_execution_attestation(&bundle_path, &key_path, &out_path, &capture)
@@ -1583,6 +1609,42 @@ mod tests {
         parsed.execution.stdin_hash = Some(sha256_hex(b"evil"));
         let err = verify_attestation(&parsed, &[key]).unwrap_err().to_string();
         assert!(err.contains("TAMPERED"), "{err}");
+    }
+
+    #[test]
+    fn the_enforced_egress_policy_is_signed() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("key");
+        std::fs::write(&key_path, [9u8; 32]).unwrap();
+        let (bundle_path, _, _) = write_bundle(dir.path());
+        let out_path = dir.path().join("bundle.erebus.attest");
+        let capture = ExecutionCapture {
+            egress: Some(EgressPolicy {
+                tcp_ports: vec![8931],
+                scope: EGRESS_LOOPBACK.into(),
+            }),
+            ..Default::default()
+        };
+        write_captured_execution_attestation(&bundle_path, &key_path, &out_path, &capture).unwrap();
+        let parsed: Attestation =
+            serde_json::from_slice(&std::fs::read(&out_path).unwrap()).unwrap();
+        let key = SigningKey::from_bytes(&[9u8; 32]).verifying_key();
+        verify_attestation(&parsed, &[key]).unwrap();
+        assert_eq!(parsed.spec_version, ATTESTATION_SPEC_VERSION_TOOL_CALLS);
+        let signed = &parsed.statement.predicate["execution"]["egress"];
+        assert_eq!(
+            *signed,
+            serde_json::json!({"tcp_ports": [8931], "scope": "loopback"})
+        );
+        for forge in [None, Some(vec![8931, 443])] {
+            let mut copy = parsed.clone();
+            copy.execution.egress = forge.map(|tcp_ports| EgressPolicy {
+                tcp_ports,
+                scope: EGRESS_LOOPBACK.into(),
+            });
+            let err = verify_attestation(&copy, &[key]).unwrap_err().to_string();
+            assert!(err.contains("TAMPERED"), "{err}");
+        }
     }
 
     #[test]

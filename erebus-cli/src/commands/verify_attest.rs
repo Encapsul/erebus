@@ -85,6 +85,12 @@ pub struct VerifyAttestArgs {
     #[arg(long, requires = "tool_trail")]
     pub require_tool_execution: bool,
 
+    /// With --tool-trail: verify tool trails against the public keys in this
+    /// directory only. It must share no key with the trusted dir, so one
+    /// compromised key cannot forge both the agent and the tool trail
+    #[arg(long, value_name = "DIR", requires = "tool_trail")]
+    pub tool_trusted_dir: Option<PathBuf>,
+
     /// Output verification result as JSON
     #[arg(long)]
     pub json: bool,
@@ -111,7 +117,13 @@ pub fn run(args: VerifyAttestArgs) -> Result<()> {
 
     let mut report = match (&args.chain, &args.attest_file) {
         (Some(dir), _) => {
-            verify_chain_with_tools(dir, &keys, bundle_bytes.as_deref(), &args.tool_trail)?
+            let separate = separate_tool_keys(args.tool_trusted_dir.as_deref(), &keys)?;
+            let tools = ToolTrails {
+                specs: &args.tool_trail,
+                keys: separate.as_deref().unwrap_or(&keys),
+                separate: separate.is_some(),
+            };
+            verify_chain_with_tools(dir, &keys, bundle_bytes.as_deref(), &tools)?
         }
         (None, Some(file)) => verify_single(file, &keys, bundle_bytes.as_deref())?,
         (None, None) => anyhow::bail!("provide a receipt path or --chain <dir>"),
@@ -265,10 +277,11 @@ fn verify_request_body(file: &Path, body_path: &Path) -> Result<serde_json::Valu
     }))
 }
 
-const EXECUTION_KINDS: [&str; 3] = [
+const EXECUTION_KINDS: [&str; 4] = [
     "result_without_execution",
     "result_not_from_tool",
     "execution_without_call",
+    "execution_altered",
 ];
 
 /// `--require-tool-linkage` (`execution: false`) and
@@ -312,6 +325,7 @@ fn describe_anomaly(a: &serde_json::Value) -> String {
         "result_without_execution" => "result fed back for a call no attested tool executed",
         "result_not_from_tool" => "result fed back differs from what the tool returned",
         "execution_without_call" => "a tool executed a call the engine never issued",
+        "execution_altered" => "the tool ran this call with another name or arguments",
         other => other,
     };
     let at = match a.get("tool_receipt").and_then(|v| v.as_u64()) {
@@ -367,7 +381,43 @@ pub(crate) fn verify_chain(
     keys: &[VerifyingKey],
     bundle_bytes: Option<&[u8]>,
 ) -> Result<serde_json::Value> {
-    verify_chain_with_tools(dir, keys, bundle_bytes, &[])
+    let tools = ToolTrails {
+        specs: &[],
+        keys,
+        separate: false,
+    };
+    verify_chain_with_tools(dir, keys, bundle_bytes, &tools)
+}
+
+/// `--tool-trail` specs and the keys their receipts must be signed with.
+pub(crate) struct ToolTrails<'a> {
+    specs: &'a [String],
+    keys: &'a [VerifyingKey],
+    /// `keys` come from `--tool-trusted-dir`, disjoint from the agent's.
+    separate: bool,
+}
+
+/// Keys of `--tool-trusted-dir`; refused when empty or when one of them
+/// also signs the agent trail, which would void the separation.
+fn separate_tool_keys(
+    dir: Option<&Path>,
+    agent: &[VerifyingKey],
+) -> Result<Option<Vec<VerifyingKey>>> {
+    let Some(dir) = dir else {
+        return Ok(None);
+    };
+    let keys = load_trusted_keys(dir)?;
+    if keys.is_empty() {
+        anyhow::bail!("no trusted keys in {} for tool trails", dir.display());
+    }
+    if keys.iter().any(|k| agent.contains(k)) {
+        anyhow::bail!(
+            "--tool-trusted-dir {} shares a key with the agent's trusted keys: \
+             one compromised key could forge both trails",
+            dir.display()
+        );
+    }
+    Ok(Some(keys))
 }
 
 /// Tool receipts of every `--tool-trail [NAME=]DIR`, numbered across trails.
@@ -403,13 +453,18 @@ pub(crate) fn verify_chain_with_tools(
     dir: &Path,
     keys: &[VerifyingKey],
     bundle_bytes: Option<&[u8]>,
-    tool_trails: &[String],
+    tools: &ToolTrails<'_>,
 ) -> Result<serde_json::Value> {
     let log = AttestationLog::open(dir)
         .with_context(|| format!("failed to open trail {}", dir.display()))?;
-    let executions = (!tool_trails.is_empty())
-        .then(|| load_tool_executions(tool_trails, keys))
+    let executions = (!tools.specs.is_empty())
+        .then(|| load_tool_executions(tools.specs, tools.keys))
         .transpose()?;
+    let tool_trust = match (tools.specs.is_empty(), tools.separate) {
+        (true, _) => serde_json::Value::Null,
+        (false, true) => "separate".into(),
+        (false, false) => "shared".into(),
+    };
     let report = log
         .verify_chain_linked(keys, bundle_bytes, executions)
         .context("attestation chain verification failed")?;
@@ -421,6 +476,7 @@ pub(crate) fn verify_chain_with_tools(
         "head": report.head,
         "bundle_checked": bundle_bytes.is_some(),
         "tool_linkage": serde_json::to_value(&report.linkage)?,
+        "tool_trust": tool_trust,
     }))
 }
 
@@ -457,6 +513,14 @@ fn print_human(report: &serde_json::Value) {
         );
         eprintln!("  head:    {}", s("head"));
         print_linkage(&report["tool_linkage"]);
+        match report.get("tool_trust").and_then(|v| v.as_str()) {
+            Some("separate") => eprintln!("  trust:   tool trails signed by separate keys"),
+            Some(_) => eprintln!(
+                "  trust:   tool trails accepted with the agent's keys \
+                 (one key can forge both; see --tool-trusted-dir)"
+            ),
+            None => {}
+        }
     } else {
         eprintln!("OK: attestation verified (key: {})", s("key"));
         eprintln!("  type:     {}", s("attestation_type"));
@@ -567,12 +631,14 @@ fn print_linkage(l: &serde_json::Value) {
         let m = |k: &str| e.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
         eprintln!(
             "  execution: {} of {} call(s) executed by an attested tool ({} tool receipt(s)), \
-             {} result(s) verbatim, {} unverifiable",
+             {} result(s) verbatim, {} unverifiable, {} bound by call id, {} altered",
             m("executed"),
-            m("executed") + m("not_executed"),
+            m("executed") + m("not_executed") + m("altered"),
             m("tool_receipts"),
             m("verbatim"),
-            m("unverifiable")
+            m("unverifiable"),
+            m("bound"),
+            m("altered")
         );
     }
     for p in &pending {

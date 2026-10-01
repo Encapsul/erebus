@@ -45,6 +45,25 @@ All notable changes to erebus are documented here.
   `--require-tool-execution` makes them fatal (exit 2). Tool calls gain an
   optional `arguments_jcs_hash` (JCS of the parsed arguments) so the two
   sides match whatever the whitespace.
+- Tool executions can be bound to the engine's call id: MCP
+  `params._meta["dev.erebus/call_id"]` or the `Erebus-Call-Id` HTTP header
+  is signed as `tool_invocation.call_id`. A bound execution matches only
+  its call, so identical calls executed out of order no longer yield a
+  spurious `result_not_from_tool`, and a tool that ran the call with other
+  arguments is reported `execution_altered` (fatal with
+  `--require-tool-execution`).
+- `verify-attest --tool-trusted-dir DIR`: tool trails are verified only
+  against the tool operator's keys, which must share none with the agent's
+  trusted keys, so a single stolen key can no longer forge both the agent
+  and the tool trail. Reports `tool_trust: separate|shared`; shared trust
+  is flagged in the human output.
+- Egress confinement: `ERE_EGRESS=PORT[,PORT…]|none` limits the payload's
+  outbound TCP to the given ports (macOS Seatbelt: `localhost` only; Linux
+  6.7+: Landlock TCP connect rules plus a seccomp filter refusing UDP, raw
+  and packet sockets, TCP Fast Open, `io_uring` and foreign ABIs). Signed
+  as `execution.egress`; an invalid policy or a kernel without Landlock
+  ABI 4 refuses the launch. `scripts/egress_e2e.sh` (Linux) and
+  `scripts/macos_slice.sh` check it on a real bundle against a control.
 - `erebus evidence export <bundle> -o pack.zip` and `erebus verify-evidence
   pack.zip [--bundle] [--json]`: a self-contained, offline-verifiable audit
   pack (receipts, inclusion proofs, checkpoints, RFC 3161 tokens, DSSE

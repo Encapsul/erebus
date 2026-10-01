@@ -187,6 +187,15 @@ The registry key that signs certificates is the transparency-log key
         "input_hash":            { "type": ["string", "null"], "description": "served call: sha256 of the proxied request body; batch run: sha256 of the launch vector (entrypoint then argv, NUL-joined); stdin is `stdin_hash`" },
         "output_hash":           { "type": ["string", "null"], "description": "served call: sha256 of the proxied response body; batch run: sha256(stdout digest \":\" stderr digest), captured on Linux isolation ≥ 2 and on macOS when ERE_ATTEST_KEY is set, else null" },
         "stdin_hash":            { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "spec 2.1, batch run — sha256 of every byte relayed to a non-terminal stdin; omitted when stdin was a terminal, when the payload exited before stdin reached EOF (or stopped reading), or when not captured" },
+        "egress": {
+          "type": "object",
+          "description": "spec 2.1, batch run — outbound policy the launcher enforced (ERE_EGRESS); omitted when the payload ran unconfined",
+          "required": ["tcp_ports", "scope"],
+          "properties": {
+            "tcp_ports": { "type": "array", "items": { "type": "integer", "minimum": 1, "maximum": 65535 }, "description": "sorted; empty = no egress" },
+            "scope":     { "enum": ["loopback", "any_address"], "description": "loopback: macOS Seatbelt, localhost:<port> only; any_address: Linux Landlock, the port on any host" }
+          }
+        },
         "exit_code":             { "type": ["integer", "null"] },
         "prev_attestation_hash": { "type": ["string", "null"], "description": "sha256 of the previous receipt bytes in the local trail" },
         "request": {
@@ -257,6 +266,24 @@ exited (500 ms grace), so `stdin_hash` always equals `sha256` of the whole
 input an auditor holds: `printf 'job' | ./agent.erebus` signs
 `sha256("job")`. Its absence is not evidence of empty input. A terminal is
 left attached and never hashed.
+
+**Egress confinement (spec 2.1).** `ERE_EGRESS=PORT[,PORT…]` (or `none`)
+in the launcher's environment limits the payload's outbound TCP to those
+ports; the intended value is the port of an `erebus attest-tool http`
+boundary, so the agent can reach its tools only through it. The launcher
+enforces it before exec and signs `execution.egress`; an unparsable value or
+a kernel that cannot enforce it stops the launch (exit 126 under capture),
+never an unconfined run.
+
+| Platform | Mechanism | Enforced |
+|---|---|---|
+| macOS | Seatbelt `network-outbound` | TCP and UDP only to `localhost:<port>` (`scope: loopback`) |
+| Linux ≥ 6.7 | Landlock `CONNECT_TCP` (ABI ≥ 4) + seccomp | TCP `connect` only to the ports, on any address (`scope: any_address`); UDP/raw/packet sockets, TCP Fast Open, `io_uring`, x32 and foreign ABIs refused (EACCES) |
+| Linux < 6.7 | — | launch refused |
+
+Unix-domain sockets (local IPC) are not confined, and neither are child
+processes the payload spawns over stdio (an MCP stdio server started by the
+agent itself is outside the boundary).
 
 Differences from v1 (`…/execution/v1`): `execution.machine_id` added.
 Everything else is byte-identical, which is why a single `build_statement`
@@ -380,24 +407,42 @@ with `--bundle`. `execution.request.tool_invocation` is signed:
 | `result_hashes` | every form the result can be relayed in. MCP: JCS of `result`, of `content`, of `structuredContent`, and the raw `sha256` of the text blocks joined by `\n` when `content` is all text. HTTP: raw `sha256` of the body, plus its JCS digest when JSON |
 | `is_error` | JSON-RPC `error`, MCP `isError: true`, HTTP status ≥ 400 or no response |
 | `incomplete` | the response was not observed (connection lost, compressed or oversized body) |
+| `call_id` | optional: the engine's tool call id the caller declared, from MCP `params._meta["dev.erebus/call_id"]` or the HTTP request header `Erebus-Call-Id` (`_meta` wins); trimmed, 1–256 bytes, otherwise absent |
 
 **Execution matching** (`verify-attest --chain AGENT --tool-trail
-[NAME=]DIR …`). Every tool trail is verified as a chain first, with the
-same trusted keys. Then each call the engine issued is matched one-to-one,
-in chain order, to an unused tool execution with the same
-`arguments_jcs_hash` and the same name (a nameless execution matches on
-arguments only). A missing or non-existent directory is an error, never
-"nothing executed".
+[NAME=]DIR …`). Every tool trail is verified as a chain first: with the
+agent's trusted keys by default (`tool_trust: "shared"`, and the human
+output warns that one key can forge both trails), or with
+`--tool-trusted-dir DIR` only against the keys in `DIR`
+(`tool_trust: "separate"`). That directory must not hold any key the agent
+trail is trusted with; an overlap is refused, so the tool trail and the
+agent trail are provably signed by different keys. Then each call the engine issued is matched one-to-one,
+in chain order, to an unused tool execution:
+
+1. **Bound**: the execution whose `call_id` equals the call's id. The
+   tool must have run exactly that call (same name, same
+   `arguments_jcs_hash`), otherwise the finding is `execution_altered`. A
+   bound execution is never matched to any other call.
+2. **Unbound**: otherwise, an execution without `call_id` with the same
+   `arguments_jcs_hash` and the same name (a nameless execution matches on
+   arguments only).
+
+Binding makes two identical calls distinguishable: without it, executions
+of identical calls that ran in another order are paired in chain order
+and can yield a spurious `result_not_from_tool`. A missing or non-existent
+directory is an error, never "nothing executed".
 
 | Finding | Meaning |
 |---|---|
 | `result_without_execution` | a result was fed back for an issued call that no attested tool executed |
 | `result_not_from_tool` | the fed-back `content_hash` is not one of the matched execution's `result_hashes` |
-| `execution_without_call` | a tool execution no issued call accounts for, reported at its tool receipt |
+| `execution_without_call` | a tool execution no issued call accounts for (including one bound to an id the engine never issued), reported at its tool receipt |
+| `execution_altered` | the execution bound to this call ran another name or other arguments than the engine issued |
 
-The report counts `executed`, `not_executed`, `verbatim` and
-`unverifiable`. A call without `arguments_jcs_hash`, an execution without
-one, and an unmatched execution after a response signed
+The report counts `executed`, `not_executed`, `verbatim`, `unverifiable`,
+`bound` (matched by `call_id`) and `altered`. A call without
+`arguments_jcs_hash` (even when bound), an execution without
+`arguments_jcs_hash` or `call_id`, and an unmatched execution after a response signed
 `tool_calls_incomplete` are `unverifiable`, never accused. Findings carry
 the agent receipt that issued the call and the tool receipt. They are
 warnings; `--require-tool-execution` turns them into a failure (exit 2),
@@ -440,7 +485,7 @@ blobs over 128 MiB unless `COSIGN_MAX_ATTACHMENT_SIZE` is raised (e.g.
 | 1.0 – 1.2 (pretty-JSON signature) | ✅ legacy path | ❌ `STRICT: spec 1.x` | ✅ if pushed | ❌ |
 | 2.0, host not enrolled | ✅ | ❌ `STRICT: … not enrolled` | ✅ | ✅ |
 | 2.0, enrolled host | ✅ | ✅ with registry key | ✅ | ✅ |
-| 2.1 (served call with tool calls or tool context, tool receipt, batch run with `stdin_hash`) | ✅ erebus after 0.6.1; ❌ `TAMPERED` on 0.6.1 and older, which rebuild the statement without the new fields | as 2.0 | ✅ | ✅ (same v2 predicate URI) |
+| 2.1 (served call with tool calls or tool context, tool receipt, batch run with `stdin_hash` or `egress`) | ✅ erebus after 0.6.1; ❌ `TAMPERED` on 0.6.1 and older, which rebuild the statement without the new fields | as 2.0 | ✅ | ✅ (same v2 predicate URI) |
 
 ## 7. Files and locations
 
@@ -474,8 +519,16 @@ blobs over 128 MiB unless `COSIGN_MAX_ATTACHMENT_SIZE` is raised (e.g.
   tool's effect on the outside world (an HTTP tool that answers `queued`
   without sending the mail is not caught); a tool the agent calls *around*
   the boundary is not observed (`execution_without_call` cannot see it,
-  `result_without_execution` can); matching is on name + canonical
-  arguments, so two identical calls are interchangeable; and both trails
-  are signed by keys the verifier must trust — a single compromised
-  operator key can forge both sides, which is what the machine
-  co-signature and `--strict` are for.
+  `result_without_execution` can) unless the run is confined with
+  `ERE_EGRESS` to the boundary's port and the receipt shows `egress` — on
+  Linux the port is enforced but not the address, and Unix sockets and
+  stdio subprocesses stay open; two identical calls are told apart only
+  when the caller declares the engine's call id (`call_id`), and a declared
+  id is the caller's claim — it binds the execution to that call, it does
+  not prove which process sent it; and both trails
+  are signed by keys the verifier must trust. With the default shared trust
+  a single compromised operator key forges both sides; with
+  `--tool-trusted-dir` forging both needs two keys, which only helps if the
+  tool operator's key is actually held by someone else (another team, the
+  tool vendor, another host). Separation proves different keys, not
+  different owners.

@@ -11,6 +11,7 @@
 
 mod config;
 mod crypto;
+mod egress;
 mod exec;
 mod extraction;
 mod gpu;
@@ -27,6 +28,11 @@ mod squashfs_extract;
 mod update_url;
 #[cfg(target_os = "windows")]
 mod win;
+
+/// Serializes tests that create child processes: `waitpid(-1)` in the
+/// supervisor tests reaps any child of the test binary.
+#[cfg(all(test, unix))]
+pub(crate) static FORK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 use erebus_core::detect;
 use erebus_core::format::{self as format, read_at, Footer};

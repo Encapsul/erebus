@@ -724,8 +724,15 @@ HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 "#;
 
 /// `attest-tool stdio` around the fake MCP server; sends `initialize` and
-/// one `tools/call get_weather` per city, returns the relayed stdout.
-fn mcp_session(dir: &Path, key: &Path, trail: &Path, cities: &[&str], weather: &str) -> String {
+/// one `tools/call get_weather` per city (with the engine's call id in
+/// `_meta` when given), returns the relayed stdout.
+fn mcp_session(
+    dir: &Path,
+    key: &Path,
+    trail: &Path,
+    cities: &[(&str, Option<&str>)],
+    weather: &str,
+) -> String {
     let script = dir.join("mcp_server.py");
     std::fs::write(&script, FAKE_MCP_SERVER).unwrap();
     let mut child = Command::new(erebus_bin())
@@ -743,9 +750,13 @@ fn mcp_session(dir: &Path, key: &Path, trail: &Path, cities: &[&str], weather: &
         .spawn()
         .unwrap();
     let mut input = String::from(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#);
-    for (i, city) in cities.iter().enumerate() {
+    for (i, (city, call_id)) in cities.iter().enumerate() {
+        let mut params = serde_json::json!({"name": "get_weather", "arguments": {"city": city}});
+        if let Some(id) = call_id {
+            params["_meta"] = serde_json::json!({"dev.erebus/call_id": id});
+        }
         let call = serde_json::json!({"jsonrpc": "2.0", "id": i + 1, "method": "tools/call",
-            "params": {"name": "get_weather", "arguments": {"city": city}}});
+            "params": params});
         input.push_str(&format!("\n{call}"));
     }
     input.push('\n');
@@ -849,7 +860,8 @@ fn tool_boundary_proves_calls_were_executed_and_results_relayed_verbatim() {
     let assistant = answer["choices"][0]["message"].clone();
 
     let (mcp, http) = (dir.path().join("mcp"), dir.path().join("http"));
-    let relayed = mcp_session(dir.path(), &key, &mcp, &["Paris"], "18C, sunny");
+    let paris = [("Paris", Some("call_w"))];
+    let relayed = mcp_session(dir.path(), &key, &mcp, &paris, "18C, sunny");
     assert_eq!(relayed.lines().count(), 2, "{relayed}");
     assert!(relayed.contains(r#""text": "18C, sunny""#), "{relayed}");
     http_tool_session(dir.path(), &key, &http, r#"{"to": "ops@example.com"}"#);
@@ -868,6 +880,7 @@ fn tool_boundary_proves_calls_were_executed_and_results_relayed_verbatim() {
     let inv = &tool_receipt["statement"]["predicate"]["execution"]["request"]["tool_invocation"];
     assert_eq!(inv["protocol"], "mcp");
     assert_eq!(inv["name"], "get_weather");
+    assert_eq!(inv["call_id"], "call_w");
     assert_eq!(tool_receipt["artifact"]["flags"][0], "tool");
 
     let mcp_s = mcp.to_str().unwrap().to_string();
@@ -885,7 +898,7 @@ fn tool_boundary_proves_calls_were_executed_and_results_relayed_verbatim() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
     assert!(
-        stderr.contains("execution: 2 of 2 call(s) executed by an attested tool (2 tool receipt(s)), 2 result(s) verbatim, 0 unverifiable"),
+        stderr.contains("execution: 2 of 2 call(s) executed by an attested tool (2 tool receipt(s)), 2 result(s) verbatim, 0 unverifiable, 1 bound by call id, 0 altered"),
         "{stderr}"
     );
     assert!(!stderr.contains("WARNING"), "{stderr}");
@@ -911,7 +924,7 @@ fn tool_boundary_proves_calls_were_executed_and_results_relayed_verbatim() {
 
     // The tool really answered a storm; the agent fed back "sunny".
     let liar = dir.path().join("liar");
-    mcp_session(dir.path(), &key, &liar, &["Paris"], "35C, storm");
+    mcp_session(dir.path(), &key, &liar, &paris, "35C, storm");
     let liar_s = liar.to_str().unwrap().to_string();
     let out = verify_chain_with(
         &trail,
@@ -933,7 +946,8 @@ fn tool_boundary_proves_calls_were_executed_and_results_relayed_verbatim() {
 
     // A tool run for Lyon that no model call accounts for.
     let rogue = dir.path().join("rogue");
-    mcp_session(dir.path(), &key, &rogue, &["Paris", "Lyon"], "18C, sunny");
+    let cities = [("Paris", None), ("Lyon", None)];
+    mcp_session(dir.path(), &key, &rogue, &cities, "18C, sunny");
     let rogue_s = rogue.to_str().unwrap().to_string();
     let out = verify_chain_with(
         &trail,
@@ -955,7 +969,98 @@ fn tool_boundary_proves_calls_were_executed_and_results_relayed_verbatim() {
         "{stderr}"
     );
 
+    // The tool ran the model's call_w, but for Lyon instead of Paris.
+    let altered = dir.path().join("altered");
+    mcp_session(
+        dir.path(),
+        &key,
+        &altered,
+        &[("Lyon", Some("call_w"))],
+        "18C, sunny",
+    );
+    let altered_s = altered.to_str().unwrap().to_string();
+    let out = verify_chain_with(
+        &trail,
+        &trusted,
+        &[
+            "--tool-trail",
+            &altered_s,
+            "--tool-trail",
+            &http_s,
+            "--require-tool-execution",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("receipt #1 / tool receipt #1: the tool ran this call with another name or arguments (get_weather call_w)"),
+        "{stderr}"
+    );
     // A typo in the trail path is refused, not read as "nothing executed".
     let out = verify_chain_with(&trail, &trusted, &["--tool-trail", "/nonexistent/tools"]);
     assert!(!out.status.success());
+
+    separate_tool_trust(dir.path(), &trail, &trusted, &honest);
+}
+
+/// The tool trails signed by the tool operator's own key, verified with
+/// `--tool-trusted-dir`: a tool trail signed with the agent's key (what a
+/// thief of that single key can produce) is refused.
+fn separate_tool_trust(dir: &Path, trail: &Path, trusted: &Path, agent_signed: &[&str]) {
+    let (tool_key, tool_trusted) = keygen(&dir.join("tool-operator"));
+    let (mcp, http) = (dir.join("mcp-sep"), dir.join("http-sep"));
+    mcp_session(
+        dir,
+        &tool_key,
+        &mcp,
+        &[("Paris", Some("call_w"))],
+        "18C, sunny",
+    );
+    http_tool_session(dir, &tool_key, &http, r#"{"to": "ops@example.com"}"#);
+    let (mcp_s, http_s) = (
+        mcp.to_str().unwrap().to_string(),
+        format!("send_email={}", http.display()),
+    );
+    let separate = ["--tool-trusted-dir", tool_trusted.to_str().unwrap()];
+    let ok = [
+        &["--tool-trail", &mcp_s, "--tool-trail", &http_s][..],
+        &separate,
+    ]
+    .concat();
+    let out = verify_chain_with(
+        trail,
+        trusted,
+        &[&ok[..], &["--require-tool-execution"]].concat(),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("trust:   tool trails signed by separate keys"),
+        "{stderr}"
+    );
+
+    let out = verify_chain_with(trail, trusted, &[agent_signed, &separate].concat());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "agent-signed tool trail accepted: {stderr}"
+    );
+    assert!(
+        stderr.contains("tool trail verification failed"),
+        "{stderr}"
+    );
+
+    let shared = ["--tool-trusted-dir", trusted.to_str().unwrap()];
+    let out = verify_chain_with(trail, trusted, &[&ok[..2], &shared].concat());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(
+        stderr.contains("shares a key with the agent's trusted keys"),
+        "{stderr}"
+    );
+
+    let out = verify_chain_with(trail, trusted, agent_signed);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(stderr.contains("one key can forge both"), "{stderr}");
 }
