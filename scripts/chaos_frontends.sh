@@ -189,6 +189,7 @@ code=$(timeout 30 curl -s -o /dev/null -w '%{http_code}' -X PUT \
   -H "Authorization: Bearer $TOKEN" \
   "http://127.0.0.1:$S3_PORT/huge.erebus" --data-binary "@$WORK/big.bin" 2>/dev/null)
 check "s3 10MB PUT does not crash" "200" "$code"
+rm -f "$WORK/big.bin"
 
 sleep 1
 code=$(http_code "http://127.0.0.1:$S3_PORT/?list-type=2")
@@ -201,7 +202,9 @@ CONC_FAIL="$WORK/conc_failures.txt"
 conc_cycle() {
   local w="$1" i code rc
   for i in $(seq 1 8); do
-    cp "$WORK/tiny.erebus" "$WORK/conc_${w}_${i}.erebus"
+    # Hardlink: 24 full copies of the agent binary were exhausting /tmp on GHA.
+    ln -f "$WORK/tiny.erebus" "$WORK/conc_${w}_${i}.erebus" 2>/dev/null \
+      || cp "$WORK/tiny.erebus" "$WORK/conc_${w}_${i}.erebus"
     timeout 60 "$ERE" publish --token "$TOKEN" "$WORK/conc_${w}_${i}.erebus" >/dev/null 2>&1
     rc=$?
     [ "$rc" = "0" ] || echo "conc_${w}_${i} publish rc=$rc" >> "$CONC_FAIL"
@@ -212,6 +215,7 @@ conc_cycle() {
     elif [ "$(sha256sum "$WORK/got_${w}_${i}.bin" | cut -d' ' -f1)" != "$SHA" ]; then
       echo "conc_${w}_${i} s3_get sha mismatch" >> "$CONC_FAIL"
     fi
+    rm -f "$WORK/got_${w}_${i}.bin"
     code=$(curl -s -o "$WORK/hf_${w}_${i}.bin" -w '%{http_code}' \
       -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$HF_PORT/api/models/tiny/resolve/main/tiny.erebus")
     if [ "$code" != "200" ]; then
@@ -219,6 +223,7 @@ conc_cycle() {
     elif [ "$(sha256sum "$WORK/hf_${w}_${i}.bin" | cut -d' ' -f1)" != "$SHA" ]; then
       echo "conc_${w}_${i} hf_resolve sha mismatch" >> "$CONC_FAIL"
     fi
+    rm -f "$WORK/hf_${w}_${i}.bin" "$WORK/conc_${w}_${i}.erebus"
     code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$OCI_PORT/v2/tiny/tags/list")
     [ "$code" = "200" ] || echo "conc_${w}_${i} oci_tags code=$code" >> "$CONC_FAIL"
   done

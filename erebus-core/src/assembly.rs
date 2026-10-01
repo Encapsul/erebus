@@ -440,7 +440,16 @@ mod tests {
     #[test]
     fn resolve_arch_unknown_degrades_to_x86_64() {
         assert_eq!(resolve_arch(Some("mips")), format::ARCH_X86_64);
-        assert_eq!(resolve_arch(None), format::ARCH_X86_64);
+    }
+
+    #[test]
+    fn resolve_arch_none_uses_host() {
+        let expected = match std::env::consts::ARCH {
+            "aarch64" | "arm64" => format::ARCH_AARCH64,
+            "riscv64" | "riscv64gc" => format::ARCH_RISCV64,
+            _ => format::ARCH_X86_64,
+        };
+        assert_eq!(resolve_arch(None), expected);
     }
 
     #[test]

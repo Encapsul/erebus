@@ -125,7 +125,10 @@ jobs:
 
       # cc-rs needs a C cross-compiler for the vendored C in zstd/ring; zig
       # ships one for every musl target, so no distro cross toolchain is needed.
+      # continue-on-error: Post of setup-zig occasionally flakes with
+      # `fetch failed` / missing build.zig.zon after a successful install.
       - name: Install zig + cargo-zigbuild
+        continue-on-error: true
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
       - name: Install cargo-zigbuild
         run: cargo install cargo-zigbuild --locked
@@ -161,7 +164,11 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
 
+      # continue-on-error: Post of setup-zig occasionally flakes with
+      # `fetch failed` / missing build.zig.zon after a successful build
+      # (seen on aarch64-apple-darwin with every artifact already verified).
       - name: Install zig + cargo-zigbuild
+        continue-on-error: true
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
       - name: Install cargo-zigbuild
         run: cargo install cargo-zigbuild --locked

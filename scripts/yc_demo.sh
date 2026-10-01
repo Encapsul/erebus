@@ -10,9 +10,27 @@
 set -euo pipefail
 
 ERE="${ERE_BIN:-/tmp/erebus-stub-target/release/erebus}"
-STUB="${ERE_STUB_PATH:-/tmp/erebus-stub-target/release/erebus-stub}"
+# Linux packaging stub is always musl (`make stub`). Prefer that over a
+# host `release|debug/erebus-stub` that Cargo cache may restore from
+# `cargo test` — a stale glibc stub silently drops `stdin_hash`.
+if [ -z "${ERE_STUB_PATH:-}" ]; then
+    case "$(uname -s)" in
+        Linux)
+            STUB="/tmp/erebus-stub-target/$(uname -m)-unknown-linux-musl/release/erebus-stub"
+            ;;
+        *)
+            STUB="/tmp/erebus-stub-target/release/erebus-stub"
+            ;;
+    esac
+else
+    STUB="$ERE_STUB_PATH"
+fi
 export PATH="$HOME/.local/bin:$PATH"
 export ERE_STUB_PATH="$STUB"
+if [ ! -x "$STUB" ]; then
+    echo "erebus-stub not found at $STUB — run \`make stub\` (or set ERE_STUB_PATH)" >&2
+    exit 1
+fi
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; BOLD='\033[1m'; NC='\033[0m'
@@ -397,6 +415,12 @@ fi
 # ────────────────────────────────────────────────────────────
 step "11/11 CHAOS — All 4 harnesses (extreme mode)"
 # ────────────────────────────────────────────────────────────
+# Free debug/incremental trees left by earlier cargo invocations so the
+# concurrent frontend battery does not hit ENOSPC on constrained runners.
+rm -rf /tmp/erebus-stub-target/debug \
+       /tmp/erebus-stub-target/incremental \
+       /tmp/erebus-stub-target/*/debug \
+       /tmp/erebus-stub-target/*/incremental 2>/dev/null || true
 SCRIPTS="$(dirname "$0")"
 CHAOS_PASS=0; CHAOS_FAIL=0
 run_harness() { # run_harness <name> [<ere_bin>|iterations via ERE_BIN]

@@ -72,10 +72,23 @@ jobs:
         timeout-minutes: 10
         run: python3 scripts/test_transparency_log.py
 
+      # Drop debug/incremental trees so the chaos harnesses have disk headroom
+      # on the shared runner (chaos_frontends previously hit ENOSPC mid-load).
+      - name: Free disk before demo
+        run: |
+          rm -rf /tmp/erebus-stub-target/debug \
+                 /tmp/erebus-stub-target/incremental \
+                 /tmp/erebus-stub-target/*/debug \
+                 /tmp/erebus-stub-target/*/incremental \
+                 /tmp/erebus-chaos-* \
+                 /tmp/yc-demo.* 2>/dev/null || true
+          df -h /tmp / | head -5
+
       - name: Demo — the whole chain, every step must be green
         timeout-minutes: 30
         env:
           ERE_BIN: /tmp/erebus-stub-target/release/erebus
+          ERE_STUB_PATH: /tmp/erebus-stub-target/x86_64-unknown-linux-musl/release/erebus-stub
           TERM: dumb
         run: bash scripts/yc_demo.sh
 

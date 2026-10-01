@@ -7,7 +7,10 @@ use super::args::parse_target;
 ///
 /// Search order:
 /// 1. `ERE_STUB_PATH` env var (explicit override)
-/// 2. Host-native `target/release|debug/erebus-stub` (when building for the host)
+/// 2. Host-native `target/release|debug/erebus-stub` (macOS/Windows host only —
+///    on Linux a no-`--target` build is glibc and must not beat the musl stub
+///    that `make stub` / CI actually ship; a stale glibc binary restored from
+///    the Cargo cache silently broke `stdin_hash` on Proof)
 /// 3. `target/<triple>/release/erebus-stub` (cross / musl workspace build)
 /// 4. `/tmp/erebus-stub-target/...` (AGENTS.md / CI `CARGO_TARGET_DIR`)
 /// 5. `stub/target/<triple>/release/erebus-stub` (legacy layout)
@@ -43,9 +46,12 @@ pub(crate) fn find_stub(target: &Option<String>) -> Result<PathBuf> {
     };
 
     let mut candidates = Vec::new();
-    // A host-native `cargo build -p erebus-stub` (no --target) lands here —
-    // that is what the macOS CI job and `macos_slice.sh` produce.
-    if host {
+    // Host-native `cargo build -p erebus-stub` (no --target) lands in
+    // `target/{release,debug}/` — that is what the macOS CI job and
+    // `macos_slice.sh` produce. On Linux the packaging stub is always musl
+    // (`make stub`), so skip the unprefixed host paths: a cached glibc
+    // `debug/erebus-stub` from `cargo test` would otherwise win.
+    if host && !cfg!(target_os = "linux") {
         for profile in ["release", "debug"] {
             candidates.push(PathBuf::from(&target_dir).join(profile).join(stub_name));
             candidates.push(
