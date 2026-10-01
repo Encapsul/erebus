@@ -11,6 +11,7 @@
 
 mod config;
 mod crypto;
+#[cfg(unix)]
 mod egress;
 mod exec;
 mod extraction;

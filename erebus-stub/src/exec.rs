@@ -956,7 +956,7 @@ fn relay_stdin(in_w: libc::c_int, done: std::sync::mpsc::Sender<String>) {
 /// How long the supervisor waits, after the payload exited, for the stdin
 /// relay to reach EOF before signing the receipt without `stdin_hash`.
 #[cfg(unix)]
-const STDIN_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+const STDIN_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Normalize a wait status into the payload's exit code (128 + signal when the
 /// payload was killed by a signal).
@@ -1207,6 +1207,14 @@ pub fn exec_app(
             return Err(io::Error::last_os_error());
         }
         if pid != 0 {
+            // Drop our copy of the capture stdin pipe so the sole reader is
+            // the executor: otherwise the outer stdin relay never sees the
+            // write end close cleanly and can miss signing `stdin_hash`.
+            // SAFETY: fd 0 is this process's stdin; closing it here only
+            // affects the supervising parent, which no longer reads it.
+            unsafe {
+                libc::close(0);
+            }
             crate::health_gate::maybe_start_health(meta);
             return relay_child_status(pid);
         }

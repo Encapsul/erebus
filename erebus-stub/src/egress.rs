@@ -115,7 +115,8 @@ mod linux {
                 LANDLOCK_CREATE_RULESET_VERSION,
             )
         };
-        v.max(0)
+        // `syscall` returns `c_long` (i32 on arm/x86, i64 on aarch64/x86_64).
+        (v as i64).max(0)
     }
 
     /// Everything [`Prepared::apply`] needs, built beforehand so that applying

@@ -782,6 +782,16 @@ fn http_tool_session(dir: &Path, key: &Path, trail: &Path, body: &str) {
         .spawn()
         .unwrap();
     let _tool = Serve(tool);
+    // Wait until the fake tool accepts connections before starting the
+    // boundary — otherwise the first proxied POST hits a closed port and
+    // macOS CI can spend the whole deadline on connect timeouts.
+    let tool_ready = Instant::now() + Duration::from_secs(10);
+    while TcpStream::connect(("127.0.0.1", tool_port)).is_err() {
+        if Instant::now() > tool_ready {
+            panic!("fake HTTP tool never listened on {tool_port}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let boundary = Command::new(erebus_bin())
         .args(["attest-tool", "http", "--attest-key"])
         .arg(key)
