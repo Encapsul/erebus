@@ -347,7 +347,11 @@ def test_crash_consistency(mod, root: str, tsa_url: str, token: str) -> None:
     threads = [threading.Thread(target=publisher, args=(w,)) for w in range(4)]
     for t in threads:
         t.start()
-    time.sleep(0.8)
+    # Kill once at least one publish is acknowledged — a fixed sleep races
+    # with machine load and can fire before any publish lands.
+    deadline = time.monotonic() + 10
+    while not accepted and time.monotonic() < deadline:
+        time.sleep(0.02)
     os.kill(proc.pid, signal.SIGKILL)
     proc.wait()
     stop.set()
@@ -384,9 +388,39 @@ def test_crash_consistency(mod, root: str, tsa_url: str, token: str) -> None:
         proc.wait()
 
 
+def test_cached_tree(mod) -> None:
+    """The O(log n) tree must emit the reference functions' bytes exactly."""
+    leaves = [mod._mt_leaf(i.to_bytes(4, "big")) for i in range(300)]
+    tree = mod._MerkleTree([])
+    same_root = same_path = same_cons = True
+    for n in range(1, len(leaves) + 1):
+        tree.append(leaves[n - 1])
+        same_root &= tree.root() == mod._mt_root(leaves[:n])
+        for i in {0, n // 3, n // 2, n - 1}:
+            same_path &= tree.inclusion(i, 0, n) == mod._mt_inclusion(leaves[:n], i)
+        for m in {1, n // 4 or 1, n // 2 or 1, n - 1 or 1, n}:
+            same_cons &= tree.consistency(m, 0, n) == mod._mt_consistency(leaves[:n], m)
+    check("merkle cache: roots equal reference for sizes 1..300", same_root)
+    check("merkle cache: inclusion proofs equal reference", same_path)
+    check("merkle cache: consistency proofs equal reference", same_cons)
+    check("merkle cache: leaf index lookup", tree.index[leaves[257]] == 257)
+
+    big = mod._MerkleTree([hashlib.sha256(i.to_bytes(8, "big")).digest() for i in range(200_000)])
+    big.root()  # warm-up, O(n) once at startup
+    t0 = time.perf_counter()
+    for i in range(100):
+        big.append(hashlib.sha256(b"new%d" % i).digest())
+        big.root()
+        big.inclusion(len(big) // 2, 0, len(big))
+    per_op_ms = (time.perf_counter() - t0) * 10
+    check("merkle cache: append+root+proof at 200k leaves < 20 ms",
+          per_op_ms < 20, f"{per_op_ms:.2f} ms")
+
+
 def main() -> int:
     mod = load_module()
     test_primitives(mod)
+    test_cached_tree(mod)
     tsa_url = start_fake_tsa(mod)
     with tempfile.TemporaryDirectory() as root:
         token = test_http(mod, root, tsa_url)

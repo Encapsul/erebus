@@ -27,9 +27,11 @@ fi
 # 2. Install Python deps (stdlib only — nothing to install)
 #    The registry_server.py uses only stdlib + the system python3.
 
-# 3. Copy artifacts
+# 3. Copy artifacts (entry point + its proof-core package)
 mkdir -p "$INSTALL_DIR" "$DATA_DIR"
 cp scripts/registry_server.py "$INSTALL_DIR/"
+rm -rf "$INSTALL_DIR/erebus_registry"
+cp -R scripts/erebus_registry "$INSTALL_DIR/"
 cp scripts/registry.service /etc/systemd/system/erebus-registry.service
 chown -R "$USER:$USER" "$INSTALL_DIR" "$DATA_DIR"
 chmod +x "$INSTALL_DIR/registry_server.py"

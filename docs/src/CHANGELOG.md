@@ -4,6 +4,15 @@ All notable changes to erebus are documented here.
 
 ## [Unreleased]
 
+### Added (registry)
+
+- `scripts/erebus_registry/`: the registry's proof core (Ed25519, Merkle,
+  RFC 3161, transparency log) as a stdlib-only package; byte formats
+  unchanged and pinned against the reference implementations in the battery.
+- Merkle roots and inclusion/consistency proofs are O(log n) over a cached
+  append-only tree instead of O(n) list scans (200k leaves: ~0.3 ms vs
+  ~0.5 s per query); leaf lookup is a hash map.
+
 ### Added
 
 - `erebus evidence export <bundle> -o pack.zip` and `erebus verify-evidence

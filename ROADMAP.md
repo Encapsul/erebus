@@ -283,6 +283,16 @@ CI job).
 - [ ] **P1-4 Registry hygiene**: split `registry_server.py` into a package
   (`store/`, `auth/`, `log/`, `http/`), SQLite everywhere, remove the O(n)
   scans, keep zero third-party deps.
+  Done 2026-10-01: the proof core is split out into
+  `scripts/erebus_registry/` (ed25519, merkle, tsa, tlog) with byte formats
+  unchanged (reference functions kept and pinned against the cached tree for
+  sizes 1..300 in the battery); Merkle roots/proofs are O(log n) over a
+  cached append-only tree (200k leaves: root+proof 0.29 ms vs ~500 ms).
+  `deploy_registry.sh` ships the package; the k8s/helm image must include it
+  on its next build. Left: the `store/` + `auth/` + `http/` split of the
+  remaining ~3k-line Handler/Store. Also fixed on the way: the SIGKILL chaos
+  check raced a fixed 0.8 s sleep (flaked on the original code too); it now
+  waits for the first acknowledged publish.
 - [ ] **P1-5 macOS slice validated on real Apple Silicon** (never run to date).
   2026-09-29: first real run (Intel macOS 14.8, native stub) + CI job
   `macos-arm64` on `macos-15` (Apple Silicon) running the Rust suites and

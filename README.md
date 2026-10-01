@@ -287,11 +287,13 @@ erebus pull agent-agent           # streamed download, SHA-256 verified against 
 erebus attest agent.erebus --push # receipt → Merkle log, proof stored next to it
 ```
 
-One stdlib Python file, no dependencies: packages, accounts and quotas (HTTP
-402 when exceeded, never silent throttling), private packages, machine
-enrollment (`/machines/enroll`), and a **SQLite Merkle transparency log**
-(RFC 6962) with Ed25519-signed checkpoints, inclusion/consistency proofs
-(`/log/*`) and RFC 3161 anchoring. Hardened against traversal, bad filenames,
+Stdlib-only Python, no dependencies: `scripts/registry_server.py` plus its
+proof-core package `scripts/erebus_registry/` (Ed25519, Merkle tree, RFC 3161,
+transparency log — byte formats pinned by tests on both the Python and Rust
+sides). Packages, accounts and quotas (HTTP 402 when exceeded, never silent
+throttling), private packages, machine enrollment (`/machines/enroll`), and a
+**SQLite Merkle transparency log** (RFC 6962) with Ed25519-signed checkpoints,
+O(log n) inclusion/consistency proofs (`/log/*`) and RFC 3161 anchoring. Hardened against traversal, bad filenames,
 tampered indexes; chaos-tested — concurrent same-name uploads leave one atomic
 winner, replace-during-read never serves truncated blobs, SIGKILL mid-publish
 loses no acknowledged receipt ([battery](benchmarks/security.md)).
