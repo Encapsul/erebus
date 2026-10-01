@@ -32,7 +32,9 @@ pub(crate) fn parse_target(target: &str) -> (String, String) {
     );
     let arch = if shorthand_os {
         match parts.get(1).copied() {
-            Some("x64" | "amd64") => "x86_64",
+            // Full arch names too: `windows-x86_64` must not fall through to
+            // the host arch (breaks cross-builds from Apple Silicon).
+            Some("x64" | "amd64" | "x86_64") => "x86_64",
             Some("arm64" | "aarch64") => "aarch64",
             Some("x86" | "i686" | "i386") => "x86",
             // The real Rust triple is riscv64gc-unknown-linux-musl; keep the
