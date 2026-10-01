@@ -2,8 +2,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use ed25519_dalek::SigningKey;
 use erebus_core::attest::{
-    generate_attestation, generate_attestation_with_capture, host_machine, receipt_bytes,
-    ExecutionCapture,
+    generate_attestation_with_capture, host_machine, receipt_bytes, Approval, ExecutionCapture,
 };
 use erebus_core::attest_log::{default_log_dir, AttestationLog};
 use erebus_core::paths::default_key_dir;
@@ -54,6 +53,11 @@ pub struct AttestArgs {
     #[arg(long, value_name = "FILE")]
     pub envelope: Option<PathBuf>,
 
+    /// Attach a human approval JSON (`erebus approve -o …`) into the signed
+    /// execution block
+    #[arg(long, value_name = "FILE")]
+    pub approval: Option<PathBuf>,
+
     /// Quiet output
     #[arg(short, long)]
     pub quiet: bool,
@@ -97,10 +101,12 @@ pub fn run(args: AttestArgs) -> Result<()> {
 
     // The trail head must be folded into the signed statement, so chaining
     // happens at generation time rather than as a post-hoc append.
+    let approval = load_approval(args.approval.as_deref())?;
     let (attestation, entry) = match &log {
         Some(log) => {
             let capture = ExecutionCapture {
                 prev_attestation_hash: log.head()?,
+                approval: approval.clone(),
                 ..ExecutionCapture::default()
             };
             let att = generate_attestation_with_capture(&args.file, &signing_key, &capture)
@@ -108,11 +114,17 @@ pub fn run(args: AttestArgs) -> Result<()> {
             let entry = log.append(&att).context("failed to append to trail")?;
             (att, Some(entry))
         }
-        None => (
-            generate_attestation(&args.file, &signing_key)
-                .context("failed to generate attestation")?,
-            None,
-        ),
+        None => {
+            let capture = ExecutionCapture {
+                approval,
+                ..ExecutionCapture::default()
+            };
+            (
+                generate_attestation_with_capture(&args.file, &signing_key, &capture)
+                    .context("failed to generate attestation")?,
+                None,
+            )
+        }
     };
 
     let json_bytes = receipt_bytes(&attestation).context("failed to serialize attestation")?;
@@ -321,6 +333,17 @@ fn resolve_key_path(key: &Option<PathBuf>) -> Result<PathBuf> {
             dir.display()
         )
     }
+}
+
+fn load_approval(path: Option<&std::path::Path>) -> Result<Option<Approval>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let data = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read approval {}", path.display()))?;
+    let approval: Approval = serde_json::from_str(&data)
+        .with_context(|| format!("failed to parse approval {}", path.display()))?;
+    Ok(Some(approval))
 }
 
 pub fn resolve_token(

@@ -14,7 +14,7 @@ use crate::intoto::{
 use crate::machine::{MachineIdentity, MachineInfo};
 pub use crate::tool_calls::ToolCall;
 pub use crate::tool_requests::ToolResult;
-use ed25519_dalek::{SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -29,12 +29,16 @@ use time::OffsetDateTime;
 /// signature, no envelope) remain parseable and verifiable.
 pub const ATTESTATION_SPEC_VERSION: &str = "2.0";
 
-/// Spec 2.1 = 2.0 + the tool fields of `execution.request` (`tool_calls`,
-/// `tools_offered`, `tool_history`, `tool_results` and their `_incomplete`
-/// flags). Written only on receipts that carry one of them: verifiers
-/// predating 2.1 rebuild the statement without them and report `TAMPERED`,
-/// every other receipt stays readable by them.
+/// Spec 2.1 = 2.0 + additive fields: tool fields of `execution.request`
+/// (`tool_calls`, `tools_offered`, `tool_history`, `tool_results` and their
+/// `_incomplete` flags), `stdin_hash`, `egress`, `stop`, and `approval`.
+/// Written only on receipts that carry one of them: verifiers predating 2.1
+/// rebuild the statement without them and report `TAMPERED`, every other
+/// receipt stays readable by them.
 pub const ATTESTATION_SPEC_VERSION_TOOL_CALLS: &str = "2.1";
+
+/// Canonical prefix of a human-approval message (`sign_approval`).
+pub const APPROVAL_PREFIX: &str = "erebus-approval/v1";
 
 /// Marker string identifying this as an erebus execution attestation.
 pub const ATTESTATION_TYPE: &str = "erebus-execution";
@@ -140,6 +144,45 @@ pub struct ExecutionInfo {
     /// payload (`ERE_EGRESS`). Omitted when the payload ran unconfined.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub egress: Option<EgressPolicy>,
+    /// Spec 2.1: stop receipt — when the operator (or orchestrator) asked
+    /// the process to halt and when it was reaped. Omitted on normal calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<StopInfo>,
+    /// Spec 2.1: optional human approval covering a subject digest (EU AI
+    /// Act Art. 14). Signature is over [`APPROVAL_PREFIX`] bytes, verified
+    /// with `verify_approval` / `verify-attest --approver-key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<Approval>,
+}
+
+/// Spec 2.1: facts of a graceful (or forced) stop, signed into the trail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StopInfo {
+    /// When the stop signal was first observed (ISO 8601 UTC).
+    pub requested_at: String,
+    /// When the child was reaped (ISO 8601 UTC).
+    pub reaped_at: String,
+    /// Signal name (`SIGTERM`, `SIGINT`, …).
+    pub signal: String,
+    /// `true` when the supervisor had to `kill()` the child (no clean exit
+    /// within the wait). Omitted when false so 2.0-shaped stops stay lean.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub kill_timeout: bool,
+}
+
+/// Spec 2.1: a human decision signed with an approver key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Approval {
+    /// `allow` or `deny`.
+    pub decision: String,
+    /// Digest of what was approved (`sha256:…`).
+    pub subject_digest: String,
+    /// When the decision was signed (ISO 8601 UTC).
+    pub decided_at: String,
+    /// Fingerprint of the approver verifying key.
+    pub key_fingerprint: String,
+    /// Ed25519 signature hex over [`approval_message_bytes`].
+    pub signature_hex: String,
 }
 
 /// Outbound connections a confined payload could make. The launcher refuses
@@ -229,6 +272,8 @@ pub struct ExecutionCapture {
     pub rootfs_root: Option<String>,
     pub stdin_hash: Option<String>,
     pub egress: Option<EgressPolicy>,
+    pub stop: Option<StopInfo>,
+    pub approval: Option<Approval>,
 }
 
 /// Bundle facts hashed once, reusable for many receipts.
@@ -464,6 +509,8 @@ impl AttestationTemplate {
             rootfs_root: capture.rootfs_root.clone(),
             stdin_hash: capture.stdin_hash.clone(),
             egress: capture.egress.clone(),
+            stop: capture.stop.clone(),
+            approval: capture.approval.clone(),
             machine_id: signers.machine.map(MachineIdentity::machine_id),
         };
 
@@ -509,7 +556,12 @@ fn spec_version_for(execution: &ExecutionInfo) -> &'static str {
         .request
         .as_ref()
         .is_some_and(RequestInfo::uses_tool_calls);
-    if tools || execution.stdin_hash.is_some() || execution.egress.is_some() {
+    if tools
+        || execution.stdin_hash.is_some()
+        || execution.egress.is_some()
+        || execution.stop.is_some()
+        || execution.approval.is_some()
+    {
         ATTESTATION_SPEC_VERSION_TOOL_CALLS
     } else {
         ATTESTATION_SPEC_VERSION
@@ -690,6 +742,12 @@ pub fn build_statement(
     if let Some(e) = &execution.egress {
         predicate["execution"]["egress"] = serde_json::json!(e);
     }
+    if let Some(s) = &execution.stop {
+        predicate["execution"]["stop"] = serde_json::json!(s);
+    }
+    if let Some(a) = &execution.approval {
+        predicate["execution"]["approval"] = serde_json::json!(a);
+    }
     InTotoStatement {
         statement_type: INTOTO_STATEMENT_TYPE.to_string(),
         subject: vec![
@@ -813,7 +871,7 @@ fn persist_attestation(attestation: &Attestation, out_path: &Path) -> Result<(),
 }
 
 /// ISO 8601 UTC timestamp.
-fn utc_now_iso8601() -> String {
+pub fn utc_now_iso8601() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
@@ -822,6 +880,92 @@ fn utc_now_iso8601() -> String {
         .unwrap_or(OffsetDateTime::UNIX_EPOCH)
         .to_offset(time::UtcOffset::UTC);
     datetime.format(&Iso8601::DEFAULT).unwrap_or_default()
+}
+
+/// Format a unix-seconds instant as ISO 8601 UTC (same crate as receipts).
+pub fn iso8601_from_unix(secs: u64) -> String {
+    let datetime = OffsetDateTime::from_unix_timestamp(secs as i64)
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+        .to_offset(time::UtcOffset::UTC);
+    datetime.format(&Iso8601::DEFAULT).unwrap_or_default()
+}
+
+/// Canonical bytes an [`Approval`] signature covers.
+pub fn approval_message_bytes(decision: &str, subject_digest: &str, decided_at: &str) -> Vec<u8> {
+    format!("{APPROVAL_PREFIX}\n{decision}\n{subject_digest}\n{decided_at}\n").into_bytes()
+}
+
+/// Sign a human approval over `decision` + `subject_digest` (timestamped now).
+pub fn sign_approval(key: &SigningKey, decision: &str, subject_digest: &str) -> Approval {
+    let decided_at = utc_now_iso8601();
+    let msg = approval_message_bytes(decision, subject_digest, &decided_at);
+    let sig = key.sign(&msg);
+    Approval {
+        decision: decision.to_string(),
+        subject_digest: subject_digest.to_string(),
+        decided_at,
+        key_fingerprint: key_fingerprint(&key.verifying_key()),
+        signature_hex: hex::encode(sig.to_bytes()),
+    }
+}
+
+/// Verify an approval signature under `key`; errors start with `TAMPERED:`.
+pub fn verify_approval(approval: &Approval, key: &VerifyingKey) -> Result<(), anyhow::Error> {
+    let expected_fp = key_fingerprint(key);
+    if approval.key_fingerprint != expected_fp {
+        anyhow::bail!(
+            "TAMPERED: approval key_fingerprint mismatch (document says {}, key is {})",
+            approval.key_fingerprint,
+            expected_fp
+        );
+    }
+    let sig_bytes = hex::decode(&approval.signature_hex)
+        .map_err(|e| anyhow::anyhow!("invalid approval signature hex: {e}"))?;
+    let sig = Signature::from_slice(&sig_bytes)
+        .map_err(|e| anyhow::anyhow!("invalid approval signature: {e}"))?;
+    let msg = approval_message_bytes(
+        &approval.decision,
+        &approval.subject_digest,
+        &approval.decided_at,
+    );
+    key.verify(&msg, &sig)
+        .map_err(|_| anyhow::anyhow!("TAMPERED: approval signature does not verify"))?;
+    Ok(())
+}
+
+/// Verify `attestation.execution.approval` against any of `approver_keys`.
+///
+/// Returns the matching verifying key. Missing approval or no matching key →
+/// `TAMPERED:`.
+pub fn check_approval(
+    attestation: &Attestation,
+    approver_keys: &[VerifyingKey],
+) -> Result<VerifyingKey, anyhow::Error> {
+    let approval = attestation
+        .execution
+        .approval
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("TAMPERED: receipt has no approval to verify"))?;
+    // Prefer the signed predicate copy when present (display can drift).
+    let signed = attestation
+        .statement
+        .predicate
+        .get("execution")
+        .and_then(|e| e.get("approval"))
+        .cloned();
+    if let Some(v) = signed {
+        let signed_approval: Approval = serde_json::from_value(v)
+            .map_err(|e| anyhow::anyhow!("TAMPERED: signed approval is not valid JSON: {e}"))?;
+        if &signed_approval != approval {
+            anyhow::bail!("TAMPERED: approval display differs from signed statement");
+        }
+    }
+    for key in approver_keys {
+        if verify_approval(approval, key).is_ok() {
+            return Ok(*key);
+        }
+    }
+    anyhow::bail!("TAMPERED: approval signature does not match any approver key")
 }
 
 /// Get the system hostname, or "unknown" if unavailable.
@@ -1206,6 +1350,8 @@ mod tests {
                 machine_id: None,
                 stdin_hash: None,
                 egress: None,
+                stop: None,
+                approval: None,
             },
         )
     }
@@ -1553,10 +1699,7 @@ mod tests {
             output_hash: Some("sha256:out".to_string()),
             exit_code: Some(42),
             prev_attestation_hash: Some("sha256:prev".to_string()),
-            request: None,
-            rootfs_root: None,
-            stdin_hash: None,
-            egress: None,
+            ..ExecutionCapture::default()
         };
         let att =
             write_captured_execution_attestation(&bundle_path, &key_path, &out_path, &capture)
@@ -2024,5 +2167,74 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("STRICT"), "{err}");
+    }
+
+    #[test]
+    fn stop_in_execution_bumps_spec_to_2_1_and_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bundle_path, _, _) = write_bundle(dir.path());
+        let key = test_key();
+        let template = AttestationTemplate::from_bundle(&bundle_path).unwrap();
+        let stop = StopInfo {
+            requested_at: "2026-10-01T12:00:00Z".to_string(),
+            reaped_at: "2026-10-01T12:00:01Z".to_string(),
+            signal: "SIGTERM".to_string(),
+            kill_timeout: true,
+        };
+        let capture = ExecutionCapture {
+            stop: Some(stop.clone()),
+            ..ExecutionCapture::default()
+        };
+        let att = template.attest(&key, &capture).unwrap();
+        assert_eq!(att.spec_version, "2.1");
+        let signed = &att.statement.predicate["execution"]["stop"];
+        assert_eq!(signed["signal"], "SIGTERM");
+        assert_eq!(signed["kill_timeout"], true);
+        assert_eq!(att.execution.stop.as_ref(), Some(&stop));
+        verify_attestation(&att, &[key.verifying_key()]).unwrap();
+    }
+
+    #[test]
+    fn approval_sign_verify_roundtrip() {
+        let key = test_key();
+        let approval = sign_approval(&key, "allow", "sha256:deadbeef");
+        assert_eq!(approval.decision, "allow");
+        assert_eq!(approval.subject_digest, "sha256:deadbeef");
+        assert_eq!(
+            approval.key_fingerprint,
+            key_fingerprint(&key.verifying_key())
+        );
+        verify_approval(&approval, &key.verifying_key()).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let (bundle_path, _, _) = write_bundle(dir.path());
+        let template = AttestationTemplate::from_bundle(&bundle_path).unwrap();
+        let capture = ExecutionCapture {
+            approval: Some(approval.clone()),
+            ..ExecutionCapture::default()
+        };
+        let att = template.attest(&key, &capture).unwrap();
+        assert_eq!(att.spec_version, "2.1");
+        verify_attestation(&att, &[key.verifying_key()]).unwrap();
+        let vk = check_approval(&att, &[key.verifying_key()]).unwrap();
+        assert_eq!(key_fingerprint(&vk), approval.key_fingerprint);
+    }
+
+    #[test]
+    fn approval_forged_signature_refused() {
+        let key = test_key();
+        let mut approval = sign_approval(&key, "deny", "sha256:cafe");
+        approval.signature_hex = "00".repeat(64);
+        let err = verify_approval(&approval, &key.verifying_key())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("TAMPERED"), "{err}");
+
+        let other = SigningKey::from_bytes(&[7u8; 32]);
+        let good = sign_approval(&key, "allow", "sha256:cafe");
+        let err = verify_approval(&good, &other.verifying_key())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("TAMPERED"), "{err}");
     }
 }

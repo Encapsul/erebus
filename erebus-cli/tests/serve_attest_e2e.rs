@@ -260,6 +260,89 @@ fn wait_ready(port: u16, child: &mut Child) {
     panic!("proxy on {port} never became healthy");
 }
 
+/// `erebus serve` behind the attesting proxy without registry push.
+fn serve_attest_only(bundle: &Path, port: u16, key: &Path, trail: &Path) -> Command {
+    let mut cmd = Command::new(erebus_bin());
+    cmd.arg("serve")
+        .arg(bundle)
+        .args(["--port", &port.to_string(), "--ngl", "off"])
+        .arg("--attest-key")
+        .arg(key)
+        .arg("--attest-log")
+        .arg(trail)
+        .env("NO_COLOR", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    cmd
+}
+
+/// R3 acceptance: SIGTERM after a served call appends a stop receipt that
+/// closes the chain (`reaped_at` ≥ `requested_at`, signal named).
+#[test]
+fn stop_receipt_closes_chain_after_sigterm() {
+    let dir = tempdir().unwrap();
+    let bundle = make_bundle(dir.path());
+    let (key, trusted) = keygen(dir.path());
+    let trail = dir.path().join("trail");
+    let port = free_port();
+    let mut child = serve_attest_only(&bundle, port, &key, &trail)
+        .env("XDG_CACHE_HOME", dir.path().join("cache"))
+        .env("ERE_MACHINE_DIR", dir.path().join("no-machine"))
+        .spawn()
+        .unwrap();
+    wait_ready(port, &mut child);
+
+    let body = r#"{"model":"local","messages":[{"role":"user","content":"hi"}]}"#;
+    let resp = post_chat(port, body);
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+
+    let status = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if child.try_wait().ok().flatten().is_some() {
+            break;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("serve did not exit after SIGTERM");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let receipts = trail_receipts(&trail);
+    assert!(
+        receipts.len() >= 2,
+        "expected call + stop receipts, got {}",
+        receipts.len()
+    );
+    let last = receipts.last().unwrap();
+    let att: serde_json::Value = serde_json::from_slice(&std::fs::read(last).unwrap()).unwrap();
+    let stop = att["statement"]["predicate"]["execution"]["stop"]
+        .as_object()
+        .unwrap_or_else(|| panic!("final receipt missing signed execution.stop: {att}"));
+    assert_eq!(stop.get("signal").and_then(|v| v.as_str()), Some("SIGTERM"));
+    assert_eq!(
+        stop.get("kill_timeout"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    let requested = stop["requested_at"].as_str().expect("requested_at");
+    let reaped = stop["reaped_at"].as_str().expect("reaped_at");
+    assert!(
+        reaped >= requested,
+        "reaped_at ({reaped}) must be >= requested_at ({requested})"
+    );
+    assert_eq!(att["spec_version"], "2.1");
+
+    let out = verify_chain(&trail, &trusted, &bundle);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+}
+
 /// `erebus serve` behind the attesting proxy, publishing every receipt.
 fn serve_command(
     bundle: &Path,
@@ -269,18 +352,8 @@ fn serve_command(
     registry: &Registry,
     token: &str,
 ) -> Command {
-    let mut cmd = Command::new(erebus_bin());
-    cmd.arg("serve")
-        .arg(bundle)
-        .args(["--port", &port.to_string(), "--ngl", "off"])
-        .arg("--attest-key")
-        .arg(key)
-        .arg("--attest-log")
-        .arg(trail)
-        .args(["--push", "--registry", &registry.base, "--token", token])
-        .env("NO_COLOR", "1")
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit());
+    let mut cmd = serve_attest_only(bundle, port, key, trail);
+    cmd.args(["--push", "--registry", &registry.base, "--token", token]);
     cmd
 }
 

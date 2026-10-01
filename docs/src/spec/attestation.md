@@ -5,7 +5,8 @@ This page is the normative description of the receipts produced by
 (`erebus serve --attest-key`). It is also the document the predicate URI
 `https://erebus.dev/attestation/execution/v2` points at. Spec 2.1 is 2.0
 plus the signed tool calls of a served call (§3.2) and the tool context of
-its request, linked across the trail (§3.3); it keeps the v2 predicate URI.
+its request, linked across the trail (§3.3); stop receipts (§3.5) and human
+approvals (§3.6); it keeps the v2 predicate URI.
 
 A receipt answers one question with cryptographic evidence: **which bytes ran,
 where, when, with which inputs and outputs, and who vouches for it.**
@@ -198,6 +199,29 @@ The registry key that signs certificates is the transparency-log key
         },
         "exit_code":             { "type": ["integer", "null"] },
         "prev_attestation_hash": { "type": ["string", "null"], "description": "sha256 of the previous receipt bytes in the local trail" },
+        "stop": {
+          "type": "object",
+          "description": "spec 2.1, §3.5 — omitted when this receipt is not a stop",
+          "required": ["requested_at", "reaped_at", "signal"],
+          "properties": {
+            "requested_at": { "type": "string", "format": "date-time" },
+            "reaped_at":    { "type": "string", "format": "date-time" },
+            "signal":       { "type": "string", "enum": ["SIGTERM", "SIGINT"] },
+            "kill_timeout": { "const": true, "description": "omitted when false — supervisor called kill()" }
+          }
+        },
+        "approval": {
+          "type": "object",
+          "description": "spec 2.1, §3.6 — omitted when no human approval is attached",
+          "required": ["decision", "subject_digest", "decided_at", "key_fingerprint", "signature_hex"],
+          "properties": {
+            "decision":        { "enum": ["allow", "deny"] },
+            "subject_digest":  { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+            "decided_at":      { "type": "string", "format": "date-time" },
+            "key_fingerprint": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+            "signature_hex":   { "type": "string", "pattern": "^[0-9a-f]{128}$" }
+          }
+        },
         "request": {
           "type": ["object", "null"],
           "required": ["method", "path"],
@@ -448,6 +472,36 @@ the agent receipt that issued the call and the tool receipt. They are
 warnings; `--require-tool-execution` turns them into a failure (exit 2),
 independently of `--require-tool-linkage`.
 
+### 3.5 Stop receipts (spec 2.1)
+
+When `erebus serve --attest-key` receives SIGTERM or SIGINT *after* the
+engine is healthy, it appends one final receipt whose signed predicate
+carries only `execution.stop`:
+
+| Field | Meaning |
+|---|---|
+| `requested_at` | ISO 8601 UTC when the stop was first observed |
+| `reaped_at` | ISO 8601 UTC when the engine child was reaped |
+| `signal` | `SIGTERM` or `SIGINT` |
+| `kill_timeout` | `true` when the supervisor called `kill()` (omitted when false) |
+
+A signal during startup (`wait_healthy`) aborts without a stop receipt.
+`reaped_at` is always ≥ `requested_at`. Spec version is `2.1`.
+
+### 3.6 Human approval (spec 2.1)
+
+Optional oversight evidence (EU AI Act Art. 14). `erebus approve` signs:
+
+```
+erebus-approval/v1\n{decision}\n{subject_digest}\n{decided_at}\n
+```
+
+with an Ed25519 approver key (`decision` is `allow` or `deny`). The
+resulting JSON is attached with `erebus attest --approval FILE` into
+`execution.approval`. `verify-attest --approver-key <hex|.pub>` checks the
+signature and prints the approver fingerprint; a forged signature is
+`TAMPERED` (exit 2). Spec version is `2.1` when present.
+
 ## 4. Display copies and consistency
 
 `artifact`, `provenance` and `execution` at the top level are convenience
@@ -485,7 +539,7 @@ blobs over 128 MiB unless `COSIGN_MAX_ATTACHMENT_SIZE` is raised (e.g.
 | 1.0 – 1.2 (pretty-JSON signature) | ✅ legacy path | ❌ `STRICT: spec 1.x` | ✅ if pushed | ❌ |
 | 2.0, host not enrolled | ✅ | ❌ `STRICT: … not enrolled` | ✅ | ✅ |
 | 2.0, enrolled host | ✅ | ✅ with registry key | ✅ | ✅ |
-| 2.1 (served call with tool calls or tool context, tool receipt, batch run with `stdin_hash` or `egress`) | ✅ erebus after 0.6.1; ❌ `TAMPERED` on 0.6.1 and older, which rebuild the statement without the new fields | as 2.0 | ✅ | ✅ (same v2 predicate URI) |
+| 2.1 (tool fields, `stdin_hash`/`egress`, `stop`, or `approval`) | ✅ erebus after 0.6.1; ❌ `TAMPERED` on 0.6.1 and older, which rebuild the statement without the new fields | as 2.0 | ✅ | ✅ (same v2 predicate URI) |
 
 ## 7. Files and locations
 

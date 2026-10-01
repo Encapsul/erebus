@@ -11,12 +11,13 @@ use sha2::Digest;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::commands::attest_proxy::{CallRecorder, ReceiptPublisher};
 use crate::commands::build::NglPolicy;
+use erebus_core::attest::StopInfo;
 
 /// How long to wait for llama-server's /health before giving up. Cold start
 /// on CPU with multi-GB models is measured in minutes.
@@ -115,8 +116,13 @@ impl Drop for EngineHandle {
 /// handlers flip the flag instead of letting the default disposition kill the
 /// process instantly — that would orphan the engine and leak the port. The
 /// loops poll the flag, reap the child, and only then let `serve` exit.
+/// The first signal's number is recorded so a stop receipt can name it.
 struct StopSignals {
     flag: Arc<AtomicBool>,
+    /// libc signal number of the first stop (0 = none yet).
+    signal_num: Arc<AtomicI32>,
+    /// Unix seconds when the stop was first observed in a wait loop (0 = none).
+    observed_at_unix: Arc<std::sync::atomic::AtomicU64>,
     #[cfg(unix)]
     ids: Vec<signal_hook::SigId>,
 }
@@ -126,8 +132,15 @@ impl StopSignals {
         #[cfg(unix)]
         let stop = {
             let flag = Arc::new(AtomicBool::new(false));
-            let ids = install_unix_handlers(&flag)?;
-            StopSignals { flag, ids }
+            let signal_num = Arc::new(AtomicI32::new(0));
+            let observed_at_unix = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let ids = install_unix_handlers(&flag, &signal_num)?;
+            StopSignals {
+                flag,
+                signal_num,
+                observed_at_unix,
+                ids,
+            }
         };
         #[cfg(not(unix))]
         // No signals to forward without a unix kernel: the flag can never
@@ -141,6 +154,8 @@ impl StopSignals {
     fn dormant() -> Self {
         StopSignals {
             flag: Arc::new(AtomicBool::new(false)),
+            signal_num: Arc::new(AtomicI32::new(0)),
+            observed_at_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(unix)]
             ids: Vec::new(),
         }
@@ -149,17 +164,62 @@ impl StopSignals {
     fn signaled(&self) -> bool {
         self.flag.load(Ordering::SeqCst)
     }
+
+    /// Record wall-clock time of the first observed stop (idempotent; main
+    /// thread only — not from the signal handler).
+    fn note_observed(&self) {
+        if !self.signaled() {
+            return;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = self
+            .observed_at_unix
+            .compare_exchange(0, now, Ordering::SeqCst, Ordering::SeqCst);
+    }
+
+    /// `(requested_at ISO8601, signal name)` once a stop was observed.
+    fn stop_meta(&self) -> Option<(String, String)> {
+        let secs = self.observed_at_unix.load(Ordering::SeqCst);
+        if secs == 0 {
+            return None;
+        }
+        let name = match self.signal_num.load(Ordering::SeqCst) {
+            #[cfg(unix)]
+            n if n == signal_hook::consts::SIGTERM => "SIGTERM",
+            #[cfg(unix)]
+            n if n == signal_hook::consts::SIGINT => "SIGINT",
+            _ => "SIGTERM",
+        };
+        Some((
+            erebus_core::attest::iso8601_from_unix(secs),
+            name.to_string(),
+        ))
+    }
 }
 
 #[cfg(unix)]
-fn install_unix_handlers(flag: &Arc<AtomicBool>) -> Result<Vec<signal_hook::SigId>> {
-    // `flag::register` swaps the default SIGTERM/SIGINT disposition for one
-    // that only latches the shared flag, so the process survives the signal
-    // long enough to kill the engine instead of dying and orphaning it.
+fn install_unix_handlers(
+    flag: &Arc<AtomicBool>,
+    signal_num: &Arc<AtomicI32>,
+) -> Result<Vec<signal_hook::SigId>> {
+    // Only atomic stores in the handler (async-signal-safe). Wall-clock time
+    // is latched later on the main thread via `note_observed`.
     let mut ids = Vec::new();
     for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
-        let id = signal_hook::flag::register(sig, Arc::clone(flag))
-            .with_context(|| format!("cannot install signal handler for {sig}"))?;
+        let flag = Arc::clone(flag);
+        let signal_num = Arc::clone(signal_num);
+        // SAFETY: the closure only performs atomic stores.
+        let id = unsafe {
+            signal_hook::low_level::register(sig, move || {
+                if !flag.swap(true, Ordering::SeqCst) {
+                    signal_num.store(sig, Ordering::SeqCst);
+                }
+            })
+        }
+        .with_context(|| format!("cannot install signal handler for {sig}"))?;
         ids.push(id);
     }
     Ok(ids)
@@ -496,21 +556,49 @@ pub fn run(args: ServeArgs) -> Result<()> {
         args.llama_server.as_deref(),
         false,
     )?;
+    // Startup abort (signal during wait_healthy) skips the stop receipt —
+    // the trail must not claim a served session that never became ready.
     wait_healthy(&eng.base_url, &mut eng.child, &stop)?;
 
     let mut public_url = eng.base_url.clone();
+    let recorder_for_stop = recorder.clone();
     if let Some(rec) = recorder {
         public_url = start_proxy(&args.host, args.port, engine_port, rec, &stop)?;
     }
     print_banner(&public_url, Path::new(&eng.model_label));
 
     let status = wait_engine(&mut eng.child, &stop)?;
+    if stop.signaled() {
+        maybe_record_stop(recorder_for_stop.as_ref(), &stop);
+    }
     // A SIGTERM-initiated teardown kills the engine, so a non-success status
     // there is expected; only treat a spontaneous engine exit as an error.
     if !status.success() && !stop.signaled() {
         bail!("engine exited with {status}");
     }
     Ok(())
+}
+
+/// Append a stop receipt when serve was attesting and a stop was observed
+/// after the engine became healthy.
+fn maybe_record_stop(recorder: Option<&Arc<CallRecorder>>, stop: &StopSignals) {
+    let Some(rec) = recorder else {
+        return;
+    };
+    let Some((requested_at, signal)) = stop.stop_meta() else {
+        return;
+    };
+    let info = StopInfo {
+        requested_at,
+        reaped_at: erebus_core::attest::utc_now_iso8601(),
+        signal,
+        // Current path always `kill()`s immediately on signal.
+        kill_timeout: true,
+    };
+    match rec.record_stop(info) {
+        Ok(path) => eprintln!("[erebus] stop receipt → {}", path.display()),
+        Err(e) => eprintln!("[erebus] stop receipt failed: {e:#}"),
+    }
 }
 
 /// Where the engine binds. With `--attest-key` it hides on a loopback port
@@ -724,6 +812,7 @@ fn wait_engine(
 ) -> Result<std::process::ExitStatus> {
     loop {
         if stop.signaled() {
+            stop.note_observed();
             let _ = child.kill();
         }
         match child.try_wait()? {
@@ -744,6 +833,7 @@ fn wait_healthy(base_url: &str, child: &mut std::process::Child, stop: &StopSign
     let start = Instant::now();
     loop {
         if stop.signaled() {
+            stop.note_observed();
             bail!("interrupted by SIGTERM/SIGINT during startup");
         }
         if child.try_wait()?.is_some() {

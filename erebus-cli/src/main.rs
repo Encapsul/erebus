@@ -88,7 +88,15 @@ enum Commands {
     ///   erebus attest agent.erebus --key keys/<fp>.key
     ///   erebus attest agent.erebus --push --registry <http://host:8080>   # + <receipt>.proof.json
     ///   erebus attest agent.erebus --envelope agent.dsse.json             # for cosign
+    ///   erebus attest agent.erebus --approval approval.json
     Attest(commands::attest::AttestArgs),
+
+    /// Sign a human approval over a subject digest (EU AI Act Art. 14)
+    ///
+    /// Examples:
+    ///   erebus approve --key approver.key --decision allow --subject sha256:…
+    ///   erebus approve --key approver.key --decision deny --subject-file plan.txt -o approval.json
+    Approve(commands::approve::ApproveArgs),
 
     /// Query your execution attestation trail from a registry
     ///
@@ -177,6 +185,7 @@ enum Commands {
     ///   erebus verify-attest --chain agent.erebus.attest.d
     ///   erebus verify-attest agent.erebus.attest --proof --log-key <hex>      # transparency log
     ///   erebus verify-attest agent.erebus.attest --strict --registry-key <hex> # enrolled machine
+    ///   erebus verify-attest agent.erebus.attest --approver-key <hex|file.pub>
     VerifyAttest(commands::verify_attest::VerifyAttestArgs),
 
     /// Put a tool behind an attested boundary: one signed receipt per tool
@@ -401,6 +410,7 @@ fn main() -> ExitCode {
             }
             commands::attest::run(args)
         }
+        Commands::Approve(args) => commands::approve::run(args),
         Commands::AttestHistory(args) => commands::attest_history::run(args),
         Commands::Enroll(args) => commands::enroll::run(args),
         Commands::Audit(mut args) => {

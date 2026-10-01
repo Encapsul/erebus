@@ -389,17 +389,19 @@ one. Same rule as P0: done only when the acceptance test runs in CI.
   `ERE_EGRESS` a tool called around the boundary is only seen through
   `result_without_execution`, and with it Unix sockets, stdio subprocesses
   and (Linux) other hosts on an allowed port stay open (spec §8).
-- [ ] **R3 Stop receipts** — Klaimee: "its stop button doesn't stop it".
-  `serve` / the stub sign a final receipt on SIGTERM with the time the stop
-  was requested and the time the process group was reaped (or `kill
-  timeout`). Acceptance: `serve` SIGTERM test asserts the signed stop
-  receipt closes the chain and its reap time ≥ request time.
-- [ ] **R4 Human approval in the receipt** — EU AI Act Art. 14 (human
+- [x] **R3 Stop receipts** — Klaimee: "its stop button doesn't stop it".
+  Landed 2026-10-01. `serve --attest-key` appends a final receipt on SIGTERM/
+  SIGINT with signed `execution.stop` (`requested_at`, `reaped_at`, `signal`,
+  `kill_timeout`). Acceptance: `stop_receipt_closes_chain_after_sigterm` in
+  `serve_attest_e2e.rs` (reap ≥ request, chain still verifies). Startup abort
+  during `wait_healthy` skips the stop receipt.
+- [x] **R4 Human approval in the receipt** — EU AI Act Art. 14 (human
   oversight); GrayPass (Fall 2026) already signs per-action approvals.
-  Optional signed `approval` object (approver key fingerprint, decision,
-  digest of what was approved) carried into the statement, verified against
-  a pinned approver key. Acceptance: receipt with a valid approval verifies
-  and prints the approver; forged approval signature → exit 2.
+  Landed 2026-10-01. Optional signed `execution.approval` (`erebus approve`
+  → `erebus attest --approval` → `verify-attest --approver-key`); canonical
+  message `erebus-approval/v1\n…`. Forged approval signature → exit 2
+  (`TAMPERED`). Unit tests: `approval_sign_verify_roundtrip`,
+  `approval_forged_signature_refused`.
 - [ ] **R5 Bundle-to-source provenance** — lesson from Caution (Summer 2026):
   "a hash proves *a* binary ran, not *which source*". `erebus build` emits a
   SLSA v1 provenance statement (git commit, dirty flag, source tree digest,

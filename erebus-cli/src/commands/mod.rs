@@ -1,3 +1,4 @@
+pub mod approve;
 pub mod attest;
 pub mod attest_history;
 pub mod attest_proxy;

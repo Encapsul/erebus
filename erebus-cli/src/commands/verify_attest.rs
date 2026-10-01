@@ -16,7 +16,9 @@
 use anyhow::{Context, Result};
 use clap::Args;
 use ed25519_dalek::VerifyingKey;
-use erebus_core::attest::{check_bundle_matches, verify_attestation, Attestation};
+use erebus_core::attest::{
+    check_approval, check_bundle_matches, key_fingerprint, verify_attestation, Attestation,
+};
 use erebus_core::attest_log::AttestationLog;
 use erebus_core::paths::trusted_keys_dir;
 use std::path::{Path, PathBuf};
@@ -90,6 +92,11 @@ pub struct VerifyAttestArgs {
     /// compromised key cannot forge both the agent and the tool trail
     #[arg(long, value_name = "DIR", requires = "tool_trail")]
     pub tool_trusted_dir: Option<PathBuf>,
+
+    /// Approver public key (64 hex chars) or path to a `.pub` file: when the
+    /// receipt carries `execution.approval`, verify it and print the fingerprint
+    #[arg(long, value_name = "HEX|FILE")]
+    pub approver_key: Option<String>,
 
     /// Output verification result as JSON
     #[arg(long)]
@@ -170,6 +177,13 @@ pub fn run(args: VerifyAttestArgs) -> Result<()> {
             .clone()
             .unwrap_or_else(|| super::attest::proof_path_for(file));
         report["log_proof"] = verify_log_proof(file, &proof_path, &log_keys)?;
+    }
+    if let Some(spec) = &args.approver_key {
+        let file = args
+            .attest_file
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("--approver-key needs a receipt path"))?;
+        report["approval"] = verify_approver(file, spec)?;
     }
 
     if args.json {
@@ -374,6 +388,39 @@ pub(crate) fn parse_log_key(hex_key: &str) -> Result<VerifyingKey> {
         .and_then(|b| b.try_into().ok())
         .ok_or_else(|| anyhow::anyhow!("--log-key must be 64 hex characters"))?;
     VerifyingKey::from_bytes(&bytes).map_err(|e| anyhow::anyhow!("--log-key invalid: {e}"))
+}
+
+/// `--approver-key`: verify `execution.approval` under the pinned key.
+fn verify_approver(file: &Path, spec: &str) -> Result<serde_json::Value> {
+    let data = std::fs::read_to_string(file)
+        .with_context(|| format!("failed to read {}", file.display()))?;
+    let attestation: Attestation = serde_json::from_str(&data)
+        .with_context(|| format!("failed to parse {}", file.display()))?;
+    let key = load_approver_key(spec)?;
+    let vk = check_approval(&attestation, &[key]).context("approval verification failed")?;
+    let approval = attestation.execution.approval.as_ref().unwrap();
+    Ok(serde_json::json!({
+        "verified": true,
+        "decision": approval.decision,
+        "subject_digest": approval.subject_digest,
+        "key_fingerprint": key_fingerprint(&vk),
+        "decided_at": approval.decided_at,
+    }))
+}
+
+fn load_approver_key(spec: &str) -> Result<VerifyingKey> {
+    let path = Path::new(spec);
+    if path.is_file() {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("failed to read approver key {}", path.display()))?;
+        let arr: [u8; 32] = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("approver .pub must be 32 raw bytes"))?;
+        return VerifyingKey::from_bytes(&arr)
+            .map_err(|e| anyhow::anyhow!("approver key invalid: {e}"));
+    }
+    parse_log_key(spec).map_err(|e| anyhow::anyhow!("--approver-key: {e}"))
 }
 
 pub(crate) fn verify_chain(
@@ -597,6 +644,15 @@ fn print_human(report: &serde_json::Value) {
     }
     if let Some(lp) = report.get("log_proof") {
         print_log_proof(lp);
+    }
+    if let Some(a) = report.get("approval").filter(|a| a.is_object()) {
+        let s = |k: &str| a.get(k).and_then(|v| v.as_str()).unwrap_or("?");
+        eprintln!(
+            "OK: approval {} by {} (subject {})",
+            s("decision"),
+            s("key_fingerprint"),
+            s("subject_digest")
+        );
     }
 }
 

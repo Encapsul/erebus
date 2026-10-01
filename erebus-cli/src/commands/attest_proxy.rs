@@ -24,7 +24,9 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::SigningKey;
-use erebus_core::attest::{append_receipt, AttestationTemplate, ExecutionCapture, RequestInfo};
+use erebus_core::attest::{
+    append_receipt, AttestationTemplate, ExecutionCapture, RequestInfo, StopInfo,
+};
 use erebus_core::attest_log::AttestationLog;
 use erebus_core::tool_calls::{ToolCallExtractor, ToolCallReport};
 use erebus_core::tool_exec::{self, ToolInvocation};
@@ -134,6 +136,24 @@ impl CallRecorder {
                 }
                 .with_request_tools(&call.request_tools),
             ),
+            ..ExecutionCapture::default()
+        };
+        let (_, path) = append_receipt(&self.template, &self.key, &self.log, &capture)?;
+        if let Some(publisher) = &self.publisher {
+            publisher.publish(&path)?;
+        }
+        Ok(path)
+    }
+
+    /// Append a stop receipt (only `execution.stop` set) and co-sign via the
+    /// host machine identity through [`append_receipt`].
+    pub fn record_stop(&self, stop: StopInfo) -> Result<PathBuf> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("call recorder lock poisoned"))?;
+        let capture = ExecutionCapture {
+            stop: Some(stop),
             ..ExecutionCapture::default()
         };
         let (_, path) = append_receipt(&self.template, &self.key, &self.log, &capture)?;
