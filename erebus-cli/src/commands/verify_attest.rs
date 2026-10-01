@@ -4,7 +4,9 @@
 //! fingerprint, and consistency of the unsigned display fields with the signed
 //! statement. `--bundle` additionally binds the receipt to a real file.
 //! `--chain <dir>` verifies a whole hash-chained trail (see
-//! `erebus_core::attest_log`). Every reported value is read from the **signed**
+//! `erebus_core::attest_log`) and links tool results to the calls that
+//! requested them (`erebus_core::tool_linkage`; `--require-tool-linkage`
+//! makes findings fatal). Every reported value is read from the **signed**
 //! statement, never from the unsigned copies. `--proof` additionally checks
 //! the registry transparency-log proof stored by `erebus attest --push`
 //! (`<receipt>.proof.json`) — inclusion, signed checkpoint, TSA anchor —
@@ -57,6 +59,21 @@ pub struct VerifyAttestArgs {
     #[arg(long, conflicts_with = "chain")]
     pub strict: bool,
 
+    /// Plaintext response body of a served call: must hash to the signed
+    /// `output_hash` and re-derive the signed `tool_calls`
+    #[arg(long, value_name = "FILE", conflicts_with = "chain")]
+    pub response_body: Option<PathBuf>,
+
+    /// Request body of a served call: `METHOD path` + body must hash to the
+    /// signed `input_hash` and re-derive the signed tool results and history
+    #[arg(long, value_name = "FILE", conflicts_with = "chain")]
+    pub request_body: Option<PathBuf>,
+
+    /// With --chain: fail when a tool result, replayed history or tool name
+    /// does not link to a call the engine issued in the trail
+    #[arg(long, requires = "chain")]
+    pub require_tool_linkage: bool,
+
     /// Output verification result as JSON
     #[arg(long)]
     pub json: bool,
@@ -96,6 +113,23 @@ pub fn run(args: VerifyAttestArgs) -> Result<()> {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("--strict needs a receipt path"))?;
         report["machine"] = verify_strict(file, &registry_keys)?;
+    }
+    if let Some(body_path) = &args.response_body {
+        let file = args
+            .attest_file
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("--response-body needs a receipt path"))?;
+        report["response_body"] = verify_response_body(file, body_path)?;
+    }
+    if let Some(body_path) = &args.request_body {
+        let file = args
+            .attest_file
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("--request-body needs a receipt path"))?;
+        report["request_body"] = verify_request_body(file, body_path)?;
+    }
+    if args.require_tool_linkage {
+        require_linkage(&report["tool_linkage"])?;
     }
     if args.proof || args.proof_file.is_some() {
         let file = args
@@ -177,6 +211,80 @@ pub(crate) fn verify_strict(
     }))
 }
 
+/// `--response-body`: the plaintext body matches the signed digest and the
+/// signed tool-call list (see `erebus_core::attest::check_response_body`).
+fn verify_response_body(file: &Path, body_path: &Path) -> Result<serde_json::Value> {
+    let data = std::fs::read_to_string(file)
+        .with_context(|| format!("failed to read {}", file.display()))?;
+    let attestation: Attestation = serde_json::from_str(&data)
+        .with_context(|| format!("failed to parse {}", file.display()))?;
+    let body = std::fs::read(body_path)
+        .with_context(|| format!("failed to read response body {}", body_path.display()))?;
+    let calls = erebus_core::attest::check_response_body(&attestation, &body)
+        .context("response body verification failed")?;
+    Ok(serde_json::json!({
+        "file": body_path.display().to_string(),
+        "verified": true,
+        "tool_calls": calls.len(),
+    }))
+}
+
+/// `--request-body`: the request matches the signed `input_hash` and the
+/// signed request-side tool fields (see `erebus_core::attest::check_request_body`).
+fn verify_request_body(file: &Path, body_path: &Path) -> Result<serde_json::Value> {
+    let data = std::fs::read_to_string(file)
+        .with_context(|| format!("failed to read {}", file.display()))?;
+    let attestation: Attestation = serde_json::from_str(&data)
+        .with_context(|| format!("failed to parse {}", file.display()))?;
+    let body = std::fs::read(body_path)
+        .with_context(|| format!("failed to read request body {}", body_path.display()))?;
+    let found = erebus_core::attest::check_request_body(&attestation, &body)
+        .context("request body verification failed")?;
+    Ok(serde_json::json!({
+        "file": body_path.display().to_string(),
+        "verified": true,
+        "tool_results": found.results.len(),
+        "tool_history": found.history.len(),
+        "tools_offered": found.offered.len(),
+    }))
+}
+
+/// `--require-tool-linkage`: any anomaly fails the verification.
+fn require_linkage(linkage: &serde_json::Value) -> Result<()> {
+    let anomalies = linkage
+        .get("anomalies")
+        .and_then(|v| v.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if anomalies.is_empty() {
+        return Ok(());
+    }
+    let lines: Vec<String> = anomalies.iter().map(describe_anomaly).collect();
+    anyhow::bail!(
+        "tool linkage verification failed: {} anomaly(ies): {}",
+        lines.len(),
+        lines.join("; ")
+    )
+}
+
+fn describe_anomaly(a: &serde_json::Value) -> String {
+    let f = |k: &str| a.get(k).and_then(|v| v.as_str()).unwrap_or("-");
+    let what = match f("kind") {
+        "result_without_call" => "result fed back for a call the engine never issued",
+        "history_without_call" => "history replays a call the engine never issued",
+        "history_altered" => "history replays a call with a different name or arguments",
+        "result_rewritten" => "a second, different result for the same call",
+        "unoffered_tool" => "the engine called a tool the request did not offer",
+        other => other,
+    };
+    format!(
+        "receipt #{}: {what} ({} {})",
+        a.get("receipt").and_then(|v| v.as_u64()).unwrap_or(0),
+        f("name"),
+        f("id")
+    )
+}
+
 /// Offline check of `<receipt>.proof.json`; the receipt's exact bytes are
 /// the leaf preimage, so a re-serialized receipt fails here on purpose.
 pub(crate) fn verify_log_proof(
@@ -228,6 +336,7 @@ pub(crate) fn verify_chain(
         "count": report.count,
         "head": report.head,
         "bundle_checked": bundle_bytes.is_some(),
+        "tool_linkage": serde_json::to_value(&report.linkage)?,
     }))
 }
 
@@ -263,6 +372,7 @@ fn print_human(report: &serde_json::Value) {
             s("dir")
         );
         eprintln!("  head:    {}", s("head"));
+        print_linkage(&report["tool_linkage"]);
     } else {
         eprintln!("OK: attestation verified (key: {})", s("key"));
         eprintln!("  type:     {}", s("attestation_type"));
@@ -291,6 +401,7 @@ fn print_human(report: &serde_json::Value) {
             );
             eprintln!("  request:  {}", e("input_hash"));
             eprintln!("  response: {}", e("output_hash"));
+            print_tool_calls(req);
         } else {
             eprintln!("  exit:     {}", e("exit_code"));
             eprintln!("  output:   {}", e("output_hash"));
@@ -322,8 +433,81 @@ fn print_human(report: &serde_json::Value) {
     if report.get("bundle_checked") == Some(&serde_json::Value::Bool(true)) {
         eprintln!("  bundle file matches the signed digest");
     }
+    if let Some(rb) = report.get("response_body") {
+        eprintln!(
+            "OK: response body matches the signed digest and its {} tool call(s)",
+            rb.get("tool_calls").and_then(|v| v.as_u64()).unwrap_or(0)
+        );
+    }
+    if let Some(rb) = report.get("request_body") {
+        let n = |k: &str| rb.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+        eprintln!(
+            "OK: request body matches the signed digest, its {} tool result(s) and {} history call(s)",
+            n("tool_results"),
+            n("tool_history")
+        );
+    }
     if let Some(lp) = report.get("log_proof") {
         print_log_proof(lp);
+    }
+}
+
+/// Tool linkage of a verified trail (spec 2.1); silent when no tool was used.
+fn print_linkage(l: &serde_json::Value) {
+    let n = |k: &str| l.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+    let list = |k: &str| {
+        l.get(k)
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+    };
+    let (anomalies, pending) = (list("anomalies"), list("unanswered"));
+    if n("issued") == 0 && n("unlinkable") == 0 && anomalies.is_empty() && n("unverifiable") == 0 {
+        return;
+    }
+    eprintln!(
+        "  tools:   {} call(s) issued, {} answered, {} pending, {} unlinkable, {} unverifiable",
+        n("issued"),
+        n("answered"),
+        pending.len(),
+        n("unlinkable"),
+        n("unverifiable")
+    );
+    for p in &pending {
+        let f = |k: &str| p.get(k).and_then(|v| v.as_str()).unwrap_or("-");
+        let r = p.get("receipt").and_then(|v| v.as_u64()).unwrap_or(0);
+        eprintln!("  pending: receipt #{r}: {} ({})", f("name"), f("id"));
+    }
+    for a in &anomalies {
+        eprintln!("  WARNING: {}", describe_anomaly(a));
+    }
+    if l.get("requests_incomplete") == Some(&serde_json::Value::Bool(true)) {
+        eprintln!(
+            "  note:    some requests were only partially indexed; pending may be overstated"
+        );
+    }
+}
+
+/// Signed tool calls of a served call (spec 2.1), one line each.
+fn print_tool_calls(req: &serde_json::Value) {
+    let calls = req
+        .get("tool_calls")
+        .and_then(|v| v.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let field = |c: &serde_json::Value, k: &str| {
+        c.get(k).and_then(|v| v.as_str()).unwrap_or("-").to_string()
+    };
+    for (i, c) in calls.iter().enumerate() {
+        eprintln!(
+            "  tool #{i}: {} (id {}, args {})",
+            field(c, "name"),
+            field(c, "id"),
+            field(c, "arguments_hash")
+        );
+    }
+    if req.get("tool_calls_incomplete") == Some(&serde_json::Value::Bool(true)) {
+        eprintln!("  tools:    list may be incomplete (response not fully parsed)");
     }
 }
 

@@ -309,6 +309,88 @@ CI job).
   spec said stdin; docs corrected, stdin capture needs a stub change.
   Done when both gaps are fixed and the job is green on Apple Silicon.
 
+### 🔵 R — What the Fall 2026 RFS and the YC field ask for (after P1, before P2)
+
+Derived from §7.2 (RFS re-read 2026-10-01) and §7.5 (YC field). Each item
+closes a question a defense buyer, an agent insurer or an auditor asks on day
+one. Same rule as P0: done only when the acceptance test runs in CI.
+
+- [ ] **R1 Disconnected anchoring (DDIL)** — Army RFS: "survive the most
+  extreme climates … from the Arctic to subterranean". Today a receipt is
+  anchored only if the registry and the TSA are reachable. Add
+  store-and-forward: receipts are co-signed by a local **witness** (vehicle,
+  base, gateway: a second enrolled key that signs checkpoints of the local
+  trail), queued, and published when the link returns; the registry then
+  proves consistency from the witness checkpoint to its own tree head.
+  Acceptance: CI harness cuts the network for N receipts, restores it, and
+  `verify-attest --strict --proof` passes on all of them with a provable
+  "witnessed at T1, anchored at T2" gap; a receipt inserted during the
+  outage is refused.
+- [x] **R2 Action receipts** — Klaimee's covered failures (unauthorized
+  action, scope violation, prompt injection) and Salus / Agentic Fabriq all
+  centre on *what the agent did*, not what the model said. The `serve`
+  proxy already sees the response body: record each OpenAI `tool_calls`
+  entry (name, `sha256(arguments)`) as a signed list in the per-call
+  receipt. No MCP work (frozen, §4). Acceptance: a chat call returning two
+  tool calls yields a receipt whose signed predicate lists both; editing a
+  tool name → `TAMPERED`.
+  Done 2026-10-01 as spec 2.1 (`docs/src/spec/attestation.md` §3.2):
+  `execution.request.tool_calls` = `{choice, id, name, arguments_hash}` per
+  call, for chat completions (JSON, SSE deltas, legacy `function_call`)
+  and the Responses API (`erebus_core::tool_calls`). The format is sniffed
+  from the bytes, never the headers, so the signed list is a pure function
+  of the body `output_hash` covers; anything not fully parsed is signed
+  `tool_calls_incomplete: true`, never "no calls". `verify-attest
+  --response-body FILE` lets an auditor holding the plaintext re-derive
+  the list offline (exit 2 on mismatch). Receipts without tool calls stay
+  byte-identical 2.0. Acceptance: `tests/serve_attest_e2e.rs` (real
+  `serve`, fake engine, real registry: JSON and SSE calls signed,
+  published, proven, re-derived offline; forged body and renamed tool →
+  exit 2) + unit suites in `tool_calls` / `attest` / `attest_proxy`.
+  Linkage (spec §3.3): the request side is signed too (`tools_offered`,
+  `tool_history`, `tool_results` = `{id, content_hash}`), re-derivable with
+  `verify-attest --request-body`, and `verify-attest --chain` links every
+  result to the call that requested it. Injected results, rewritten
+  history, changed results and calls to unoffered tools are reported
+  (`--require-tool-linkage` → exit 2). Acceptance: e2e
+  `serve_links_tool_results_to_the_calls_that_requested_them` (honest
+  2-turn loop links 2/2; a compromised agent's forged history and injected
+  result → 2 anomalies, exit 2) + `tool_requests` / `tool_linkage` units,
+  each detector mutation-checked.
+  Remaining boundary: a reported result is not a proven side effect; that
+  needs the tool behind an attested boundary (spec §8).
+- [ ] **R3 Stop receipts** — Klaimee: "its stop button doesn't stop it".
+  `serve` / the stub sign a final receipt on SIGTERM with the time the stop
+  was requested and the time the process group was reaped (or `kill
+  timeout`). Acceptance: `serve` SIGTERM test asserts the signed stop
+  receipt closes the chain and its reap time ≥ request time.
+- [ ] **R4 Human approval in the receipt** — EU AI Act Art. 14 (human
+  oversight); GrayPass (Fall 2026) already signs per-action approvals.
+  Optional signed `approval` object (approver key fingerprint, decision,
+  digest of what was approved) carried into the statement, verified against
+  a pinned approver key. Acceptance: receipt with a valid approval verifies
+  and prints the approver; forged approval signature → exit 2.
+- [ ] **R5 Bundle-to-source provenance** — lesson from Caution (Summer 2026):
+  "a hash proves *a* binary ran, not *which source*". `erebus build` emits a
+  SLSA v1 provenance statement (git commit, dirty flag, source tree digest,
+  builder version, flags) signed with the operator key; `verify-attest
+  --bundle` follows receipt → bundle → source. Acceptance: provenance
+  verifies with `cosign verify-blob-attestation`; building from a dirty tree
+  is flagged in the signed predicate.
+- [ ] **R6 Hardware-rooted machine key** — the admitted gap of §7.4
+  (root-compromised host). TPM2-sealed machine key on Linux (and Jetson
+  where available), certificate records `key_storage: tpm2 | software`.
+  Caution announces TPM 2.0 attestation for 2026: this is where the two
+  products would otherwise meet. Acceptance: swtpm in CI; copying the key
+  file to another host cannot co-sign.
+- [ ] **R7 Claim-evidence profile** — insurers price and pay on evidence
+  ("your agreement sets the covered failures, required evidence" —
+  Klaimee). `erebus evidence export --since/--until` cuts an incident
+  window and adds a signed summary: receipts in window, model digest
+  changes (drift), tool calls, stops, approvals, verification failures.
+  Acceptance: `tests/evidence_e2e.rs` extended with a window export that
+  verifies offline and refuses a receipt outside the window.
+
 ### 🟡 P2 — Differentiators once the chain is trustworthy
 
 - [ ] `erebus policy`: YAML rules enforced by the stub before exec
@@ -427,6 +509,25 @@ the evidence layer such agents, and any other, would run on. The RFS is an
 **adjacent buyer** (its "tamper-evident audit trails" line), not our category;
 frame it that way or not at all. Same for *DevTools for AI agents*: adjacent.
 
+**Re-read 2026-10-01 — the RFS that is our slot: "The Future of American
+Defense"** (Secretary of the Army). It asks for "commercially developed,
+modular open-system solutions", "software … that plugs directly into our
+open system architecture", surviving "the most extreme climates". That is
+the ICP of §6 (defense, air-gapped, edge) in the buyer's own words: AI on
+drones, sensors and vehicles that must later prove what it ran. What it
+implies for us: disconnected anchoring (R1), hardware-rooted keys (R6),
+arm64/Jetson as a first-class target. Caveat: US Army procurement in
+practice needs a US entity (ITAR/CMMC); the European route (AID/DGA, NATO
+DIANA, UK MOD) takes the same pitch.
+
+Adjacent, cite only as such:
+- *New Operating Systems for the Physical World* — "how do you measure
+  reliability?" across agents, robots and humans; "record all the work as
+  it actually happens". We are the evidence layer under those OSes (R2, R3).
+- *Proving You're Human* — "rebuilding the trust layer". Same problem for
+  machines: knowing what an agent did. Human approvals fit in our receipt
+  (R4); we do not do human identity.
+
 ### 7.3 Traction — what we can produce ourselves, in order
 
 The honest line today is *no production users*. Editing docs cannot change
@@ -496,6 +597,28 @@ The three questions that decide the outcome, and the answers we hold:
 
 What will get us refused is not L2. It is "No production users yet" with no
 pilot or LOI beside it (§7.3).
+
+### 7.5 The YC field, Fall 2025 → Summer 2027 (read 2026-10-01)
+
+879 companies read from the public YC directory. **None ships signed,
+anchored, offline-verifiable per-execution receipts for agents.** The
+closest, and what each teaches:
+
+| Company (batch) | What they do | Relation | Lesson |
+|---|---|---|---|
+| Caution (S26) | verifiable compute on AWS Nitro enclaves; proves prod = reviewed source via reproducible builds | nearest neighbour: proves *what is deployed*, cloud + TEE | link bundle to source (R5); their TPM 2.0 plans meet R6; we own edge / offline / per-run, they own cloud enclaves |
+| Klaimee (Sp26), Mount (Sp26) | liability insurance for deployed agents | **buyer / channel** | they need evidence to underwrite and pay claims; their failure list maps to R2, R3, R7 |
+| Valgo (W26) | risk pricing for physical AI, "historical data doesn't exist" | buyer / channel | an anchored trail *is* that loss history |
+| Multifactor (F25), Agentic Fabriq (W26) | agent identity, permissions, audit logs | complement | their audit logs are operator-controlled: we are the tamper-evident back end |
+| Salus (W26) | blocks agent actions before they execute | complement | pre-execution checks = our P2 `policy`; their verdicts belong in receipts |
+| GrayPass (F26) | signed proof a human approved a key action | complement | carry signed approvals in the statement (R4) |
+| Sentrial (W26) | "Datadog for agent reliability" | the operator tool we contrast against | — |
+| Seeing Systems (W26) | AI-commanded strike drones; UK Royal Marines + 4 NATO forces | **T3 target** (European, NATO) | defense buyers sit in the batch |
+| Arden (Sp26), Denki (F25) | AI-native audit firms | **T4 target** | a third party that verifies a trail in writing |
+
+Rules: name neighbours by what they prove, never "no one else does this";
+the batch is a pipeline (insurers as channel, drone and industrial
+companies as T3, audit firms as T4), not just a competitor list.
 
 ---
 

@@ -12,6 +12,8 @@ use crate::intoto::{
     EREBUS_PREDICATE_TYPE_V2, INTOTO_STATEMENT_TYPE,
 };
 use crate::machine::{MachineIdentity, MachineInfo};
+pub use crate::tool_calls::ToolCall;
+pub use crate::tool_requests::ToolResult;
 use ed25519_dalek::{SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -26,6 +28,13 @@ use time::OffsetDateTime;
 /// `execution.prev_attestation_hash`. All 1.x documents (pretty-JSON
 /// signature, no envelope) remain parseable and verifiable.
 pub const ATTESTATION_SPEC_VERSION: &str = "2.0";
+
+/// Spec 2.1 = 2.0 + the tool fields of `execution.request` (`tool_calls`,
+/// `tools_offered`, `tool_history`, `tool_results` and their `_incomplete`
+/// flags). Written only on receipts that carry one of them: verifiers
+/// predating 2.1 rebuild the statement without them and report `TAMPERED`,
+/// every other receipt stays readable by them.
+pub const ATTESTATION_SPEC_VERSION_TOOL_CALLS: &str = "2.1";
 
 /// Marker string identifying this as an erebus execution attestation.
 pub const ATTESTATION_TYPE: &str = "erebus-execution";
@@ -125,12 +134,55 @@ pub struct ExecutionInfo {
 }
 
 /// One HTTP call through the attesting proxy.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestInfo {
     pub method: String,
     pub path: String,
     /// Upstream HTTP status; `None` when the engine never answered.
     pub status: Option<u16>,
+    /// Spec 2.1: tool calls the engine returned in the response, derived
+    /// from the body `output_hash` covers (see `tool_calls`). Omitted —
+    /// not `null` — when there were none, so 2.0 statements keep their bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
+    /// Spec 2.1: the response could not be fully parsed for tool calls, so
+    /// `tool_calls` may miss entries. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tool_calls_incomplete: bool,
+    /// Spec 2.1: function tool names the request offered the model, derived
+    /// from the body `input_hash` covers (see `tool_requests`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools_offered: Option<Vec<String>>,
+    /// Spec 2.1: earlier calls the request replayed as history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_history: Option<Vec<ToolCall>>,
+    /// Spec 2.1: tool results the request fed back, by call id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_results: Option<Vec<ToolResult>>,
+    /// Spec 2.1: the request could not be fully indexed. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub request_tools_incomplete: bool,
+}
+
+impl RequestInfo {
+    /// `true` when this call uses a spec 2.1 field.
+    pub fn uses_tool_calls(&self) -> bool {
+        self.tool_calls.is_some()
+            || self.tool_calls_incomplete
+            || self.tools_offered.is_some()
+            || self.tool_history.is_some()
+            || self.tool_results.is_some()
+            || self.request_tools_incomplete
+    }
+
+    /// Fill the request-side fields from an extraction (empty lists omitted).
+    pub fn with_request_tools(mut self, r: &crate::tool_requests::RequestToolReport) -> Self {
+        self.tools_offered = (!r.offered.is_empty()).then(|| r.offered.clone());
+        self.tool_history = (!r.history.is_empty()).then(|| r.history.clone());
+        self.tool_results = (!r.results.is_empty()).then(|| r.results.clone());
+        self.request_tools_incomplete = r.incomplete;
+        self
+    }
 }
 
 /// Behavior-hook fields a supervising launcher can attach to a receipt.
@@ -373,7 +425,7 @@ impl AttestationTemplate {
         }
         let operator_sig = envelope_sig_hex(&envelope, &operator_fp)?;
         Ok(Attestation {
-            spec_version: ATTESTATION_SPEC_VERSION.to_string(),
+            spec_version: spec_version_for(&execution).to_string(),
             attestation_type: ATTESTATION_TYPE.to_string(),
             artifact: self.artifact.clone(),
             provenance: self.provenance.clone(),
@@ -387,6 +439,19 @@ impl AttestationTemplate {
             envelope: Some(envelope),
             machine: signers.machine.map(MachineIdentity::info),
         })
+    }
+}
+
+/// Lowest spec version that describes every field of `execution`.
+fn spec_version_for(execution: &ExecutionInfo) -> &'static str {
+    if execution
+        .request
+        .as_ref()
+        .is_some_and(RequestInfo::uses_tool_calls)
+    {
+        ATTESTATION_SPEC_VERSION_TOOL_CALLS
+    } else {
+        ATTESTATION_SPEC_VERSION
     }
 }
 
@@ -855,6 +920,148 @@ pub fn check_bundle_matches(
     Ok(())
 }
 
+/// Bind a served-call receipt to the plaintext response body an auditor was
+/// handed: the body must hash to the signed `output_hash`, and re-extracting
+/// its tool calls must give exactly the signed list — or, when the receipt
+/// says extraction was incomplete, a superset of it. Returns the signed calls.
+pub fn check_response_body(
+    attestation: &Attestation,
+    body: &[u8],
+) -> Result<Vec<ToolCall>, anyhow::Error> {
+    let exec = attestation
+        .statement
+        .predicate
+        .get("execution")
+        .ok_or_else(|| anyhow::anyhow!("attestation has no signed execution block"))?;
+    let request = exec
+        .get("request")
+        .filter(|r| r.is_object())
+        .ok_or_else(|| anyhow::anyhow!("not a served-call receipt (no signed request block)"))?;
+    let signed_hash = exec.get("output_hash").and_then(|v| v.as_str());
+    let actual = sha256_hex(body);
+    if signed_hash != Some(actual.as_str()) {
+        anyhow::bail!(
+            "TAMPERED: response body mismatch (receipt signed {}, file is {actual})",
+            signed_hash.unwrap_or("no output_hash")
+        );
+    }
+    let (signed, incomplete) = signed_tool_calls(request)?;
+    let found = crate::tool_calls::extract(body);
+    let consistent = if incomplete {
+        signed.iter().all(|c| found.calls.contains(c))
+    } else {
+        !found.incomplete && found.calls == signed
+    };
+    if !consistent {
+        anyhow::bail!(
+            "TAMPERED: tool_calls mismatch (receipt signed {} call(s), response body carries {}{})",
+            signed.len(),
+            found.calls.len(),
+            if found.incomplete { " or more" } else { "" }
+        );
+    }
+    Ok(signed)
+}
+
+/// The `execution.request` block of the **signed** statement; `None` for
+/// receipts that are not served calls.
+pub fn signed_request(attestation: &Attestation) -> Result<Option<RequestInfo>, anyhow::Error> {
+    match attestation
+        .statement
+        .predicate
+        .get("execution")
+        .and_then(|e| e.get("request"))
+    {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => serde_json::from_value(v.clone())
+            .map(Some)
+            .map_err(|e| anyhow::anyhow!("signed request block is malformed: {e}")),
+    }
+}
+
+/// Bind a served-call receipt to the request body an auditor was handed:
+/// `METHOD path\n` + body must hash to the signed `input_hash`, and
+/// re-indexing it must give exactly the signed request-side tool fields —
+/// or, when the receipt says indexing was incomplete, a superset of them.
+pub fn check_request_body(
+    attestation: &Attestation,
+    body: &[u8],
+) -> Result<crate::tool_requests::RequestToolReport, anyhow::Error> {
+    let req = signed_request(attestation)?
+        .ok_or_else(|| anyhow::anyhow!("not a served-call receipt (no signed request block)"))?;
+    check_input_hash(attestation, &req, body)?;
+    let signed = crate::tool_requests::RequestToolReport {
+        offered: req.tools_offered.unwrap_or_default(),
+        history: req.tool_history.unwrap_or_default(),
+        results: req.tool_results.unwrap_or_default(),
+        incomplete: req.request_tools_incomplete,
+    };
+    let found = crate::tool_requests::extract_request(body);
+    if !request_tools_consistent(&signed, &found) {
+        anyhow::bail!(
+            "TAMPERED: request tool fields mismatch (receipt signed {} result(s) and {} history \
+             call(s), request body carries {} and {})",
+            signed.results.len(),
+            signed.history.len(),
+            found.results.len(),
+            found.history.len()
+        );
+    }
+    Ok(signed)
+}
+
+/// The proxy signs `sha256("METHOD path\n" || body)` as `input_hash`.
+fn check_input_hash(
+    attestation: &Attestation,
+    req: &RequestInfo,
+    body: &[u8],
+) -> Result<(), anyhow::Error> {
+    let signed_hash = attestation
+        .statement
+        .predicate
+        .get("execution")
+        .and_then(|e| e.get("input_hash"))
+        .and_then(|v| v.as_str());
+    let mut preimage = format!("{} {}\n", req.method, req.path).into_bytes();
+    preimage.extend_from_slice(body);
+    let actual = sha256_hex(&preimage);
+    if signed_hash != Some(actual.as_str()) {
+        anyhow::bail!(
+            "TAMPERED: request body mismatch (receipt signed {}, `{} {}` + file is {actual})",
+            signed_hash.unwrap_or("no input_hash"),
+            req.method,
+            req.path
+        );
+    }
+    Ok(())
+}
+
+fn request_tools_consistent(
+    signed: &crate::tool_requests::RequestToolReport,
+    found: &crate::tool_requests::RequestToolReport,
+) -> bool {
+    if !signed.incomplete {
+        return !found.incomplete && found == signed;
+    }
+    signed.offered.iter().all(|t| found.offered.contains(t))
+        && signed.history.iter().all(|c| found.history.contains(c))
+        && signed.results.iter().all(|r| found.results.contains(r))
+}
+
+/// `tool_calls` and `tool_calls_incomplete` of a signed request block.
+fn signed_tool_calls(request: &serde_json::Value) -> Result<(Vec<ToolCall>, bool), anyhow::Error> {
+    let calls = match request.get("tool_calls") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(v) => serde_json::from_value(v.clone())
+            .map_err(|e| anyhow::anyhow!("signed tool_calls are malformed: {e}"))?,
+    };
+    let incomplete = request
+        .get("tool_calls_incomplete")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Ok((calls, incomplete))
+}
+
 /// Remove null-valued object members, recursively.
 fn strip_nulls(value: serde_json::Value) -> serde_json::Value {
     match value {
@@ -1314,11 +1521,7 @@ mod tests {
         let capture = ExecutionCapture {
             input_hash: Some("sha256:req".to_string()),
             output_hash: Some("sha256:resp".to_string()),
-            request: Some(RequestInfo {
-                method: "POST".to_string(),
-                path: "/v1/chat/completions".to_string(),
-                status: Some(200),
-            }),
+            request: Some(chat_request(None, false)),
             ..ExecutionCapture::default()
         };
         let mut att = template.attest(&key, &capture).unwrap();
@@ -1327,6 +1530,11 @@ mod tests {
         let req = &att.statement.predicate["execution"]["request"];
         assert_eq!(req["method"], "POST");
         assert_eq!(req["status"], 200);
+        // No tool calls: the 2.0 wire form, byte for byte.
+        assert_eq!(att.spec_version, "2.0");
+        assert!(!String::from_utf8(receipt_bytes(&att).unwrap())
+            .unwrap()
+            .contains("tool_calls"));
 
         // The template matches what generate_attestation produces.
         let direct = generate_attestation(&bundle_path, &key).unwrap();
@@ -1339,6 +1547,207 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("TAMPERED: execution mismatch"), "{err}");
+    }
+
+    fn chat_request(tool_calls: Option<Vec<ToolCall>>, incomplete: bool) -> RequestInfo {
+        RequestInfo {
+            method: "POST".to_string(),
+            path: "/v1/chat/completions".to_string(),
+            status: Some(200),
+            tool_calls,
+            tool_calls_incomplete: incomplete,
+            ..RequestInfo::default()
+        }
+    }
+
+    fn tool_call(name: &str) -> ToolCall {
+        ToolCall {
+            choice: 0,
+            id: Some(format!("call_{name}")),
+            name: name.to_string(),
+            arguments_hash: sha256_hex(name.as_bytes()),
+        }
+    }
+
+    /// Spec 2.1: tool calls are part of the signed statement; every edit of
+    /// the display copy — rename, drop, add, flag flip — is `TAMPERED`.
+    #[test]
+    fn tool_calls_are_signed_and_any_edit_is_tampering() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bundle_path, _, _) = write_bundle(dir.path());
+        let key = test_key();
+        let trusted = [key.verifying_key()];
+        let template = AttestationTemplate::from_bundle(&bundle_path).unwrap();
+        let calls = vec![tool_call("get_weather"), tool_call("send_email")];
+        let capture = ExecutionCapture {
+            request: Some(chat_request(Some(calls.clone()), false)),
+            ..ExecutionCapture::default()
+        };
+        let att = template.attest(&key, &capture).unwrap();
+        assert_eq!(att.spec_version, ATTESTATION_SPEC_VERSION_TOOL_CALLS);
+        let signed = &att.statement.predicate["execution"]["request"]["tool_calls"];
+        assert_eq!(signed[1]["name"], "send_email");
+        assert!(att.statement.predicate["execution"]["request"]
+            .get("tool_calls_incomplete")
+            .is_none());
+        let reparsed: Attestation = serde_json::from_slice(&receipt_bytes(&att).unwrap()).unwrap();
+        verify_attestation(&reparsed, &trusted).unwrap();
+        assert_eq!(reparsed.execution.request.unwrap().tool_calls, Some(calls));
+
+        let edits: [fn(&mut RequestInfo); 4] = [
+            |r| r.tool_calls.as_mut().unwrap()[1].name = "noop".to_string(),
+            |r| r.tool_calls = None,
+            |r| r.tool_calls.as_mut().unwrap().push(tool_call("rm_rf")),
+            |r| r.tool_calls_incomplete = true,
+        ];
+        for edit in edits {
+            let mut t = att.clone();
+            edit(t.execution.request.as_mut().unwrap());
+            let err = verify_attestation(&t, &trusted).unwrap_err().to_string();
+            assert!(err.contains("TAMPERED: execution mismatch"), "{err}");
+        }
+
+        // Grafting calls onto a receipt that signed none is caught too.
+        let plain = template
+            .attest(
+                &key,
+                &ExecutionCapture {
+                    request: Some(chat_request(None, false)),
+                    ..ExecutionCapture::default()
+                },
+            )
+            .unwrap();
+        let mut t = plain;
+        t.execution.request.as_mut().unwrap().tool_calls = Some(vec![tool_call("x")]);
+        let err = verify_attestation(&t, &trusted).unwrap_err().to_string();
+        assert!(err.contains("TAMPERED: execution mismatch"), "{err}");
+    }
+
+    /// The auditor's offline check: body ↔ `output_hash`, body ↔ signed list.
+    #[test]
+    fn response_body_rederives_the_signed_tool_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bundle_path, _, _) = write_bundle(dir.path());
+        let key = test_key();
+        let template = AttestationTemplate::from_bundle(&bundle_path).unwrap();
+        let body = br#"{"choices":[{"message":{"tool_calls":[
+            {"id":"a","function":{"name":"get_weather","arguments":"{}"}},
+            {"id":"b","function":{"name":"send_email","arguments":"{}"}}]}}]}"#;
+        let found = crate::tool_calls::extract(body).calls;
+        let sign = |calls: Option<Vec<ToolCall>>, incomplete: bool, out: &[u8]| {
+            let capture = ExecutionCapture {
+                output_hash: Some(sha256_hex(out)),
+                request: Some(chat_request(calls, incomplete)),
+                ..ExecutionCapture::default()
+            };
+            template.attest(&key, &capture).unwrap()
+        };
+
+        let honest = sign(Some(found.clone()), false, body);
+        assert_eq!(check_response_body(&honest, body).unwrap(), found);
+        let err = check_response_body(&honest, b"{}").unwrap_err().to_string();
+        assert!(err.contains("TAMPERED: response body mismatch"), "{err}");
+
+        // A launcher that hid a call signed a list the body contradicts.
+        let hiding = sign(Some(found[..1].to_vec()), false, body);
+        let err = check_response_body(&hiding, body).unwrap_err().to_string();
+        assert!(err.contains("TAMPERED: tool_calls mismatch"), "{err}");
+        let none = sign(None, false, body);
+        assert!(check_response_body(&none, body).is_err());
+
+        // "Incomplete" only promises a subset of what the body carries.
+        let partial = sign(Some(found[..1].to_vec()), true, body);
+        assert_eq!(check_response_body(&partial, body).unwrap().len(), 1);
+        let invented = sign(Some(vec![tool_call("rm_rf")]), true, body);
+        assert!(check_response_body(&invented, body).is_err());
+
+        let plain = sign(
+            None,
+            false,
+            br#"{"choices":[{"message":{"content":"hi"}}]}"#,
+        );
+        let ok = check_response_body(&plain, br#"{"choices":[{"message":{"content":"hi"}}]}"#);
+        assert!(ok.unwrap().is_empty());
+
+        let (run, _) = spec2_receipt(&key, None);
+        let err = check_response_body(&run, body).unwrap_err().to_string();
+        assert!(err.contains("not a served-call receipt"), "{err}");
+    }
+
+    /// Request side: offered tools, replayed history and fed-back results are
+    /// signed, re-derivable from the request body, and any edit is caught.
+    #[test]
+    fn request_tool_fields_are_signed_and_rederived_from_the_request_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bundle_path, _, _) = write_bundle(dir.path());
+        let key = test_key();
+        let trusted = [key.verifying_key()];
+        let template = AttestationTemplate::from_bundle(&bundle_path).unwrap();
+        let body = br#"{"tools":[{"type":"function","function":{"name":"get_weather"}}],
+          "messages":[{"role":"assistant","tool_calls":[{"id":"call_a","type":"function",
+            "function":{"name":"get_weather","arguments":"{}"}}]},
+            {"role":"tool","tool_call_id":"call_a","content":"18C"}]}"#;
+        let found = crate::tool_requests::extract_request(body);
+        let sign = |r: &crate::tool_requests::RequestToolReport, b: &[u8]| {
+            let mut input = b"POST /v1/chat/completions\n".to_vec();
+            input.extend_from_slice(b);
+            let capture = ExecutionCapture {
+                input_hash: Some(sha256_hex(&input)),
+                request: Some(chat_request(None, false).with_request_tools(r)),
+                ..ExecutionCapture::default()
+            };
+            template.attest(&key, &capture).unwrap()
+        };
+
+        let att = sign(&found, body);
+        assert_eq!(att.spec_version, "2.1");
+        let req = &att.statement.predicate["execution"]["request"];
+        assert_eq!(req["tool_results"][0]["id"], "call_a");
+        assert_eq!(req["tools_offered"][0], "get_weather");
+        assert_eq!(check_request_body(&att, body).unwrap(), found);
+        let err = check_request_body(&att, b"{}").unwrap_err().to_string();
+        assert!(err.contains("TAMPERED: request body mismatch"), "{err}");
+
+        let edits: [fn(&mut RequestInfo); 3] = [
+            |r| r.tool_results.as_mut().unwrap()[0].content_hash = "sha256:00".into(),
+            |r| r.tool_history = None,
+            |r| r.tools_offered.as_mut().unwrap().push("rm_rf".into()),
+        ];
+        for edit in edits {
+            let mut t = att.clone();
+            edit(t.execution.request.as_mut().unwrap());
+            let err = verify_attestation(&t, &trusted).unwrap_err().to_string();
+            assert!(err.contains("TAMPERED: execution mismatch"), "{err}");
+        }
+
+        // A proxy that signed a hidden result away contradicts the body.
+        let mut hiding = found.clone();
+        hiding.results.clear();
+        let err = check_request_body(&sign(&hiding, body), body)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("TAMPERED: request tool fields mismatch"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn incomplete_extraction_alone_is_signed_as_2_1() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bundle_path, _, _) = write_bundle(dir.path());
+        let key = test_key();
+        let template = AttestationTemplate::from_bundle(&bundle_path).unwrap();
+        let capture = ExecutionCapture {
+            request: Some(chat_request(None, true)),
+            ..ExecutionCapture::default()
+        };
+        let att = template.attest(&key, &capture).unwrap();
+        assert_eq!(att.spec_version, "2.1");
+        let req = &att.statement.predicate["execution"]["request"];
+        assert_eq!(req["tool_calls_incomplete"], true);
+        assert!(req.get("tool_calls").is_none());
+        verify_attestation(&att, &[key.verifying_key()]).unwrap();
     }
 
     fn spec2_receipt(

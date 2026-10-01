@@ -5,7 +5,10 @@
 //! (`METHOD path\n` + body) and the *decoded* response body while streaming
 //! it (Content-Length, chunked/SSE, or read-to-EOF), then appends one signed,
 //! chained receipt to the trail. The engine's output is never buffered or
-//! altered, so time-to-first-token is unchanged.
+//! altered, so time-to-first-token is unchanged. Tool calls in the response
+//! (`erebus_core::tool_calls`) are extracted from the same decoded bytes and
+//! signed into the receipt, with the tool context of the request
+//! (`erebus_core::tool_requests`) that links them across the trail (spec 2.1).
 //!
 //! HTTP/1.1 only, one request per connection (`Connection: close` both ways):
 //! keep-alive multiplexing would make request/response pairing fragile for no
@@ -23,6 +26,8 @@ use anyhow::{bail, Context, Result};
 use ed25519_dalek::SigningKey;
 use erebus_core::attest::{append_receipt, AttestationTemplate, ExecutionCapture, RequestInfo};
 use erebus_core::attest_log::AttestationLog;
+use erebus_core::tool_calls::{ToolCallExtractor, ToolCallReport};
+use erebus_core::tool_requests::{extract_request_encoded, RequestToolReport};
 use sha2::{Digest, Sha256};
 
 /// Header block cap; anything larger is not an OpenAI-style API call.
@@ -59,6 +64,8 @@ pub struct CallSummary {
     pub status: Option<u16>,
     pub request_hash: String,
     pub response_hash: String,
+    pub tool_calls: ToolCallReport,
+    pub request_tools: RequestToolReport,
 }
 
 impl CallRecorder {
@@ -90,11 +97,18 @@ impl CallRecorder {
         let capture = ExecutionCapture {
             input_hash: Some(call.request_hash.clone()),
             output_hash: Some(call.response_hash.clone()),
-            request: Some(RequestInfo {
-                method: call.method.clone(),
-                path: call.path.clone(),
-                status: call.status,
-            }),
+            request: Some(
+                RequestInfo {
+                    method: call.method.clone(),
+                    path: call.path.clone(),
+                    status: call.status,
+                    tool_calls: (!call.tool_calls.calls.is_empty())
+                        .then(|| call.tool_calls.calls.clone()),
+                    tool_calls_incomplete: call.tool_calls.incomplete,
+                    ..RequestInfo::default()
+                }
+                .with_request_tools(&call.request_tools),
+            ),
             ..ExecutionCapture::default()
         };
         let (_, path) = append_receipt(&self.template, &self.key, &self.log, &capture)?;
@@ -239,29 +253,38 @@ impl Relay {
         let mut cin = BufReader::new(self.client.try_clone().context("clone client socket")?);
         let req = read_head(&mut cin).context("reading client request")?;
         let (method, target) = req.request_line()?;
-        let body = read_request_body(&mut cin, &req)?;
+        let req_body = read_request_body(&mut cin, &req)?;
         let mut req_hasher = Sha256::new();
         req_hasher.update(format!("{method} {target}\n").as_bytes());
-        req_hasher.update(&body);
+        req_hasher.update(&req_body);
 
-        let mut uin = send_upstream(upstream, &req, &body)?;
+        let mut uin = send_upstream(upstream, &req, &req_body)?;
         let resp = read_head(&mut uin).context("reading engine response")?;
         let status = resp.status_code();
         self.client.write_all(&resp.serialize_close())?;
         self.sent_head = true;
         let framing = resp.response_framing(status, method == "HEAD");
-        let response_hash = relay_body(&mut uin, &mut self.client, framing)?;
+        let tools = if method == "POST" {
+            ToolCallExtractor::for_encoding(resp.header("Content-Encoding"))
+        } else {
+            ToolCallExtractor::off()
+        };
+        let mut body = BodyObserver::new(tools);
+        relay_body(&mut uin, &mut self.client, framing, &mut body)?;
         self.client.flush()?;
 
         if method != "POST" {
             return Ok(None);
         }
+        let (response_hash, tool_calls) = body.finish();
         Ok(Some(CallSummary {
+            request_tools: extract_request_encoded(&req_body, req.header("Content-Encoding")),
             method,
             path: target,
             status,
             request_hash: hex_digest(req_hasher),
             response_hash,
+            tool_calls,
         }))
     }
 }
@@ -445,21 +468,50 @@ fn read_request_body<R: BufRead>(r: &mut R, head: &Head) -> Result<Vec<u8>> {
     Ok(body)
 }
 
-/// Stream the response body to the client while hashing the *decoded* bytes.
-fn relay_body<R: BufRead, W: Write>(r: &mut R, w: &mut W, framing: Framing) -> Result<String> {
-    let mut hasher = Sha256::new();
-    match framing {
-        Framing::None => {}
-        Framing::Length(n) => copy_n(r, w, n, &mut hasher)?,
-        Framing::Chunked => relay_chunked(r, w, &mut hasher)?,
-        Framing::Close => copy_to_eof(r, w, &mut hasher)?,
+/// Everything derived from the decoded response body: its digest and the
+/// tool calls it carries.
+struct BodyObserver {
+    hasher: Sha256,
+    tools: ToolCallExtractor,
+}
+
+impl BodyObserver {
+    fn new(tools: ToolCallExtractor) -> Self {
+        Self {
+            hasher: Sha256::new(),
+            tools,
+        }
     }
-    Ok(hex_digest(hasher))
+
+    fn update(&mut self, bytes: &[u8]) {
+        self.hasher.update(bytes);
+        self.tools.update(bytes);
+    }
+
+    fn finish(self) -> (String, ToolCallReport) {
+        (hex_digest(self.hasher), self.tools.finish())
+    }
+}
+
+/// Stream the response body to the client while observing the *decoded*
+/// bytes.
+fn relay_body<R: BufRead, W: Write>(
+    r: &mut R,
+    w: &mut W,
+    framing: Framing,
+    h: &mut BodyObserver,
+) -> Result<()> {
+    match framing {
+        Framing::None => Ok(()),
+        Framing::Length(n) => copy_n(r, w, n, h),
+        Framing::Chunked => relay_chunked(r, w, h),
+        Framing::Close => copy_to_eof(r, w, h),
+    }
 }
 
 /// Copy exactly `n` bytes, flushing after each read so tokens reach the
 /// client as soon as the engine emits them.
-fn copy_n<R: Read, W: Write>(r: &mut R, w: &mut W, mut n: u64, h: &mut Sha256) -> Result<()> {
+fn copy_n<R: Read, W: Write>(r: &mut R, w: &mut W, mut n: u64, h: &mut BodyObserver) -> Result<()> {
     let mut buf = [0u8; 16 * 1024];
     while n > 0 {
         let want = usize::try_from(n.min(buf.len() as u64)).unwrap_or(buf.len());
@@ -475,7 +527,7 @@ fn copy_n<R: Read, W: Write>(r: &mut R, w: &mut W, mut n: u64, h: &mut Sha256) -
     Ok(())
 }
 
-fn copy_to_eof<R: Read, W: Write>(r: &mut R, w: &mut W, h: &mut Sha256) -> Result<()> {
+fn copy_to_eof<R: Read, W: Write>(r: &mut R, w: &mut W, h: &mut BodyObserver) -> Result<()> {
     let mut buf = [0u8; 16 * 1024];
     loop {
         let got = r.read(&mut buf)?;
@@ -490,7 +542,7 @@ fn copy_to_eof<R: Read, W: Write>(r: &mut R, w: &mut W, h: &mut Sha256) -> Resul
 
 /// Forward chunk framing verbatim; hash only chunk payloads so the digest
 /// equals `sha256(decoded body)` regardless of how the engine split it.
-fn relay_chunked<R: BufRead, W: Write>(r: &mut R, w: &mut W, h: &mut Sha256) -> Result<()> {
+fn relay_chunked<R: BufRead, W: Write>(r: &mut R, w: &mut W, h: &mut BodyObserver) -> Result<()> {
     let mut line = Vec::new();
     loop {
         line.clear();
@@ -703,6 +755,178 @@ mod tests {
             .to_string();
         assert!(err.contains("TAMPERED"), "{err}");
         stop.store(true, Ordering::SeqCst);
+    }
+
+    fn http_response(content_type: &str, body: &[u8]) -> &'static [u8] {
+        let mut out = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        out.extend_from_slice(body);
+        Box::leak(out.into_boxed_slice())
+    }
+
+    fn read_receipt(path: &Path) -> erebus_core::attest::Attestation {
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    /// R2 acceptance: a chat call returning two tool calls yields a receipt
+    /// whose signed predicate lists both — JSON and chunked SSE agree — and
+    /// editing a tool name breaks verification.
+    #[test]
+    fn tool_calls_are_signed_into_the_receipt_streamed_or_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = br#"{"choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_a","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}},{"id":"call_b","type":"function","function":{"name":"send_email","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#;
+        let (engine, _seen) = fake_engine(http_response("application/json", json));
+        let rec = recorder(dir.path());
+        let (proxy, stop) = start_proxy(engine, Arc::clone(&rec));
+        let raw = roundtrip(proxy, CHAT_REQ);
+        assert_eq!(split_body(&raw), json, "relayed unchanged");
+        stop.store(true, Ordering::SeqCst);
+
+        let ev1 = r#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"get_weather","arguments":"{\"city\":"}}]}}]}"#;
+        let ev2 = r#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Paris\"}"}},{"index":1,"id":"call_b","function":{"name":"send_email","arguments":"{}"}}]}}]}"#;
+        let mut sse = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        for event in [format!("{ev1}\n\n"), format!("{ev2}\n\ndata: [DONE]\n\n")] {
+            // Split each event across two chunks, mid-JSON.
+            let (a, b) = event.as_bytes().split_at(event.len() / 2);
+            for part in [a, b] {
+                sse.extend_from_slice(format!("{:x}\r\n", part.len()).as_bytes());
+                sse.extend_from_slice(part);
+                sse.extend_from_slice(b"\r\n");
+            }
+        }
+        sse.extend_from_slice(b"0\r\n\r\n");
+        let (engine, _seen) = fake_engine(Box::leak(sse.into_boxed_slice()));
+        let (proxy, stop) = start_proxy(engine, Arc::clone(&rec));
+        roundtrip(proxy, CHAT_REQ);
+        stop.store(true, Ordering::SeqCst);
+
+        let entries = wait_entries(&rec, 2);
+        let (plain, streamed) = (read_receipt(&entries[0]), read_receipt(&entries[1]));
+        for att in [&plain, &streamed] {
+            assert_eq!(att.spec_version, "2.1");
+            let signed = &att.statement.predicate["execution"]["request"]["tool_calls"];
+            assert_eq!(signed[0]["name"], "get_weather");
+            assert_eq!(signed[0]["id"], "call_a");
+            assert_eq!(
+                signed[0]["arguments_hash"],
+                sha256_hex(br#"{"city":"Paris"}"#)
+            );
+            assert_eq!(signed[1]["name"], "send_email");
+            assert_eq!(signed.as_array().unwrap().len(), 2);
+        }
+        assert_eq!(
+            plain.execution.request.as_ref().unwrap().tool_calls,
+            streamed.execution.request.as_ref().unwrap().tool_calls
+        );
+
+        let vk = SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+        let log = AttestationLog::open(rec.log_dir()).unwrap();
+        assert_eq!(log.verify_chain(&[vk], None).unwrap().count, 2);
+        let mut doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&entries[1]).unwrap()).unwrap();
+        doc["execution"]["request"]["tool_calls"][1]["name"] = "noop".into();
+        std::fs::write(&entries[1], serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+        let err = log.verify_chain(&[vk], None).unwrap_err().to_string();
+        assert!(err.contains("TAMPERED"), "{err}");
+    }
+
+    #[test]
+    fn plain_answers_keep_the_2_0_receipt_and_gzip_is_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = recorder(dir.path());
+        let (engine, _seen) = fake_engine(http_response(
+            "application/json",
+            br#"{"choices":[{"message":{"content":"hi"}}]}"#,
+        ));
+        let (proxy, stop) = start_proxy(engine, Arc::clone(&rec));
+        roundtrip(proxy, CHAT_REQ);
+        stop.store(true, Ordering::SeqCst);
+        let gz: &'static [u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: 2\r\n\r\n\x1f\x8b";
+        let (engine, _seen) = fake_engine(gz);
+        let (proxy, stop) = start_proxy(engine, Arc::clone(&rec));
+        roundtrip(proxy, CHAT_REQ);
+        stop.store(true, Ordering::SeqCst);
+
+        let entries = wait_entries(&rec, 2);
+        let plain = read_receipt(&entries[0]);
+        assert_eq!(plain.spec_version, "2.0");
+        assert!(!std::fs::read_to_string(&entries[0])
+            .unwrap()
+            .contains("tool_calls"));
+        let gz = read_receipt(&entries[1]);
+        let req = gz.execution.request.unwrap();
+        assert!(req.tool_calls_incomplete && req.tool_calls.is_none());
+        assert_eq!(gz.spec_version, "2.1");
+    }
+
+    fn chat_post(body: &str) -> Vec<u8> {
+        format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    /// One proxied call: fresh fake engine answering `answer`.
+    fn proxied(rec: &Arc<CallRecorder>, request: &[u8], answer: &[u8]) {
+        let (engine, _seen) = fake_engine(http_response("application/json", answer));
+        let (proxy, stop) = start_proxy(engine, Arc::clone(rec));
+        roundtrip(proxy, request);
+        stop.store(true, Ordering::SeqCst);
+    }
+
+    /// The agent loop through the proxy: turn 1 offers tools and gets a
+    /// call, turn 2 replays it with its result. The trail links them; a
+    /// third turn feeding a result for a call never issued is reported.
+    #[test]
+    fn request_side_tool_context_is_signed_and_linked_across_the_trail() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = recorder(dir.path());
+        let tools = r#""tools":[{"type":"function","function":{"name":"get_weather"}}]"#;
+        let call = r#"{"id":"call_a","type":"function","function":{"name":"get_weather","arguments":"{}"}}"#;
+        let answer = format!(
+            r#"{{"choices":[{{"index":0,"message":{{"role":"assistant","tool_calls":[{call}]}}}}]}}"#
+        );
+        let text = br#"{"choices":[{"message":{"content":"18C"}}]}"#;
+        let turn1 = format!(r#"{{{tools},"messages":[{{"role":"user","content":"w?"}}]}}"#);
+        let history = format!(
+            r#"{{"role":"assistant","tool_calls":[{call}]}},{{"role":"tool","tool_call_id":"call_a","content":"18C"}}"#
+        );
+        let turn2 =
+            format!(r#"{{{tools},"messages":[{{"role":"user","content":"w?"}},{history}]}}"#);
+        proxied(&rec, &chat_post(&turn1), answer.as_bytes());
+        wait_entries(&rec, 1);
+        proxied(&rec, &chat_post(&turn2), text);
+
+        let entries = wait_entries(&rec, 2);
+        let second = read_receipt(&entries[1]);
+        let req = second.execution.request.as_ref().unwrap();
+        assert_eq!(second.spec_version, "2.1");
+        assert_eq!(req.tool_results.as_ref().unwrap()[0].id, "call_a");
+        assert_eq!(
+            req.tool_results.as_ref().unwrap()[0].content_hash,
+            sha256_hex(b"18C")
+        );
+        assert_eq!(req.tool_history.as_ref().unwrap()[0].name, "get_weather");
+        erebus_core::attest::check_request_body(&second, turn2.as_bytes()).unwrap();
+
+        let vk = SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+        let log = AttestationLog::open(rec.log_dir()).unwrap();
+        let linkage = log.verify_chain(&[vk], None).unwrap().linkage;
+        assert_eq!((linkage.issued, linkage.answered), (1, 1));
+        assert!(linkage.anomalies.is_empty() && linkage.unanswered.is_empty());
+
+        let injected =
+            r#"{"messages":[{"role":"tool","tool_call_id":"call_evil","content":"ok"}]}"#;
+        proxied(&rec, &chat_post(injected), text);
+        wait_entries(&rec, 3);
+        let linkage = log.verify_chain(&[vk], None).unwrap().linkage;
+        assert_eq!(linkage.anomalies.len(), 1, "{linkage:?}");
+        assert_eq!(linkage.anomalies[0].receipt, 3);
+        assert_eq!(linkage.anomalies[0].id.as_deref(), Some("call_evil"));
     }
 
     #[test]

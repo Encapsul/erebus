@@ -20,7 +20,10 @@ use std::path::{Path, PathBuf};
 use ed25519_dalek::VerifyingKey;
 use sha2::{Digest, Sha256};
 
-use crate::attest::{check_bundle_matches, receipt_bytes, verify_attestation, Attestation};
+use crate::attest::{
+    check_bundle_matches, receipt_bytes, signed_request, verify_attestation, Attestation,
+};
+use crate::tool_linkage::{LinkageReport, Linker};
 
 /// Name of the head pointer file inside a trail directory.
 pub const HEAD_FILE: &str = "HEAD";
@@ -38,6 +41,8 @@ pub struct ChainReport {
     pub count: usize,
     /// Hash of the last receipt (`sha256:<hex>`), `None` for an empty trail.
     pub head: Option<String>,
+    /// Tool calls linked to their results across the verified receipts.
+    pub linkage: LinkageReport,
 }
 
 /// Default trail location next to a receipt: `<receipt>.d`.
@@ -119,7 +124,8 @@ impl AttestationLog {
 
     /// Verify every receipt (signature, fingerprint, consistency) and the
     /// chain links between consecutive files; `bundle_bytes`, when given, must
-    /// match every receipt's signed bundle digest.
+    /// match every receipt's signed bundle digest. Tool linkage is computed
+    /// from the signed statements of the receipts that passed.
     pub fn verify_chain(
         &self,
         trusted_keys: &[VerifyingKey],
@@ -127,31 +133,48 @@ impl AttestationLog {
     ) -> Result<ChainReport, anyhow::Error> {
         let mut prev: Option<String> = None;
         let mut count = 0usize;
+        let mut linker = Linker::new();
         for path in self.entries()? {
-            let bytes = std::fs::read(&path)
-                .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
-            let att: Attestation = serde_json::from_slice(&bytes)
-                .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", path.display()))?;
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            verify_attestation(&att, trusted_keys).map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
-            if let Some(b) = bundle_bytes {
-                check_bundle_matches(&att, b).map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
-            }
+            let (att, hash) = verify_entry(&path, trusted_keys, bundle_bytes)?;
             if att.execution.prev_attestation_hash != prev {
                 anyhow::bail!(
-                    "TAMPERED: chain broken at {name} (expected prev {prev:?}, receipt says {:?})",
+                    "TAMPERED: chain broken at {} (expected prev {prev:?}, receipt says {:?})",
+                    path.file_name().unwrap_or_default().to_string_lossy(),
                     att.execution.prev_attestation_hash
                 );
             }
-            prev = Some(file_hash(&bytes));
+            linker.push(signed_request(&att)?.as_ref());
+            prev = Some(hash);
             count += 1;
         }
         let head = self.head()?;
         if head != prev {
             anyhow::bail!("TAMPERED: trail HEAD {head:?} does not match last receipt {prev:?}");
         }
-        Ok(ChainReport { count, head })
+        Ok(ChainReport {
+            count,
+            head,
+            linkage: linker.finish(),
+        })
     }
+}
+
+/// Parse and verify one trail file; returns it with its file hash.
+fn verify_entry(
+    path: &Path,
+    trusted_keys: &[VerifyingKey],
+    bundle_bytes: Option<&[u8]>,
+) -> Result<(Attestation, String), anyhow::Error> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
+    let att: Attestation = serde_json::from_slice(&bytes)
+        .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", path.display()))?;
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    verify_attestation(&att, trusted_keys).map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
+    if let Some(b) = bundle_bytes {
+        check_bundle_matches(&att, b).map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
+    }
+    Ok((att, file_hash(&bytes)))
 }
 
 /// `2026-09-17T15:30:00Z`-style ISO string → `20260917T153000Z`; anything
@@ -346,7 +369,8 @@ mod tests {
             report,
             ChainReport {
                 count: 0,
-                head: None
+                head: None,
+                linkage: LinkageReport::default(),
             }
         );
     }

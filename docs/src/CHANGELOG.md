@@ -15,6 +15,24 @@ All notable changes to erebus are documented here.
 
 ### Added
 
+- Spec 2.1 action receipts: `erebus serve --attest-key` signs every tool
+  call the engine returns (name and call id in clear, `sha256` of the
+  arguments) into `execution.request.tool_calls`, for chat completions
+  (JSON, SSE deltas, legacy `function_call`) and the Responses API. A
+  response that cannot be fully parsed is flagged `tool_calls_incomplete`
+  instead of being reported as "no calls". Receipts without tool calls stay
+  byte-identical to 2.0.
+- `erebus verify-attest <receipt> --response-body FILE`: an auditor holding
+  the plaintext response checks it against the signed `output_hash` and
+  re-derives the signed tool-call list (exit 2 on any mismatch). Human
+  output lists the signed tool calls.
+- Spec 2.1 tool linkage: the proxy also signs the request's tool context
+  (`tools_offered`, replayed `tool_history`, `tool_results` as call id +
+  content digest). `verify-attest --chain` links every result to the call
+  that requested it and reports injected results, rewritten history,
+  changed results and calls to unoffered tools; `--require-tool-linkage`
+  makes them fatal (exit 2). `verify-attest <receipt> --request-body FILE`
+  re-derives the request side from the request body.
 - `erebus evidence export <bundle> -o pack.zip` and `erebus verify-evidence
   pack.zip [--bundle] [--json]`: a self-contained, offline-verifiable audit
   pack (receipts, inclusion proofs, checkpoints, RFC 3161 tokens, DSSE
@@ -33,6 +51,12 @@ All notable changes to erebus are documented here.
 
 ### Fixed
 
+- Health-check server (stub): on macOS/BSD an accepted socket inherits
+  `O_NONBLOCK` from the listener, so a probe that had not yet written its
+  request got a reset instead of `200`. Accepted sockets are now blocking
+  with a 2 s read timeout.
+- SISR e2e mock server: same inheritance made `e2e_sisr_main` and
+  `upgrade_migration` fail randomly on macOS ("Peer disconnected").
 - `erebus build` detects Mach-O (thin and universal) agents as the binary
   runtime; it only knew ELF and PE, so native macOS apps were refused. Java
   class files, which share the fat magic, are not mistaken for them.

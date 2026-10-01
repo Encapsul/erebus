@@ -39,7 +39,7 @@ silently rewrite:
 | Question | Application logs | Tracing / observability SaaS | erebus receipt |
 |---|---|---|---|
 | Which exact code and weights ran? | ❌ | ❌ | ✅ bundle + payload SHA-256, rootfs Merkle root, signed |
-| What went in, what came out? | text, editable | yes, in the vendor's DB | ✅ per inference call: request and response body digests; per batch run: arguments, stdout/stderr digests, exit code |
+| What went in, what came out? | text, editable | yes, in the vendor's DB | ✅ per inference call: request and response body digests, plus every tool call the model returned (name, call id, arguments digest); per batch run: arguments, stdout/stderr digests, exit code |
 | Which machine? | hostname string | agent metadata | ✅ per-host key co-signs; certificate names the owner |
 | Can the operator edit it after the fact? | yes | yes (their account) | ❌ hash chain + Merkle transparency log + RFC 3161 timestamp |
 | Can I verify it without trusting the vendor? | — | ❌ | ✅ offline, with public keys; or with `cosign verify-blob-attestation` |
@@ -96,7 +96,7 @@ What a receipt proves, layer by layer ([spec](docs/src/spec/attestation.md)):
 
 | Layer | Proves | Signed by |
 |---|---|---|
-| in-toto statement | bundle + payload digests, provenance, `input_hash`/`output_hash`/`exit_code`, `rootfs_root`, `prev_attestation_hash` | — |
+| in-toto statement | bundle + payload digests, provenance, `input_hash`/`output_hash`/`exit_code`, `tool_calls` (served calls), `rootfs_root`, `prev_attestation_hash` | — |
 | DSSE envelope (JCS canonical) | the statement comes from the **operator key** | operator Ed25519 |
 | Machine co-signature + certificate | it was produced **on an enrolled host** owned by `<owner>` | machine key, registry key |
 | Transparency-log proof | it was published at leaf *i* of a signed Merkle tree, timestamped by a TSA | registry log key, RFC 3161 TSA |

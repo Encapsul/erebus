@@ -1,9 +1,11 @@
-# Execution attestation — spec 2.0
+# Execution attestation — spec 2.0 / 2.1
 
 This page is the normative description of the receipts produced by
 `erebus attest`, the launcher stub and the attesting proxy
 (`erebus serve --attest-key`). It is also the document the predicate URI
-`https://erebus.dev/attestation/execution/v2` points at.
+`https://erebus.dev/attestation/execution/v2` points at. Spec 2.1 is 2.0
+plus the signed tool calls of a served call (§3.2) and the tool context of
+its request, linked across the trail (§3.3); it keeps the v2 predicate URI.
 
 A receipt answers one question with cryptographic evidence: **which bytes ran,
 where, when, with which inputs and outputs, and who vouches for it.**
@@ -192,7 +194,43 @@ The registry key that signs certificates is the transparency-log key
           "properties": {
             "method": { "type": "string" },
             "path":   { "type": "string" },
-            "status": { "type": ["integer", "null"] }
+            "status": { "type": ["integer", "null"] },
+            "tool_calls": {
+              "type": "array", "minItems": 1,
+              "description": "spec 2.1, §3.2 — omitted when the response carried none",
+              "items": {
+                "type": "object",
+                "required": ["choice", "name", "arguments_hash"],
+                "properties": {
+                  "choice":         { "type": "integer", "minimum": 0 },
+                  "id":             { "type": ["string", "null"] },
+                  "name":           { "type": "string", "minLength": 1 },
+                  "arguments_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+                }
+              }
+            },
+            "tool_calls_incomplete": { "const": true, "description": "spec 2.1 — omitted when false" },
+            "tools_offered": {
+              "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 },
+              "description": "spec 2.1, §3.3 — function tool names the request offered"
+            },
+            "tool_history": {
+              "type": "array", "minItems": 1,
+              "description": "spec 2.1, §3.3 — calls the request replayed as history; items as tool_calls, choice 0"
+            },
+            "tool_results": {
+              "type": "array", "minItems": 1,
+              "description": "spec 2.1, §3.3 — results the request fed back",
+              "items": {
+                "type": "object",
+                "required": ["id", "content_hash"],
+                "properties": {
+                  "id":           { "type": "string", "minLength": 1 },
+                  "content_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+                }
+              }
+            },
+            "request_tools_incomplete": { "const": true, "description": "spec 2.1 — omitted when false" }
           }
         },
         "rootfs_root":           { "type": ["string", "null"], "description": "Merkle root of the extracted rootfs (rootfs.merkle)" }
@@ -214,6 +252,96 @@ The registry key that signs certificates is the transparency-log key
 Differences from v1 (`…/execution/v1`): `execution.machine_id` added.
 Everything else is byte-identical, which is why a single `build_statement`
 serves both predicate types.
+
+### 3.2 Tool calls of a served call (spec 2.1)
+
+A receipt from the attesting proxy records *what the agent was told to do*,
+not only what the model said: every tool call the engine returned is signed
+into `execution.request.tool_calls`, ordered by `(choice, index)`.
+
+| Field | Value |
+|---|---|
+| `choice` | `choices[].index` of a chat completion; `0` for the Responses API |
+| `id` | engine call id (`call_…`; Responses API `call_id`), links the call to the `tool` message that answers it; `null` for a legacy `function_call` |
+| `name` | function name, **in clear**: an auditor must read which action ran |
+| `arguments_hash` | `sha256` of the exact `arguments` string (stream fragments concatenated); JCS bytes when an engine sends an object |
+
+Recognised: chat completions `message.tool_calls`, streamed
+`delta.tool_calls`, legacy `function_call`, Responses API `function_call`
+output items (`output[]`, `response.output_item.done`, `response.completed`
+deduplicated by index and id). The format is decided **from the bytes
+alone** — first non-whitespace byte `{` is one JSON document, anything else
+is read as SSE `data:` events — never from headers, so the list is a pure
+function of the body `output_hash` covers.
+
+`tool_calls_incomplete: true` means the list may miss entries: compressed
+body (`Content-Encoding` other than `identity`), malformed JSON or event,
+body over 16 MiB (JSON) or event over 4 MiB (SSE), more than 256 calls, a
+name or id over 1 KiB, a call without a name. The extractor never guesses:
+**an absent call is evidence of absence only when the flag is absent.**
+
+Both fields are omitted — not `null` — when unused, so a receipt without
+tool calls is byte-identical to 2.0 and says `"spec_version": "2.0"`; a
+receipt carrying either field says `"2.1"`.
+
+**Auditor check** (`verify-attest <receipt> --response-body FILE`), from
+signed data only:
+
+1. `sha256(FILE) == execution.output_hash`, else `TAMPERED: response body
+   mismatch`.
+2. Re-extract the tool calls of `FILE`. Without the incomplete flag the result
+   must equal the signed list and be complete; with it, every signed call must
+   appear in the result. Otherwise `TAMPERED: tool_calls mismatch` — the
+   launcher signed a list its own body contradicts.
+
+Plaintext arguments are never in the receipt: the operator keeps them and
+`arguments_hash` proves they were not altered.
+
+### 3.3 Tool context of the request, linked across the trail (spec 2.1)
+
+An agent closes the loop in its *next* request: it replays the model's calls
+as history and feeds each result back under the call id. The proxy indexes
+that request body — the one `input_hash` covers — into three signed lists:
+
+| Field | Source (chat completions / Responses API) |
+|---|---|
+| `tools_offered` | `tools[].function.name`, legacy `functions[].name` / `tools[].name` of `type: function`; built-in tools without a name are skipped |
+| `tool_history` | `messages[role=assistant].tool_calls` and `function_call` / `input[type=function_call]`, digested exactly like `tool_calls` |
+| `tool_results` | `messages[role=tool]` → `{id: tool_call_id, content_hash}` / `input[type=function_call_output]` → `{id: call_id, content_hash: sha256(output)}`; content hashed as its string bytes, JCS otherwise |
+
+Only a body whose first non-whitespace byte is `{` is read; other bodies
+carry no tool context. `request_tools_incomplete: true` flags a compressed
+request, malformed JSON, a body over 16 MiB, a result without a call id
+(including legacy `role: "function"` results), a float in structured
+content, more than 256 entries or a label over 1 KiB. Same omission rule as
+§3.2: a request without tool context keeps the 2.0 bytes.
+
+**Auditor check** (`verify-attest <receipt> --request-body FILE`):
+`sha256("METHOD path\n" ‖ FILE) == execution.input_hash`, else `TAMPERED:
+request body mismatch`; re-indexing `FILE` must give the signed lists (a
+superset when flagged incomplete), else `TAMPERED: request tool fields
+mismatch`.
+
+**Linkage** (`verify-attest --chain DIR`, from signed data only, after every
+receipt verified). Walking the trail in order, each request is matched
+against the calls the engine issued in *earlier* receipts:
+
+| Finding | Meaning |
+|---|---|
+| `result_without_call` | a result was fed back for a call id the engine never issued in this trail — an injected result |
+| `history_without_call` | history replays a call id the engine never issued |
+| `history_altered` | history replays an issued id with another name or `arguments_hash` — a rewritten conversation |
+| `result_rewritten` | a second, different `content_hash` for an id issued once |
+| `unoffered_tool` | the engine called a tool absent from the request's `tools_offered` |
+
+Each finding is reported once, at its first receipt. Issued calls are
+reported `answered` or `pending`. Two rules keep the report honest: an id
+the engine issued several times (some engines reuse `call_0`) never yields
+`result_rewritten`, and a missing-call finding after any response signed
+`tool_calls_incomplete` is counted `unverifiable`, not accused. A trail that
+starts mid-conversation shows its first replayed history as
+`history_without_call`. Findings are warnings; `--require-tool-linkage`
+turns them into a verification failure (exit 2).
 
 ## 4. Display copies and consistency
 
@@ -252,6 +380,7 @@ blobs over 128 MiB unless `COSIGN_MAX_ATTACHMENT_SIZE` is raised (e.g.
 | 1.0 – 1.2 (pretty-JSON signature) | ✅ legacy path | ❌ `STRICT: spec 1.x` | ✅ if pushed | ❌ |
 | 2.0, host not enrolled | ✅ | ❌ `STRICT: … not enrolled` | ✅ | ✅ |
 | 2.0, enrolled host | ✅ | ✅ with registry key | ✅ | ✅ |
+| 2.1 (served call with tool calls or tool context) | ✅ erebus after 0.6.1; ❌ `TAMPERED` on 0.6.1 and older, which rebuild the statement without the new fields | as 2.0 | ✅ | ✅ (same v2 predicate URI) |
 
 ## 7. Files and locations
 
@@ -274,3 +403,10 @@ blobs over 128 MiB unless `COSIGN_MAX_ATTACHMENT_SIZE` is raised (e.g.
 - The machine key is a **software** key. A TPM2-backed quote is on the
   roadmap (P1, optional, Linux only) and will be an extra field, never a
   requirement.
+- **What tool linkage proves, and what it does not.** It proves, per call
+  id, what the engine asked for and what the agent *reported back* to it,
+  and it exposes results nobody asked for, rewritten history and changed
+  results (§3.3). It does not prove the tool's side effect: an agent can
+  report a result for an action it never ran, or run an action it never
+  reports. Proving the effect needs the tool itself behind an attesting
+  boundary; a tool the agent runs outside the proxied loop is not observed.
