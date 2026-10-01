@@ -265,6 +265,7 @@ into `execution.request.tool_calls`, ordered by `(choice, index)`.
 | `id` | engine call id (`call_…`; Responses API `call_id`), links the call to the `tool` message that answers it; `null` for a legacy `function_call` |
 | `name` | function name, **in clear**: an auditor must read which action ran |
 | `arguments_hash` | `sha256` of the exact `arguments` string (stream fragments concatenated); JCS bytes when an engine sends an object |
+| `arguments_jcs_hash` | optional: `sha256` of the JCS form of the parsed arguments; absent, `null` or blank arguments count as `{}`; omitted when the arguments are not JSON or contain a float (JCS number formatting is not pinned across implementations). This is what a tool receipt is matched on (§3.4) |
 
 Recognised: chat completions `message.tool_calls`, streamed
 `delta.tool_calls`, legacy `function_call`, Responses API `function_call`
@@ -343,6 +344,56 @@ starts mid-conversation shows its first replayed history as
 `history_without_call`. Findings are warnings; `--require-tool-linkage`
 turns them into a verification failure (exit 2).
 
+### 3.4 Attested tool boundary (spec 2.1)
+
+`erebus attest-tool` puts the tool itself behind a signing boundary and
+writes its own trail, one receipt per execution:
+
+- `attest-tool http --listen A --upstream B`: reverse proxy in front of a
+  plain HTTP tool or an MCP server over Streamable HTTP (JSON or SSE
+  answers). Every request is recorded.
+- `attest-tool stdio … -- CMD ARGS`: wraps an MCP server spawned over
+  stdio. Newline-delimited JSON-RPC is relayed byte for byte. Each
+  `tools/call` request with its response (matched by JSON-RPC `id`) is one
+  receipt, with `input_hash` / `output_hash` the `sha256` of the two
+  messages without their newline, method `STDIO` and path `tools/call`.
+
+The receipt names the tool (`artifact.flags: ["tool"]`). Its digests are
+those of the program file it runs, or of the JCS descriptor of the
+boundary (`{kind, transport, upstream|command}`), or of the exact bundle
+with `--bundle`. `execution.request.tool_invocation` is signed:
+
+| Field | Value |
+|---|---|
+| `protocol` | `mcp` (JSON-RPC request) or `http` |
+| `name` | MCP `params.name`; absent for plain HTTP (bind it with `--tool-trail NAME=DIR`) |
+| `arguments_jcs_hash` | same canonical digest as §3.2: MCP `params.arguments`, or the HTTP request body (blank → `{}`) |
+| `result_hashes` | every form the result can be relayed in. MCP: JCS of `result`, of `content`, of `structuredContent`, and the raw `sha256` of the text blocks joined by `\n` when `content` is all text. HTTP: raw `sha256` of the body, plus its JCS digest when JSON |
+| `is_error` | JSON-RPC `error`, MCP `isError: true`, HTTP status ≥ 400 or no response |
+| `incomplete` | the response was not observed (connection lost, compressed or oversized body) |
+
+**Execution matching** (`verify-attest --chain AGENT --tool-trail
+[NAME=]DIR …`). Every tool trail is verified as a chain first, with the
+same trusted keys. Then each call the engine issued is matched one-to-one,
+in chain order, to an unused tool execution with the same
+`arguments_jcs_hash` and the same name (a nameless execution matches on
+arguments only). A missing or non-existent directory is an error, never
+"nothing executed".
+
+| Finding | Meaning |
+|---|---|
+| `result_without_execution` | a result was fed back for an issued call that no attested tool executed |
+| `result_not_from_tool` | the fed-back `content_hash` is not one of the matched execution's `result_hashes` |
+| `execution_without_call` | a tool execution no issued call accounts for, reported at its tool receipt |
+
+The report counts `executed`, `not_executed`, `verbatim` and
+`unverifiable`. A call without `arguments_jcs_hash`, an execution without
+one, and an unmatched execution after a response signed
+`tool_calls_incomplete` are `unverifiable`, never accused. Findings carry
+the agent receipt that issued the call and the tool receipt. They are
+warnings; `--require-tool-execution` turns them into a failure (exit 2),
+independently of `--require-tool-linkage`.
+
 ## 4. Display copies and consistency
 
 `artifact`, `provenance` and `execution` at the top level are convenience
@@ -406,7 +457,16 @@ blobs over 128 MiB unless `COSIGN_MAX_ATTACHMENT_SIZE` is raised (e.g.
 - **What tool linkage proves, and what it does not.** It proves, per call
   id, what the engine asked for and what the agent *reported back* to it,
   and it exposes results nobody asked for, rewritten history and changed
-  results (§3.3). It does not prove the tool's side effect: an agent can
-  report a result for an action it never ran, or run an action it never
-  reports. Proving the effect needs the tool itself behind an attesting
-  boundary; a tool the agent runs outside the proxied loop is not observed.
+  results (§3.3). Alone it does not prove the tool ran. With the tool behind
+  `attest-tool` (§3.4) it also proves that every issued call reached a tool
+  with exactly those arguments, that the result relayed to the model is the
+  one the tool returned, and that the tool ran nothing the model did not
+  ask for. Limits that remain: the boundary proves what crossed it, not the
+  tool's effect on the outside world (an HTTP tool that answers `queued`
+  without sending the mail is not caught); a tool the agent calls *around*
+  the boundary is not observed (`execution_without_call` cannot see it,
+  `result_without_execution` can); matching is on name + canonical
+  arguments, so two identical calls are interchangeable; and both trails
+  are signed by keys the verifier must trust — a single compromised
+  operator key can forge both sides, which is what the machine
+  co-signature and `--strict` are for.

@@ -74,6 +74,17 @@ pub struct VerifyAttestArgs {
     #[arg(long, requires = "chain")]
     pub require_tool_linkage: bool,
 
+    /// With --chain: a tool trail from `erebus attest-tool` ([NAME=]DIR;
+    /// NAME binds a plain HTTP tool to the tool name the model calls).
+    /// Repeatable. Issued calls are matched to the tool receipts.
+    #[arg(long, value_name = "[NAME=]DIR", requires = "chain")]
+    pub tool_trail: Vec<String>,
+
+    /// With --tool-trail: fail when a fed-back result was not produced by an
+    /// attested tool execution, or a tool ran a call the model never issued
+    #[arg(long, requires = "tool_trail")]
+    pub require_tool_execution: bool,
+
     /// Output verification result as JSON
     #[arg(long)]
     pub json: bool,
@@ -99,7 +110,9 @@ pub fn run(args: VerifyAttestArgs) -> Result<()> {
         .transpose()?;
 
     let mut report = match (&args.chain, &args.attest_file) {
-        (Some(dir), _) => verify_chain(dir, &keys, bundle_bytes.as_deref())?,
+        (Some(dir), _) => {
+            verify_chain_with_tools(dir, &keys, bundle_bytes.as_deref(), &args.tool_trail)?
+        }
         (None, Some(file)) => verify_single(file, &keys, bundle_bytes.as_deref())?,
         (None, None) => anyhow::bail!("provide a receipt path or --chain <dir>"),
     };
@@ -129,7 +142,10 @@ pub fn run(args: VerifyAttestArgs) -> Result<()> {
         report["request_body"] = verify_request_body(file, body_path)?;
     }
     if args.require_tool_linkage {
-        require_linkage(&report["tool_linkage"])?;
+        require_linkage(&report["tool_linkage"], false)?;
+    }
+    if args.require_tool_execution {
+        require_linkage(&report["tool_linkage"], true)?;
     }
     if args.proof || args.proof_file.is_some() {
         let file = args
@@ -249,19 +265,37 @@ fn verify_request_body(file: &Path, body_path: &Path) -> Result<serde_json::Valu
     }))
 }
 
-/// `--require-tool-linkage`: any anomaly fails the verification.
-fn require_linkage(linkage: &serde_json::Value) -> Result<()> {
-    let anomalies = linkage
+const EXECUTION_KINDS: [&str; 3] = [
+    "result_without_execution",
+    "result_not_from_tool",
+    "execution_without_call",
+];
+
+/// `--require-tool-linkage` (`execution: false`) and
+/// `--require-tool-execution` (`true`): any finding of that family fails.
+fn require_linkage(linkage: &serde_json::Value, execution: bool) -> Result<()> {
+    let lines: Vec<String> = linkage
         .get("anomalies")
         .and_then(|v| v.as_array())
         .map(Vec::as_slice)
-        .unwrap_or_default();
-    if anomalies.is_empty() {
+        .unwrap_or_default()
+        .iter()
+        .filter(|a| {
+            let kind = a.get("kind").and_then(|k| k.as_str()).unwrap_or_default();
+            EXECUTION_KINDS.contains(&kind) == execution
+        })
+        .map(describe_anomaly)
+        .collect();
+    if lines.is_empty() {
         return Ok(());
     }
-    let lines: Vec<String> = anomalies.iter().map(describe_anomaly).collect();
+    let what = if execution {
+        "tool execution"
+    } else {
+        "tool linkage"
+    };
     anyhow::bail!(
-        "tool linkage verification failed: {} anomaly(ies): {}",
+        "{what} verification failed: {} anomaly(ies): {}",
         lines.len(),
         lines.join("; ")
     )
@@ -275,14 +309,23 @@ fn describe_anomaly(a: &serde_json::Value) -> String {
         "history_altered" => "history replays a call with a different name or arguments",
         "result_rewritten" => "a second, different result for the same call",
         "unoffered_tool" => "the engine called a tool the request did not offer",
+        "result_without_execution" => "result fed back for a call no attested tool executed",
+        "result_not_from_tool" => "result fed back differs from what the tool returned",
+        "execution_without_call" => "a tool executed a call the engine never issued",
         other => other,
     };
-    format!(
-        "receipt #{}: {what} ({} {})",
-        a.get("receipt").and_then(|v| v.as_u64()).unwrap_or(0),
-        f("name"),
-        f("id")
-    )
+    let at = match a.get("tool_receipt").and_then(|v| v.as_u64()) {
+        Some(t) if f("kind") == "execution_without_call" => format!("tool receipt #{t}"),
+        Some(t) => format!(
+            "receipt #{} / tool receipt #{t}",
+            a.get("receipt").and_then(|v| v.as_u64()).unwrap_or(0)
+        ),
+        None => format!(
+            "receipt #{}",
+            a.get("receipt").and_then(|v| v.as_u64()).unwrap_or(0)
+        ),
+    };
+    format!("{at}: {what} ({} {})", f("name"), f("id"))
 }
 
 /// Offline check of `<receipt>.proof.json`; the receipt's exact bytes are
@@ -324,10 +367,51 @@ pub(crate) fn verify_chain(
     keys: &[VerifyingKey],
     bundle_bytes: Option<&[u8]>,
 ) -> Result<serde_json::Value> {
+    verify_chain_with_tools(dir, keys, bundle_bytes, &[])
+}
+
+/// Tool receipts of every `--tool-trail [NAME=]DIR`, numbered across trails.
+fn load_tool_executions(
+    trails: &[String],
+    keys: &[VerifyingKey],
+) -> Result<Vec<erebus_core::tool_linkage::ToolExecution>> {
+    let mut all = Vec::new();
+    for spec in trails {
+        let (name, dir) = match spec.split_once('=') {
+            Some((n, d)) if !n.is_empty() && !Path::new(spec).exists() => (Some(n), d),
+            _ => (None, spec.as_str()),
+        };
+        if !Path::new(dir).is_dir() {
+            anyhow::bail!("tool trail {dir} not found (no such directory)");
+        }
+        let log = AttestationLog::open(Path::new(dir))
+            .with_context(|| format!("failed to open tool trail {dir}"))?;
+        let first = all
+            .last()
+            .map_or(1, |e: &erebus_core::tool_linkage::ToolExecution| {
+                e.receipt.saturating_add(1)
+            });
+        let found = log
+            .tool_executions(keys, name, first)
+            .context("tool trail verification failed")?;
+        all.extend(found);
+    }
+    Ok(all)
+}
+
+pub(crate) fn verify_chain_with_tools(
+    dir: &Path,
+    keys: &[VerifyingKey],
+    bundle_bytes: Option<&[u8]>,
+    tool_trails: &[String],
+) -> Result<serde_json::Value> {
     let log = AttestationLog::open(dir)
         .with_context(|| format!("failed to open trail {}", dir.display()))?;
+    let executions = (!tool_trails.is_empty())
+        .then(|| load_tool_executions(tool_trails, keys))
+        .transpose()?;
     let report = log
-        .verify_chain(keys, bundle_bytes)
+        .verify_chain_linked(keys, bundle_bytes, executions)
         .context("attestation chain verification failed")?;
     Ok(serde_json::json!({
         "dir": dir.display().to_string(),
@@ -462,7 +546,13 @@ fn print_linkage(l: &serde_json::Value) {
             .unwrap_or_default()
     };
     let (anomalies, pending) = (list("anomalies"), list("unanswered"));
-    if n("issued") == 0 && n("unlinkable") == 0 && anomalies.is_empty() && n("unverifiable") == 0 {
+    let execution = l.get("execution").filter(|e| e.is_object());
+    if n("issued") == 0
+        && n("unlinkable") == 0
+        && anomalies.is_empty()
+        && n("unverifiable") == 0
+        && execution.is_none()
+    {
         return;
     }
     eprintln!(
@@ -473,6 +563,18 @@ fn print_linkage(l: &serde_json::Value) {
         n("unlinkable"),
         n("unverifiable")
     );
+    if let Some(e) = execution {
+        let m = |k: &str| e.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+        eprintln!(
+            "  execution: {} of {} call(s) executed by an attested tool ({} tool receipt(s)), \
+             {} result(s) verbatim, {} unverifiable",
+            m("executed"),
+            m("executed") + m("not_executed"),
+            m("tool_receipts"),
+            m("verbatim"),
+            m("unverifiable")
+        );
+    }
     for p in &pending {
         let f = |k: &str| p.get(k).and_then(|v| v.as_str()).unwrap_or("-");
         let r = p.get("receipt").and_then(|v| v.as_u64()).unwrap_or(0);

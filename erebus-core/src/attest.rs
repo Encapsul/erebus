@@ -162,6 +162,10 @@ pub struct RequestInfo {
     /// Spec 2.1: the request could not be fully indexed. Omitted when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub request_tools_incomplete: bool,
+    /// Spec 2.1: on receipts from a tool boundary (`erebus attest-tool`),
+    /// the tool execution this exchange carried (see `tool_exec`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_invocation: Option<crate::tool_exec::ToolInvocation>,
 }
 
 impl RequestInfo {
@@ -173,6 +177,7 @@ impl RequestInfo {
             || self.tool_history.is_some()
             || self.tool_results.is_some()
             || self.request_tools_incomplete
+            || self.tool_invocation.is_some()
     }
 
     /// Fill the request-side fields from an extraction (empty lists omitted).
@@ -363,6 +368,34 @@ pub fn host_machine() -> Option<MachineIdentity> {
 }
 
 impl AttestationTemplate {
+    /// Template for a tool boundary (`erebus attest-tool`) whose tool is not
+    /// an erebus bundle: `descriptor` (transport, command or upstream) is
+    /// hashed as JCS into `metadata_hash`; the `bundle`/`payload` subjects
+    /// are the program file when known (stdio), the descriptor otherwise.
+    pub fn for_tool(
+        descriptor: &serde_json::Value,
+        program: Option<&[u8]>,
+    ) -> Result<Self, anyhow::Error> {
+        let meta = crate::jcs::canonicalize(descriptor)
+            .map_err(|e| anyhow::anyhow!("tool descriptor is not canonicalizable: {e}"))?;
+        let subject = sha256_hex(program.unwrap_or(&meta));
+        Ok(Self {
+            artifact: ArtifactInfo {
+                bundle_hash: subject.clone(),
+                payload_hash: subject,
+                metadata_hash: sha256_hex(&meta),
+                format_version: 0,
+                flags: vec!["tool".to_string()],
+            },
+            provenance: ProvenanceInfo {
+                builder: format!("erebus attest-tool {}", env!("CARGO_PKG_VERSION")),
+                author: None,
+                license: None,
+                layers: Vec::new(),
+            },
+        })
+    }
+
     /// Read and hash `bundle_path` once.
     pub fn from_bundle(bundle_path: &Path) -> Result<Self, anyhow::Error> {
         let bundle_bytes = std::fs::read(bundle_path)
@@ -1566,6 +1599,7 @@ mod tests {
             id: Some(format!("call_{name}")),
             name: name.to_string(),
             arguments_hash: sha256_hex(name.as_bytes()),
+            arguments_jcs_hash: None,
         }
     }
 

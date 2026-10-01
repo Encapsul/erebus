@@ -14,8 +14,18 @@
 //!
 //! What this proves: the agent reported back, for call X, exactly the
 //! content whose digest is signed, and nothing it fed the model is
-//! unaccounted for. It does not prove the tool's side effect happened; that
-//! needs the tool behind an attested boundary too.
+//! unaccounted for. Alone it does not prove the tool ran.
+//!
+//! With the receipts of an attested tool boundary (`erebus attest-tool`,
+//! `with_executions`), each issued call is matched one-to-one, in chain
+//! order, to a tool execution with the same name and canonical arguments:
+//!
+//! - a result fed back for a call no tool executed is
+//!   `result_without_execution`;
+//! - a result whose digest is not one the tool returned is
+//!   `result_not_from_tool`;
+//! - a tool execution no issued call accounts for is
+//!   `execution_without_call`.
 //!
 //! Absence claims stay honest: when a response before the claim was signed
 //! `tool_calls_incomplete` the issuing call may simply be unlisted, so the
@@ -27,6 +37,7 @@ use serde::Serialize;
 
 use crate::attest::RequestInfo;
 use crate::tool_calls::ToolCall;
+use crate::tool_exec::ToolInvocation;
 
 /// Kind of a linkage finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -37,15 +48,60 @@ pub enum AnomalyKind {
     HistoryAltered,
     ResultRewritten,
     UnofferedTool,
+    /// With tool trails: a result was fed back for a call no attested tool
+    /// executed.
+    ResultWithoutExecution,
+    /// With tool trails: the result fed back is none of the forms the tool
+    /// returned (fabricated, or transformed by the agent).
+    ResultNotFromTool,
+    /// With tool trails: a tool executed a call the engine never issued.
+    ExecutionWithoutCall,
 }
 
-/// One finding, at its first occurrence (1-based receipt position).
+impl AnomalyKind {
+    /// Findings that need tool trails (`--require-tool-execution`).
+    pub fn is_execution(self) -> bool {
+        matches!(
+            self,
+            Self::ResultWithoutExecution | Self::ResultNotFromTool | Self::ExecutionWithoutCall
+        )
+    }
+}
+
+/// One finding, at its first occurrence (1-based receipt position in the
+/// agent trail; `tool_receipt` in the tool trails for execution findings).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Anomaly {
     pub receipt: usize,
     pub kind: AnomalyKind,
     pub id: Option<String>,
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_receipt: Option<usize>,
+}
+
+/// A tool receipt to match against the calls the engine issued.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolExecution {
+    /// 1-based position across the tool trails, in the order given.
+    pub receipt: usize,
+    pub invocation: ToolInvocation,
+}
+
+/// Execution summary when tool trails were given.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ExecutionReport {
+    pub tool_receipts: usize,
+    /// Issued calls matched one-to-one to a tool receipt with the same name
+    /// and canonical arguments.
+    pub executed: usize,
+    /// Executed calls whose fed-back result is one of the tool's result forms.
+    pub verbatim: usize,
+    /// Issued calls no tool receipt matches.
+    pub not_executed: usize,
+    /// Calls or tool receipts without canonical arguments (non-JSON, partial
+    /// extraction): cannot be matched either way.
+    pub unverifiable: usize,
 }
 
 /// A call the engine issued whose result never came back in the trail.
@@ -73,6 +129,9 @@ pub struct LinkageReport {
     /// Some request was only partially indexed: `unanswered` may list calls
     /// whose result was in fact sent.
     pub requests_incomplete: bool,
+    /// Present when tool trails were linked (`--tool-trail`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ExecutionReport>,
 }
 
 struct Issued {
@@ -90,11 +149,21 @@ pub struct Linker {
     responses_incomplete: bool,
     receipt: usize,
     report: LinkageReport,
+    /// Every issued call in chain order, with its receipt position.
+    instances: Vec<(usize, ToolCall)>,
+    executions: Option<Vec<ToolExecution>>,
 }
 
 impl Linker {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Tool receipts to match issued calls against; calling it (even with an
+    /// empty list) turns the execution checks on.
+    pub fn with_executions(mut self, executions: Vec<ToolExecution>) -> Self {
+        self.executions = Some(executions);
+        self
     }
 
     /// Next receipt of the trail; `None` for receipts that are not served
@@ -119,6 +188,9 @@ impl Linker {
     }
 
     pub fn finish(mut self) -> LinkageReport {
+        if let Some(executions) = self.executions.take() {
+            self.report.execution = Some(self.match_executions(&executions));
+        }
         for (id, issued) in &self.issued {
             match issued.result {
                 Some(_) => self.report.answered = self.report.answered.saturating_add(1),
@@ -138,6 +210,88 @@ impl Linker {
         self.report
     }
 
+    /// Match issued calls one-to-one, in chain order, to tool receipts with
+    /// the same canonical arguments and name (an unnamed HTTP tool matches
+    /// on arguments alone), then check each fed-back result.
+    fn match_executions(&mut self, executions: &[ToolExecution]) -> ExecutionReport {
+        let mut out = ExecutionReport {
+            tool_receipts: executions.len(),
+            ..ExecutionReport::default()
+        };
+        let mut used = vec![false; executions.len()];
+        for (receipt, call) in std::mem::take(&mut self.instances) {
+            let Some(want) = call.arguments_jcs_hash.as_deref() else {
+                out.unverifiable = out.unverifiable.saturating_add(1);
+                continue;
+            };
+            let found = executions.iter().enumerate().position(|(i, e)| {
+                !used[i]
+                    && e.invocation.arguments_jcs_hash.as_deref() == Some(want)
+                    && e.invocation.name.as_deref().is_none_or(|n| n == call.name)
+            });
+            match found {
+                Some(i) => {
+                    used[i] = true;
+                    out.executed = out.executed.saturating_add(1);
+                    if self.result_is_verbatim(&call, &executions[i], receipt) {
+                        out.verbatim = out.verbatim.saturating_add(1);
+                    }
+                }
+                None => {
+                    out.not_executed = out.not_executed.saturating_add(1);
+                    self.check_unexecuted_result(&call, receipt);
+                }
+            }
+        }
+        for (e, _) in executions.iter().zip(&used).filter(|(_, u)| !**u) {
+            if e.invocation.arguments_jcs_hash.is_none() || self.responses_incomplete {
+                out.unverifiable = out.unverifiable.saturating_add(1);
+            } else {
+                let id = Some(format!("tool#{}", e.receipt));
+                let kind = AnomalyKind::ExecutionWithoutCall;
+                self.flag_at(0, kind, id, e.invocation.name.as_deref(), Some(e.receipt));
+            }
+        }
+        out
+    }
+
+    /// The fed-back result of `call`, if any.
+    fn result_of(&self, call: &ToolCall) -> Option<String> {
+        self.issued.get(call.id.as_deref()?)?.result.clone()
+    }
+
+    /// `true` when the result fed back for `call` is one of the forms the
+    /// tool returned; a different result is flagged.
+    fn result_is_verbatim(
+        &mut self,
+        call: &ToolCall,
+        exec: &ToolExecution,
+        receipt: usize,
+    ) -> bool {
+        let Some(result) = self.result_of(call) else {
+            return false;
+        };
+        if exec.invocation.result_hashes.contains(&result) {
+            return true;
+        }
+        let kind = AnomalyKind::ResultNotFromTool;
+        self.flag_at(
+            receipt,
+            kind,
+            call.id.clone(),
+            Some(&call.name),
+            Some(exec.receipt),
+        );
+        false
+    }
+
+    fn check_unexecuted_result(&mut self, call: &ToolCall, receipt: usize) {
+        if self.result_of(call).is_some() {
+            let kind = AnomalyKind::ResultWithoutExecution;
+            self.flag_at(receipt, kind, call.id.clone(), Some(&call.name), None);
+        }
+    }
+
     fn issue(&mut self, call: &ToolCall, offered: Option<&[String]>) {
         if offered.is_some_and(|o| !o.contains(&call.name)) {
             self.flag(
@@ -146,6 +300,7 @@ impl Linker {
                 Some(&call.name),
             );
         }
+        self.instances.push((self.receipt, call.clone()));
         let Some(id) = call.id.clone() else {
             self.report.unlinkable = self.report.unlinkable.saturating_add(1);
             return;
@@ -211,12 +366,24 @@ impl Linker {
 
     /// Record a finding once: history and results are replayed every turn.
     fn flag(&mut self, kind: AnomalyKind, id: Option<String>, name: Option<&str>) {
+        self.flag_at(self.receipt, kind, id, name, None);
+    }
+
+    fn flag_at(
+        &mut self,
+        receipt: usize,
+        kind: AnomalyKind,
+        id: Option<String>,
+        name: Option<&str>,
+        tool_receipt: Option<usize>,
+    ) {
         if self.seen.insert((kind, id.clone())) {
             self.report.anomalies.push(Anomaly {
-                receipt: self.receipt,
+                receipt,
                 kind,
                 id,
                 name: name.map(str::to_string),
+                tool_receipt,
             });
         }
     }
@@ -233,6 +400,7 @@ mod tests {
             id: Some(id.to_string()),
             name: name.to_string(),
             arguments_hash: format!("sha256:{args}"),
+            arguments_jcs_hash: Some(format!("sha256:jcs-{args}")),
         }
     }
 
@@ -370,6 +538,110 @@ mod tests {
         let r = link(&[partial, turn(vec![], vec![result("call_q", "x")], vec![])]);
         assert!(r.anomalies.is_empty());
         assert_eq!(r.unverifiable, 1);
+    }
+
+    fn exec(receipt: usize, name: Option<&str>, args: &str, result: &str) -> ToolExecution {
+        ToolExecution {
+            receipt,
+            invocation: ToolInvocation {
+                protocol: if name.is_some() { "mcp" } else { "http" }.into(),
+                name: name.map(str::to_string),
+                arguments_jcs_hash: Some(format!("sha256:jcs-{args}")),
+                result_hashes: vec![format!("sha256:{result}")],
+                ..ToolInvocation::default()
+            },
+        }
+    }
+
+    fn link_with(turns: &[RequestInfo], executions: Vec<ToolExecution>) -> LinkageReport {
+        let mut l = Linker::new().with_executions(executions);
+        for t in turns {
+            l.push(Some(t));
+        }
+        l.finish()
+    }
+
+    fn agent_loop(result: &str) -> Vec<RequestInfo> {
+        let w = call("call_w", "get_weather", "a1");
+        vec![
+            turn(vec![], vec![], vec![w.clone()]),
+            turn(vec![w], vec![result_of("call_w", result)], vec![]),
+        ]
+    }
+
+    fn result_of(id: &str, content: &str) -> ToolResult {
+        result(id, content)
+    }
+
+    #[test]
+    fn an_executed_call_with_the_tools_own_answer_is_proven_end_to_end() {
+        let r = link_with(
+            &agent_loop("18C"),
+            vec![exec(1, Some("get_weather"), "a1", "18C")],
+        );
+        assert!(r.anomalies.is_empty(), "{r:?}");
+        let e = r.execution.unwrap();
+        assert_eq!(
+            (e.tool_receipts, e.executed, e.verbatim, e.not_executed),
+            (1, 1, 1, 0)
+        );
+    }
+
+    #[test]
+    fn a_result_no_tool_produced_is_caught() {
+        // The agent never called the tool but fed a result back.
+        let r = link_with(&agent_loop("18C"), vec![]);
+        assert_eq!(kinds(&r), vec![(1, AnomalyKind::ResultWithoutExecution)]);
+        // The tool ran with other arguments: not this call.
+        let r = link_with(
+            &agent_loop("18C"),
+            vec![exec(1, Some("get_weather"), "a2", "18C")],
+        );
+        let k: Vec<_> = r.anomalies.iter().map(|a| a.kind).collect();
+        assert_eq!(
+            k,
+            vec![
+                AnomalyKind::ResultWithoutExecution,
+                AnomalyKind::ExecutionWithoutCall
+            ]
+        );
+        assert_eq!(r.anomalies[1].tool_receipt, Some(1));
+    }
+
+    #[test]
+    fn a_result_other_than_the_tools_answer_is_caught() {
+        let r = link_with(
+            &agent_loop("35C"),
+            vec![exec(4, Some("get_weather"), "a1", "18C")],
+        );
+        assert_eq!(kinds(&r), vec![(1, AnomalyKind::ResultNotFromTool)]);
+        assert_eq!(r.anomalies[0].tool_receipt, Some(4));
+        assert_eq!(r.execution.unwrap().verbatim, 0);
+    }
+
+    #[test]
+    fn executions_match_one_to_one_and_unnamed_http_tools_on_arguments() {
+        let w = call("call_1", "get_weather", "a1");
+        let w2 = call("call_2", "get_weather", "a1");
+        let turns = vec![turn(vec![], vec![], vec![w, w2])];
+        let r = link_with(&turns, vec![exec(1, None, "a1", "x")]);
+        let e = r.execution.unwrap();
+        assert_eq!(
+            (e.executed, e.not_executed),
+            (1, 1),
+            "one receipt proves one call"
+        );
+        assert!(r.anomalies.is_empty());
+        // A tool receipt for another tool name never matches.
+        let r = link_with(&turns, vec![exec(1, Some("send_email"), "a1", "x")]);
+        assert_eq!(r.execution.unwrap().executed, 0);
+        assert_eq!(r.anomalies[0].kind, AnomalyKind::ExecutionWithoutCall);
+    }
+
+    #[test]
+    fn without_tool_trails_no_execution_claim_is_made() {
+        let r = link(&agent_loop("18C"));
+        assert!(r.execution.is_none() && r.anomalies.is_empty());
     }
 
     #[test]

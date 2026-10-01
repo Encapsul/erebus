@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::tool_calls::{value_digest, ToolCall, MAX_CALLS, MAX_LABEL};
+use crate::tool_calls::{canonical_arguments_digest, value_digest, ToolCall, MAX_CALLS, MAX_LABEL};
 
 /// Request bodies larger than this are not parsed (report incomplete).
 const MAX_REQUEST_JSON: usize = 16 * 1024 * 1024;
@@ -183,6 +183,7 @@ impl Collector {
                 id,
                 name,
                 arguments_hash,
+                arguments_jcs_hash: canonical_arguments_digest(args),
             });
         }
     }
@@ -234,6 +235,7 @@ mod tests {
             id: Some(id.to_string()),
             name: name.to_string(),
             arguments_hash: h(args),
+            arguments_jcs_hash: canonical_arguments_digest(Some(&Value::from(args))),
         }
     }
 

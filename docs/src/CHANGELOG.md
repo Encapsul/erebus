@@ -33,6 +33,18 @@ All notable changes to erebus are documented here.
   changed results and calls to unoffered tools; `--require-tool-linkage`
   makes them fatal (exit 2). `verify-attest <receipt> --request-body FILE`
   re-derives the request side from the request body.
+- Spec 2.1 attested tool boundary: `erebus attest-tool http --listen …
+  --upstream …` (plain HTTP tools, MCP Streamable HTTP with JSON or SSE
+  answers) and `erebus attest-tool stdio … -- <mcp server>` sign one receipt
+  per tool execution (`tool_invocation`: tool name, canonical arguments
+  digest, result digests, error flag). `verify-attest --chain AGENT
+  --tool-trail [NAME=]DIR` matches every issued call to an execution and
+  reports results no tool produced (`result_without_execution`), results
+  that differ from what the tool returned (`result_not_from_tool`) and tool
+  runs no model call asked for (`execution_without_call`);
+  `--require-tool-execution` makes them fatal (exit 2). Tool calls gain an
+  optional `arguments_jcs_hash` (JCS of the parsed arguments) so the two
+  sides match whatever the whitespace.
 - `erebus evidence export <bundle> -o pack.zip` and `erebus verify-evidence
   pack.zip [--bundle] [--json]`: a self-contained, offline-verifiable audit
   pack (receipts, inclusion proofs, checkpoints, RFC 3161 tokens, DSSE

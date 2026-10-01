@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 use crate::attest::{
     check_bundle_matches, receipt_bytes, signed_request, verify_attestation, Attestation,
 };
-use crate::tool_linkage::{LinkageReport, Linker};
+use crate::tool_linkage::{LinkageReport, Linker, ToolExecution};
 
 /// Name of the head pointer file inside a trail directory.
 pub const HEAD_FILE: &str = "HEAD";
@@ -131,9 +131,23 @@ impl AttestationLog {
         trusted_keys: &[VerifyingKey],
         bundle_bytes: Option<&[u8]>,
     ) -> Result<ChainReport, anyhow::Error> {
+        self.verify_chain_linked(trusted_keys, bundle_bytes, None)
+    }
+
+    /// [`AttestationLog::verify_chain`], also matching the issued tool calls
+    /// against `executions` (from [`AttestationLog::tool_executions`]).
+    pub fn verify_chain_linked(
+        &self,
+        trusted_keys: &[VerifyingKey],
+        bundle_bytes: Option<&[u8]>,
+        executions: Option<Vec<ToolExecution>>,
+    ) -> Result<ChainReport, anyhow::Error> {
         let mut prev: Option<String> = None;
         let mut count = 0usize;
-        let mut linker = Linker::new();
+        let mut linker = match executions {
+            Some(e) => Linker::new().with_executions(e),
+            None => Linker::new(),
+        };
         for path in self.entries()? {
             let (att, hash) = verify_entry(&path, trusted_keys, bundle_bytes)?;
             if att.execution.prev_attestation_hash != prev {
@@ -156,6 +170,36 @@ impl AttestationLog {
             head,
             linkage: linker.finish(),
         })
+    }
+}
+
+impl AttestationLog {
+    /// Verify this tool trail as a chain and return its tool executions,
+    /// numbered from `first`. `tool_name` names the tool of unnamed (plain
+    /// HTTP) invocations, so they only match calls to that tool.
+    pub fn tool_executions(
+        &self,
+        trusted_keys: &[VerifyingKey],
+        tool_name: Option<&str>,
+        first: usize,
+    ) -> Result<Vec<ToolExecution>, anyhow::Error> {
+        self.verify_chain(trusted_keys, None)
+            .map_err(|e| anyhow::anyhow!("tool trail {}: {e}", self.dir.display()))?;
+        let mut out = Vec::new();
+        for (i, path) in self.entries()?.iter().enumerate() {
+            let (att, _) = verify_entry(path, trusted_keys, None)?;
+            let Some(mut invocation) = signed_request(&att)?.and_then(|r| r.tool_invocation) else {
+                continue;
+            };
+            if invocation.name.is_none() {
+                invocation.name = tool_name.map(str::to_string);
+            }
+            out.push(ToolExecution {
+                receipt: first.saturating_add(i),
+                invocation,
+            });
+        }
+        Ok(out)
     }
 }
 

@@ -42,6 +42,11 @@ pub struct ToolCall {
     /// `sha256:` of the exact `arguments` string (JCS bytes when an engine
     /// emits a JSON object instead of a string).
     pub arguments_hash: String,
+    /// `sha256:` of the arguments as canonical JSON (see
+    /// [`canonical_arguments_digest`]): what a tool receipt is matched on.
+    /// Absent when the arguments are not JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments_jcs_hash: Option<String>,
 }
 
 /// Outcome of an extraction.
@@ -269,6 +274,7 @@ struct Partial {
     id: Option<String>,
     name: String,
     args: Sha256,
+    raw: Option<Vec<u8>>,
     bad: bool,
 }
 
@@ -409,6 +415,7 @@ impl Accumulator {
                 id: partial.id,
                 name: partial.name,
                 arguments_hash: format!("sha256:{}", hex::encode(partial.args.finalize())),
+                arguments_jcs_hash: partial.raw.as_deref().and_then(canonical_text_digest),
             });
         }
         ToolCallReport { calls, incomplete }
@@ -437,13 +444,56 @@ pub(crate) fn value_digest(value: Option<&Value>) -> Option<String> {
     Some(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
+/// `sha256:` of the JCS form of a tool's arguments *as a JSON value*, so the
+/// string a model emitted (`{"city": "Paris"}`) and the object a tool server
+/// received compare equal. Absent, `null` or blank arguments are `{}`;
+/// `None` when they are not JSON or JCS refuses them (e.g. a float).
+pub fn canonical_arguments_digest(value: Option<&Value>) -> Option<String> {
+    match value {
+        None | Some(Value::Null) => canonical_text_digest(b"{}"),
+        Some(Value::String(s)) => canonical_text_digest(s.as_bytes()),
+        Some(other) => jcs_digest(other),
+    }
+}
+
+fn canonical_text_digest(text: &[u8]) -> Option<String> {
+    let text = if text.iter().all(u8::is_ascii_whitespace) {
+        b"{}".as_slice()
+    } else {
+        text
+    };
+    jcs_digest(&serde_json::from_slice::<Value>(text).ok()?)
+}
+
+/// `sha256:` of the JCS bytes of `value`.
+pub fn jcs_digest(value: &Value) -> Option<String> {
+    let bytes = crate::jcs::canonicalize(value).ok()?;
+    Some(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
+}
+
+/// Raw argument text kept per call to derive `arguments_jcs_hash`; longer
+/// arguments are still hashed verbatim but get no canonical digest.
+const MAX_RAW_ARGUMENTS: usize = 1024 * 1024;
+
 impl Partial {
     fn new() -> Self {
         Self {
             id: None,
             name: String::new(),
             args: Sha256::new(),
+            raw: Some(Vec::new()),
             bad: false,
+        }
+    }
+
+    fn keep_raw(&mut self, bytes: &[u8]) {
+        let fits = self
+            .raw
+            .as_ref()
+            .is_some_and(|r| r.len().saturating_add(bytes.len()) <= MAX_RAW_ARGUMENTS);
+        match (&mut self.raw, fits) {
+            (Some(raw), true) => raw.extend_from_slice(bytes),
+            _ => self.raw = None,
         }
     }
 
@@ -467,11 +517,13 @@ impl Partial {
             None | Some(Value::Null) => true,
             Some(Value::String(s)) => {
                 self.args.update(s.as_bytes());
+                self.keep_raw(s.as_bytes());
                 true
             }
             Some(other) => match crate::jcs::canonicalize(other) {
                 Ok(bytes) => {
                     self.args.update(&bytes);
+                    self.keep_raw(&bytes);
                     true
                 }
                 Err(_) => {
@@ -497,7 +549,27 @@ mod tests {
             id: id.map(str::to_string),
             name: name.to_string(),
             arguments_hash: h(args),
+            arguments_jcs_hash: canonical_arguments_digest(Some(&Value::from(args))),
         }
+    }
+
+    #[test]
+    fn canonical_digest_ignores_formatting_and_treats_blank_as_empty_object() {
+        let spaced = canonical_arguments_digest(Some(&Value::from(r#"{ "b": 1, "a": "x" }"#)));
+        let object = canonical_arguments_digest(Some(&serde_json::json!({"a": "x", "b": 1})));
+        assert!(spaced.is_some());
+        assert_eq!(spaced, object);
+        let empty = canonical_arguments_digest(Some(&serde_json::json!({})));
+        assert_eq!(canonical_arguments_digest(None), empty);
+        assert_eq!(canonical_arguments_digest(Some(&Value::from("  "))), empty);
+        assert_eq!(
+            canonical_arguments_digest(Some(&Value::from("not json"))),
+            None
+        );
+        assert_eq!(
+            canonical_arguments_digest(Some(&serde_json::json!({"x": 1.5}))),
+            None
+        );
     }
 
     const CHAT_JSON: &str = r#"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,

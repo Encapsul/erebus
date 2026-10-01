@@ -27,6 +27,7 @@ use ed25519_dalek::SigningKey;
 use erebus_core::attest::{append_receipt, AttestationTemplate, ExecutionCapture, RequestInfo};
 use erebus_core::attest_log::AttestationLog;
 use erebus_core::tool_calls::{ToolCallExtractor, ToolCallReport};
+use erebus_core::tool_exec::{self, ToolInvocation};
 use erebus_core::tool_requests::{extract_request_encoded, RequestToolReport};
 use sha2::{Digest, Sha256};
 
@@ -46,8 +47,20 @@ pub struct CallRecorder {
     key: SigningKey,
     log: AttestationLog,
     publisher: Option<ReceiptPublisher>,
+    mode: ProxyMode,
     /// Appends read the trail head then advance it: serialize them.
     lock: Mutex<()>,
+}
+
+/// What sits behind the proxy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyMode {
+    /// An inference engine: `POST`s are recorded with the tool calls the
+    /// model returned and the tool context of the request.
+    Engine,
+    /// A tool server (plain HTTP or MCP Streamable HTTP): every request is
+    /// recorded with the tool invocation it carried.
+    Tool,
 }
 
 /// Registry destination for immediate and catch-up publication of receipts.
@@ -66,6 +79,7 @@ pub struct CallSummary {
     pub response_hash: String,
     pub tool_calls: ToolCallReport,
     pub request_tools: RequestToolReport,
+    pub tool_invocation: Option<ToolInvocation>,
 }
 
 impl CallRecorder {
@@ -75,6 +89,7 @@ impl CallRecorder {
             key,
             log,
             publisher: None,
+            mode: ProxyMode::Engine,
             lock: Mutex::new(()),
         }
     }
@@ -82,6 +97,15 @@ impl CallRecorder {
     pub fn with_publisher(mut self, publisher: ReceiptPublisher) -> Self {
         self.publisher = Some(publisher);
         self
+    }
+
+    pub fn with_mode(mut self, mode: ProxyMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn mode(&self) -> ProxyMode {
+        self.mode
     }
 
     pub fn log_dir(&self) -> &Path {
@@ -105,6 +129,7 @@ impl CallRecorder {
                     tool_calls: (!call.tool_calls.calls.is_empty())
                         .then(|| call.tool_calls.calls.clone()),
                     tool_calls_incomplete: call.tool_calls.incomplete,
+                    tool_invocation: call.tool_invocation.clone(),
                     ..RequestInfo::default()
                 }
                 .with_request_tools(&call.request_tools),
@@ -199,7 +224,7 @@ fn handle_connection(client: TcpStream, upstream: SocketAddr, recorder: &CallRec
         client,
         sent_head: false,
     };
-    match relay.run(upstream) {
+    match relay.run(upstream, recorder.mode()) {
         Ok(Some(call)) => match recorder.record(&call) {
             Ok(path) => {
                 if std::env::var_os("ERE_VERBOSE").is_some() {
@@ -248,44 +273,79 @@ fn status_for(e: &anyhow::Error) -> u16 {
 }
 
 impl Relay {
-    /// Returns `Some(summary)` for calls that must be recorded.
-    fn run(&mut self, upstream: SocketAddr) -> Result<Option<CallSummary>> {
+    /// Returns `Some(summary)` for calls that must be recorded: every `POST`
+    /// in front of an engine, every request in front of a tool.
+    fn run(&mut self, upstream: SocketAddr, mode: ProxyMode) -> Result<Option<CallSummary>> {
         let mut cin = BufReader::new(self.client.try_clone().context("clone client socket")?);
         let req = read_head(&mut cin).context("reading client request")?;
         let (method, target) = req.request_line()?;
         let req_body = read_request_body(&mut cin, &req)?;
-        let mut req_hasher = Sha256::new();
-        req_hasher.update(format!("{method} {target}\n").as_bytes());
-        req_hasher.update(&req_body);
 
         let mut uin = send_upstream(upstream, &req, &req_body)?;
-        let resp = read_head(&mut uin).context("reading engine response")?;
+        let resp = read_head(&mut uin).context("reading upstream response")?;
         let status = resp.status_code();
         self.client.write_all(&resp.serialize_close())?;
         self.sent_head = true;
         let framing = resp.response_framing(status, method == "HEAD");
-        let tools = if method == "POST" {
-            ToolCallExtractor::for_encoding(resp.header("Content-Encoding"))
-        } else {
-            ToolCallExtractor::off()
-        };
-        let mut body = BodyObserver::new(tools);
+        let recorded = mode == ProxyMode::Tool || method == "POST";
+        let mut body = BodyObserver::for_exchange(mode, recorded, resp.header("Content-Encoding"));
         relay_body(&mut uin, &mut self.client, framing, &mut body)?;
         self.client.flush()?;
 
-        if method != "POST" {
+        if !recorded {
             return Ok(None);
         }
-        let (response_hash, tool_calls) = body.finish();
-        Ok(Some(CallSummary {
-            request_tools: extract_request_encoded(&req_body, req.header("Content-Encoding")),
+        let exchange = Exchange {
+            mode,
             method,
-            path: target,
+            target,
             status,
+            request_encoding: req.header("Content-Encoding"),
+            request_body: &req_body,
+        };
+        Ok(Some(exchange.summarize(body.finish())))
+    }
+}
+
+/// One relayed request, ready to be summarized once its response is in.
+struct Exchange<'a> {
+    mode: ProxyMode,
+    method: String,
+    target: String,
+    status: Option<u16>,
+    request_encoding: Option<&'a str>,
+    request_body: &'a [u8],
+}
+
+impl Exchange<'_> {
+    fn summarize(self, observed: Observed) -> CallSummary {
+        let mut req_hasher = Sha256::new();
+        req_hasher.update(format!("{} {}\n", self.method, self.target).as_bytes());
+        req_hasher.update(self.request_body);
+        let (request_tools, tool_invocation) = match self.mode {
+            ProxyMode::Engine => (
+                extract_request_encoded(self.request_body, self.request_encoding),
+                None,
+            ),
+            ProxyMode::Tool => (
+                RequestToolReport::default(),
+                tool_exec::from_http_exchange(
+                    self.request_body,
+                    observed.body.as_deref(),
+                    self.status,
+                ),
+            ),
+        };
+        CallSummary {
+            method: self.method,
+            path: self.target,
+            status: self.status,
             request_hash: hex_digest(req_hasher),
-            response_hash,
-            tool_calls,
-        }))
+            response_hash: observed.response_hash,
+            tool_calls: observed.tool_calls,
+            request_tools,
+            tool_invocation,
+        }
     }
 }
 
@@ -473,6 +533,16 @@ fn read_request_body<R: BufRead>(r: &mut R, head: &Head) -> Result<Vec<u8>> {
 struct BodyObserver {
     hasher: Sha256,
     tools: ToolCallExtractor,
+    /// Tool mode keeps the decoded body (bounded) to read the tool's answer;
+    /// `None` when not kept or too large.
+    kept: Option<Vec<u8>>,
+}
+
+/// What was learned from a relayed response body.
+struct Observed {
+    response_hash: String,
+    tool_calls: ToolCallReport,
+    body: Option<Vec<u8>>,
 }
 
 impl BodyObserver {
@@ -480,16 +550,44 @@ impl BodyObserver {
         Self {
             hasher: Sha256::new(),
             tools,
+            kept: None,
+        }
+    }
+
+    /// Engine `POST`s are scanned for tool calls; tool answers are kept for
+    /// `tool_exec`, unless compressed (then the invocation is incomplete).
+    fn for_exchange(mode: ProxyMode, recorded: bool, encoding: Option<&str>) -> Self {
+        match (mode, recorded) {
+            (ProxyMode::Engine, true) => Self::new(ToolCallExtractor::for_encoding(encoding)),
+            (ProxyMode::Tool, true) => {
+                let mut observer = Self::new(ToolCallExtractor::off());
+                let plain = encoding.is_none_or(|e| e.trim().eq_ignore_ascii_case("identity"));
+                observer.kept = plain.then(Vec::new);
+                observer
+            }
+            (_, false) => Self::new(ToolCallExtractor::off()),
         }
     }
 
     fn update(&mut self, bytes: &[u8]) {
         self.hasher.update(bytes);
         self.tools.update(bytes);
+        let fits = self
+            .kept
+            .as_ref()
+            .is_some_and(|k| k.len().saturating_add(bytes.len()) <= tool_exec::MAX_TOOL_BODY);
+        match (&mut self.kept, fits) {
+            (Some(k), true) => k.extend_from_slice(bytes),
+            _ => self.kept = None,
+        }
     }
 
-    fn finish(self) -> (String, ToolCallReport) {
-        (hex_digest(self.hasher), self.tools.finish())
+    fn finish(self) -> Observed {
+        Observed {
+            response_hash: hex_digest(self.hasher),
+            tool_calls: self.tools.finish(),
+            body: self.kept,
+        }
     }
 }
 

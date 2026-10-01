@@ -179,6 +179,16 @@ enum Commands {
     ///   erebus verify-attest agent.erebus.attest --strict --registry-key <hex> # enrolled machine
     VerifyAttest(commands::verify_attest::VerifyAttestArgs),
 
+    /// Put a tool behind an attested boundary: one signed receipt per tool
+    /// execution (HTTP tool, MCP over Streamable HTTP or stdio)
+    ///
+    /// Examples:
+    ///   erebus attest-tool http --listen 127.0.0.1:9100 --upstream 127.0.0.1:9000 \
+    ///       --attest-key ops.key --attest-log tools.attest.d
+    ///   erebus attest-tool stdio --attest-key ops.key --attest-log tools.attest.d -- npx my-mcp-server
+    ///   erebus verify-attest --chain agent.attest.d --tool-trail tools.attest.d --require-tool-execution
+    AttestTool(commands::attest_tool::AttestToolArgs),
+
     /// Build the evidence pack an auditor receives (receipts, proofs, keys)
     ///
     /// Examples:
@@ -409,6 +419,7 @@ fn main() -> ExitCode {
             commands::verify::run(args)
         }
         Commands::VerifyAttest(args) => commands::verify_attest::run(args),
+        Commands::AttestTool(args) => commands::attest_tool::run(args),
         Commands::Evidence(args) => commands::evidence::run(args),
         Commands::VerifyEvidence(args) => commands::evidence::run_verify(args),
         Commands::Lifecycle(mut args) => {

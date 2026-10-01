@@ -357,8 +357,21 @@ one. Same rule as P0: done only when the acceptance test runs in CI.
   2-turn loop links 2/2; a compromised agent's forged history and injected
   result → 2 anomalies, exit 2) + `tool_requests` / `tool_linkage` units,
   each detector mutation-checked.
-  Remaining boundary: a reported result is not a proven side effect; that
-  needs the tool behind an attested boundary (spec §8).
+  Tool boundary (spec §3.4; MCP unfrozen for this item only, by owner
+  decision 2026-10-01): `erebus attest-tool http|stdio` signs one receipt
+  per tool execution (plain HTTP, MCP Streamable HTTP JSON/SSE, MCP stdio)
+  and `verify-attest --chain --tool-trail [NAME=]DIR` matches each issued
+  call to an execution on name + canonical arguments (`arguments_jcs_hash`).
+  Results no tool produced, results that differ from the tool's answer and
+  tool runs nobody asked for are reported (`--require-tool-execution` →
+  exit 2). Acceptance: e2e
+  `tool_boundary_proves_calls_were_executed_and_results_relayed_verbatim`
+  (real `serve` + MCP stdio server + HTTP tool: honest loop 2/2 executed
+  and verbatim; withheld trail, lying tool and rogue run → exit 2), each
+  detector mutation-checked. Remaining boundary: what crossed the boundary
+  is proven, not the tool's effect on the outside world, and a tool called
+  around the boundary is only seen through `result_without_execution`
+  (spec §8).
 - [ ] **R3 Stop receipts** — Klaimee: "its stop button doesn't stop it".
   `serve` / the stub sign a final receipt on SIGTERM with the time the stop
   was requested and the time the process group was reaped (or `kill
@@ -417,7 +430,8 @@ crate / separate repo after P0:
 `billing`, `mirror`, `replicate`, `hf`, `layer`, `swap`, `dashboard` (TUI),
 `chat` (TUI + web UI), `sbom` beyond what `audit` needs, `scan --cve`,
 `backup`/`restore`, webhooks, SSO/SAML, K8s Helm chart, the five protocol
-frontends (`scripts/frontends/`), MCP registry endpoints, waitlist/landing.
+frontends (`scripts/frontends/`), MCP registry endpoints (the attested MCP
+tool boundary of R2 is P0 work, not a frozen surface), waitlist/landing.
 
 Rule: a PR touching a frozen surface must reference a P0/P1 item it unblocks.
 

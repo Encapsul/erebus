@@ -311,6 +311,7 @@ manifests verify fail-cold at boot.
 | `erebus attest / verify-attest` | Spec 2.0 execution receipts (DSSE + in-toto, JCS); `--envelope` for cosign, `--push` / `--proof` for the transparency log, `--strict` for machine identity, `--chain` for trails |
 | `erebus enroll` | Per-machine Ed25519 key + registry certificate; every receipt from this host is co-signed |
 | `erebus evidence export / verify-evidence` | One zip for the auditor: trail, proofs, TSA tokens, keys; verified offline |
+| `erebus attest-tool http / stdio` | Put an HTTP tool or MCP server behind a signing boundary; `verify-attest --chain … --tool-trail DIR --require-tool-execution` proves every model call was executed and its real result relayed |
 | `erebus attest-history` | Query your receipts on a registry (`--query bundle=…,until=…`) |
 | `erebus audit` | Signed compliance report aggregating receipts, SBOM and integrity facts |
 | `erebus keygen/sign/verify/trust` | Ed25519 signing workflow (`keygen` also writes a PEM for cosign/openssl) |

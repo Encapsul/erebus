@@ -713,3 +713,275 @@ fn serve_links_tool_results_to_the_calls_that_requested_them() {
         "{stderr}"
     );
 }
+
+/// Fake MCP server over stdio: newline-delimited JSON-RPC; `get_weather`
+/// answers `$WEATHER` (default "18C, sunny") as one text content block.
+const FAKE_MCP_SERVER: &str = r#"
+import json, os, sys
+for line in sys.stdin:
+    msg = json.loads(line)
+    if "id" not in msg:
+        continue
+    if msg.get("method") == "tools/call":
+        text = os.environ.get("WEATHER", "18C, sunny")
+        result = {"content": [{"type": "text", "text": text}], "isError": False}
+    else:
+        result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}}
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result}) + "\n")
+    sys.stdout.flush()
+"#;
+
+/// Fake plain-HTTP tool: any POST answers the text `queued`.
+const FAKE_HTTP_TOOL: &str = r#"
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def log_message(self, *a):
+        pass
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", "6")
+        self.end_headers()
+        self.wfile.write(b"queued")
+HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+"#;
+
+/// `attest-tool stdio` around the fake MCP server; sends `initialize` and
+/// one `tools/call get_weather` per city, returns the relayed stdout.
+fn mcp_session(dir: &Path, key: &Path, trail: &Path, cities: &[&str], weather: &str) -> String {
+    let script = dir.join("mcp_server.py");
+    std::fs::write(&script, FAKE_MCP_SERVER).unwrap();
+    let mut child = Command::new(erebus_bin())
+        .args(["attest-tool", "stdio", "--attest-key"])
+        .arg(key)
+        .arg("--attest-log")
+        .arg(trail)
+        .args(["--", "python3"])
+        .arg(&script)
+        .env("WEATHER", weather)
+        .env("ERE_MACHINE_DIR", dir.join("no-machine"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let mut input = String::from(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#);
+    for (i, city) in cities.iter().enumerate() {
+        let call = serde_json::json!({"jsonrpc": "2.0", "id": i + 1, "method": "tools/call",
+            "params": {"name": "get_weather", "arguments": {"city": city}}});
+        input.push_str(&format!("\n{call}"));
+    }
+    input.push('\n');
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "attest-tool stdio failed");
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// `attest-tool http` in front of the fake HTTP tool; one POST `body`.
+fn http_tool_session(dir: &Path, key: &Path, trail: &Path, body: &str) {
+    let script = dir.join("http_tool.py");
+    std::fs::write(&script, FAKE_HTTP_TOOL).unwrap();
+    let (tool_port, port) = (free_port(), free_port());
+    let tool = Command::new("python3")
+        .arg(&script)
+        .arg(tool_port.to_string())
+        .spawn()
+        .unwrap();
+    let _tool = Serve(tool);
+    let boundary = Command::new(erebus_bin())
+        .args(["attest-tool", "http", "--attest-key"])
+        .arg(key)
+        .arg("--attest-log")
+        .arg(trail)
+        .args(["--listen", &format!("127.0.0.1:{port}")])
+        .args(["--upstream", &format!("127.0.0.1:{tool_port}")])
+        .env("ERE_MACHINE_DIR", dir.join("no-machine"))
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let _boundary = Serve(boundary);
+    let request = format!(
+        "POST /send HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let reply = TcpStream::connect(("127.0.0.1", port))
+            .ok()
+            .and_then(|mut c| {
+                c.set_read_timeout(Some(Duration::from_secs(10))).ok()?;
+                c.write_all(request.as_bytes()).ok()?;
+                let mut s = String::new();
+                c.read_to_string(&mut s).ok()?;
+                Some(s)
+            });
+        match reply {
+            Some(r) if r.starts_with("HTTP/1.1 200") => {
+                return assert!(r.ends_with("queued"), "{r}")
+            }
+            _ if Instant::now() > deadline => panic!("http tool boundary never answered"),
+            _ => std::thread::sleep(Duration::from_millis(200)),
+        }
+    }
+}
+
+/// Spec 2.1 tool boundary end to end. The agent trail signs that the model
+/// issued `get_weather` (served by an MCP stdio server) and `send_email`
+/// (a plain HTTP tool) and what the agent fed back; each tool trail signs
+/// what the tool really received and returned. Honest loop: both calls were
+/// executed and their results relayed verbatim. Then: a missing tool trail
+/// (`result_without_execution`), a tool that answered something else than
+/// what the agent fed back (`result_not_from_tool`) and a tool run nobody
+/// asked for (`execution_without_call`) all fail `--require-tool-execution`.
+#[test]
+fn tool_boundary_proves_calls_were_executed_and_results_relayed_verbatim() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("python3 missing, skipping");
+        return;
+    }
+    let dir = tempdir().unwrap();
+    let bundle = make_bundle(dir.path());
+    let (key, trusted) = keygen(dir.path());
+    let trail = dir.path().join("trail");
+    let registry = Registry::start(&dir.path().join("registry"));
+    let token = registry.register();
+    let port = free_port();
+    let child = serve_command(&bundle, port, &key, &trail, &registry, &token)
+        .env("XDG_CACHE_HOME", dir.path().join("cache"))
+        .env("ERE_MACHINE_DIR", dir.path().join("no-machine"))
+        .spawn()
+        .unwrap();
+    let mut serve = Serve(child);
+    wait_ready(port, &mut serve.0);
+
+    let tools = serde_json::json!([
+        {"type": "function", "function": {"name": "get_weather"}},
+        {"type": "function", "function": {"name": "send_email"}},
+    ]);
+    let user = serde_json::json!({"role": "user", "content": "weather, then mail ops"});
+    let turn1 = serde_json::json!({"model": "local", "tools": tools, "messages": [user]});
+    let raw = post_chat(port, &turn1.to_string());
+    let answer: serde_json::Value = serde_json::from_str(response_body(&raw)).unwrap();
+    let assistant = answer["choices"][0]["message"].clone();
+
+    let (mcp, http) = (dir.path().join("mcp"), dir.path().join("http"));
+    let relayed = mcp_session(dir.path(), &key, &mcp, &["Paris"], "18C, sunny");
+    assert_eq!(relayed.lines().count(), 2, "{relayed}");
+    assert!(relayed.contains(r#""text": "18C, sunny""#), "{relayed}");
+    http_tool_session(dir.path(), &key, &http, r#"{"to": "ops@example.com"}"#);
+
+    let mut messages = vec![user, assistant];
+    for (id, content) in [("call_w", "18C, sunny"), ("call_e", "queued")] {
+        messages.push(serde_json::json!({"role": "tool", "tool_call_id": id, "content": content}));
+    }
+    let turn2 = serde_json::json!({"model": "local", "tools": tools, "messages": messages});
+    post_chat(port, &turn2.to_string());
+    drop(serve);
+    drop(registry);
+
+    let tool_receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&trail_receipts(&mcp)[0]).unwrap()).unwrap();
+    let inv = &tool_receipt["statement"]["predicate"]["execution"]["request"]["tool_invocation"];
+    assert_eq!(inv["protocol"], "mcp");
+    assert_eq!(inv["name"], "get_weather");
+    assert_eq!(tool_receipt["artifact"]["flags"][0], "tool");
+
+    let mcp_s = mcp.to_str().unwrap().to_string();
+    let http_s = format!("send_email={}", http.display());
+    let honest = ["--tool-trail", &mcp_s, "--tool-trail", &http_s];
+    let out = verify_chain_with(
+        &trail,
+        &trusted,
+        &[
+            &honest[..],
+            &["--require-tool-execution", "--require-tool-linkage"],
+        ]
+        .concat(),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("execution: 2 of 2 call(s) executed by an attested tool (2 tool receipt(s)), 2 result(s) verbatim, 0 unverifiable"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("WARNING"), "{stderr}");
+
+    // The HTTP tool trail withheld: send_email's result has no execution.
+    let out = verify_chain_with(
+        &trail,
+        &trusted,
+        &["--tool-trail", &mcp_s, "--require-tool-linkage"],
+    );
+    assert!(out.status.success(), "request linkage alone still holds");
+    let out = verify_chain_with(
+        &trail,
+        &trusted,
+        &["--tool-trail", &mcp_s, "--require-tool-execution"],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("result fed back for a call no attested tool executed (send_email call_e)"),
+        "{stderr}"
+    );
+
+    // The tool really answered a storm; the agent fed back "sunny".
+    let liar = dir.path().join("liar");
+    mcp_session(dir.path(), &key, &liar, &["Paris"], "35C, storm");
+    let liar_s = liar.to_str().unwrap().to_string();
+    let out = verify_chain_with(
+        &trail,
+        &trusted,
+        &[
+            "--tool-trail",
+            &liar_s,
+            "--tool-trail",
+            &http_s,
+            "--require-tool-execution",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("result fed back differs from what the tool returned (get_weather call_w)"),
+        "{stderr}"
+    );
+
+    // A tool run for Lyon that no model call accounts for.
+    let rogue = dir.path().join("rogue");
+    mcp_session(dir.path(), &key, &rogue, &["Paris", "Lyon"], "18C, sunny");
+    let rogue_s = rogue.to_str().unwrap().to_string();
+    let out = verify_chain_with(
+        &trail,
+        &trusted,
+        &[
+            "--tool-trail",
+            &rogue_s,
+            "--tool-trail",
+            &http_s,
+            "--require-tool-execution",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains(
+            "tool receipt #2: a tool executed a call the engine never issued (get_weather tool#2)"
+        ),
+        "{stderr}"
+    );
+
+    // A typo in the trail path is refused, not read as "nothing executed".
+    let out = verify_chain_with(&trail, &trusted, &["--tool-trail", "/nonexistent/tools"]);
+    assert!(!out.status.success());
+}
