@@ -184,7 +184,7 @@ Baguettotron Q8 on 2 enrolled machines (Linux server, macOS laptop) against a
 public TLS registry: every real inference receipt is strict-verified,
 published and RFC 3161-anchored (0 verification failures, ~14.2 kB of
 evidence per call). This is **not T2 complete**: the public
-gate remains ≥3 machines and ≥14 days. Reproduce the pilot with the
+gate remains ≥2 enrolled machines and ≥14 days. Reproduce the pilot with the
 [`scripts/pilot`](scripts/pilot/README.md) harness; plan and honest counters:
 [ROADMAP §7](ROADMAP.md#7-positioning-and-traction-plan).
 

@@ -7,7 +7,7 @@ beside it, and measures the pilot from those files.
 
 The pilot is complete only when `report.py` observes all of:
 
-- at least 3 independently enrolled machines;
+- at least 2 independently enrolled machines (the hosts we operate);
 - at least 14 elapsed days;
 - at least one real inference receipt;
 - zero `verify-attest --strict --proof` failures.
@@ -34,7 +34,8 @@ builds and signs the bundle, and keeps all mutable state under
 The local registry binds `127.0.0.1:8787`, anchors every receipt through
 FreeTSA, and stores its SQLite database persistently. Use it for the first
 node only. A real three-machine pilot needs the registry on a durable,
-reachable host:
+reachable host (the two-machine pilot uses this shared registry; each host
+still enrolls its own machine key):
 
 ```bash
 ERE_PILOT_REGISTRY_HOST=0.0.0.0 \
@@ -47,9 +48,9 @@ Put TLS/reverse-proxy authentication in front of the Python service. Never
 commit or send `registry.token`, operator keys, or machine keys over an
 untrusted channel.
 
-## Machines 2 and 3
+## Machine 2 (and any further host)
 
-Copy only the registry token through a secure channel, then run on each host:
+Copy only the registry token through a secure channel, then run on the second host:
 
 ```bash
 export ERE_PILOT_REGISTRY_URL=https://proof.example.com

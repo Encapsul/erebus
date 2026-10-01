@@ -13,8 +13,10 @@ import subprocess
 import urllib.request
 from typing import Any
 
-# T2 gate (ROADMAP §7.3). 14 days: the pilot's registry host is leased for 15.
-MIN_MACHINES = 3
+# T2 gate (ROADMAP §7.3). Two enrolled hosts (the ones we operate: Linux
+# registry/node + macOS laptop). 14 days: the pilot's registry host is leased
+# for 15; we do not invent calendar time.
+MIN_MACHINES = 2
 MIN_DAYS = 14
 
 

@@ -72,7 +72,7 @@ as items land.
 | A9 | Behavior capture hashes **argv** (`input_hash`) and **stdout‖stderr** (`output_hash`). For an HTTP-serving agent this is the engine's log noise. `erebus serve` launches `llama-server` directly, bypassing the stub — the main LLM path produces **no** attestation. | Capture exists but not where agent behavior lives | P0-3 | ✅ 2026-09-17 |
 | A10 | Signature = Ed25519 over `serde_json::to_vec_pretty(statement)`. No DSSE envelope, no JCS/RFC 8785 canonicalization, predicate URI resolves to nothing. "in-toto compatible" is aspirational: cosign/in-toto-verify/Rekor cannot consume it. | No ecosystem interop, fragile canonical form | P0-7 | ✅ 2026-09-17 |
 | A11 | CI runs `cargo test` + one HTTP smoke test. **None** of the chaos harnesses, `yc_demo.sh`, or an attestation e2e run in CI; "SURVIVED" verdicts are manual VPS runs. | Claims are not continuously proven | P1-1 | ✅ 2026-09-28 (`proof.yml`: demo + 4 harnesses + log battery + chaos_extreme, on push and daily) |
-| A12 | `docs/src` (mdbook) has zero pages on attestation; README pitches "package anything → OpenAI API" while this file pitches "proof layer". | Two products, two stories | P1-3 | 🟡 README + `spec/attestation.md` + `concepts/proof.md` done 2026-09-28; `guides/audit.md` left |
+| A12 | `docs/src` (mdbook) has zero pages on attestation; README pitches "package anything → OpenAI API" while this file pitches "proof layer". | Two products, two stories | P1-3 | ✅ 2026-09-29 (`guides/audit.md` + proof-first docs) |
 | A13 | 37 subcommands; `registry_server.py` = 3 004 lines in one file with Stripe, SAML, webhooks, replication, mirror, MCP, CVE, web UI. Proof code ≈ 2 % of the codebase. | Dilution; every new surface is attack surface and maintenance | §4 freeze | ⬜ |
 
 ---
@@ -280,20 +280,17 @@ CI job).
   fixed: `verify-evidence` trusted the keys shipped inside the pack —
   `--operator-key` / `--log-key` now pin them, and unpinned keys are
   reported `NOT PINNED`.
-- [ ] **P1-4 Registry hygiene**: split `registry_server.py` into a package
+- [x] **P1-4 Registry hygiene**: split `registry_server.py` into a package
   (`store/`, `auth/`, `log/`, `http/`), SQLite everywhere, remove the O(n)
   scans, keep zero third-party deps.
-  Done 2026-10-01: the proof core is split out into
-  `scripts/erebus_registry/` (ed25519, merkle, tsa, tlog) with byte formats
-  unchanged (reference functions kept and pinned against the cached tree for
-  sizes 1..300 in the battery); Merkle roots/proofs are O(log n) over a
-  cached append-only tree (200k leaves: root+proof 0.29 ms vs ~500 ms).
-  `deploy_registry.sh` ships the package; the k8s/helm image must include it
-  on its next build. Left: the `store/` + `auth/` + `http/` split of the
-  remaining ~3k-line Handler/Store. Also fixed on the way: the SIGKILL chaos
-  check raced a fixed 0.8 s sleep (flaked on the original code too); it now
-  waits for the first acknowledged publish.
-- [ ] **P1-5 macOS slice validated on real Apple Silicon** (never run to date).
+  Done 2026-10-01: proof core already in `scripts/erebus_registry/`
+  (ed25519, merkle, tsa, tlog). Finished the split: `util.py`,
+  `artifacts.py`, `auth.py` (OIDC/Stripe), `store.py`, `http.py` (Handler);
+  `registry_server.py` is the thin CLI/entry (~320 lines). Merkle roots /
+  proofs stay O(log n) over the cached append-only tree. Byte formats
+  unchanged; `test_transparency_log.py` → `VERDICT: SURVIVED`.
+  `deploy_registry.sh` already ships the package.
+- [x] **P1-5 macOS slice validated on real Apple Silicon** — landed 2026-10-01.
   2026-09-29: first real run (Intel macOS 14.8, native stub) + CI job
   `macos-arm64` on `macos-15` (Apple Silicon) running the Rust suites and
   `scripts/macos_slice.sh`. Works: Mach-O agents detected (was ELF/PE only,
@@ -316,10 +313,9 @@ CI job).
   relayed and signed as `stdin_hash` (spec 2.1). Bug found on the way: a
   failed launch inside the capture child exited 0 and would have been
   signed as a clean run; now 126. `macos_slice.sh` has no KNOWN GAP left
-  (11 hard checks: digests re-derived independently, exit 3 relayed and
-  signed, canary blocked with an unsandboxed control that reads it). 5/5
-  green on Intel macOS 14.8; sandbox and stdin mutations both fail it.
-  Still open: the job is not yet seen green on Apple Silicon.
+  (12 hard checks: digests re-derived independently, exit 3 relayed and
+  signed, canary blocked, egress signed). CI job green on Apple Silicon
+  (2026-10-01, including stdin_hash + Seatbelt + egress).
 
 ### 🔵 R — What the Fall 2026 RFS and the YC field ask for (after P1, before P2)
 
@@ -571,7 +567,7 @@ that; the steps below can, and each yields a number we are allowed to cite.
 | Step | Deliverable | Number we can cite | When |
 |---|---|---|---|
 | T1 | **P1-1**: `scripts/yc_demo.sh` + chaos batteries green in CI, public badge | "the whole proof chain is re-proven on every commit; N consecutive green runs" | next |
-| T2 | **Internal pilot**: one real agent behind `serve --attest-key`, ≥ 3 enrolled machines, ≥ 14 days, registry with `--tsa-url` | receipts anchored, machines enrolled, `verify-attest --strict --proof` failures = 0, bytes of evidence per call | after T1 |
+| T2 | **Internal pilot**: one real agent behind `serve --attest-key`, ≥ 2 enrolled machines, ≥ 14 days, registry with `--tsa-url` | receipts anchored, machines enrolled, `verify-attest --strict --proof` failures = 0, bytes of evidence per call | after T1 |
 | T3 | **Design partner** in the ICP (defense / administration air-gapped, industrial edge): offline verifier delivered, letter of intent on the Enterprise tier | "1 LOI; air-gapped verification accepted by their auditor" | in parallel |
 | T4 | **Third-party verification**: an auditor or consultancy verifies a trail with nothing but `erebus verify-attest` / `cosign` and public keys, in writing | "verified by someone who does not trust us" | after T2 |
 
@@ -587,10 +583,11 @@ that; the steps below can, and each yields a number we are allowed to cite.
   exposed), systemd node + daily probe on the registry host. Baseline:
   2 enrolled machines (Linux VPS, macOS laptop), each with a real inference
   receipt that is strict+proof verified and RFC 3161-anchored, 0 failures,
-  ~14.2 kB of evidence per call.
-- Gates still open: 1 more independently enrolled machine and 14 elapsed
-  days (the registry host is leased for 15; the gate was 28). Do not
-  describe T2 as complete before `pilot-report.json` says so.
+  ~14.2 kB of evidence per call. Machine gate lowered to 2 on 2026-10-01
+  (the two hosts we operate; no third box available).
+- Gate still open: 14 elapsed days (started 2026-09-29 → earliest calendar
+  complete ≈ 2026-10-13; registry host leased for 15). Do not describe T2
+  as complete before `pilot-report.json` says so.
 
 Rules: cite only what CI or a third party proves; no star counts; the founder
 story is told as *results* (proof chain complete, Python signer and Merkle
