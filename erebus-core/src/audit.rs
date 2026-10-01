@@ -466,6 +466,7 @@ mod tests {
                 request: None,
                 rootfs_root: None,
                 machine_id: None,
+                stdin_hash: None,
             },
             statement: crate::intoto::InTotoStatement {
                 statement_type: crate::intoto::INTOTO_STATEMENT_TYPE.to_string(),

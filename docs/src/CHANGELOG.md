@@ -82,11 +82,25 @@ All notable changes to erebus are documented here.
   (entrypoint + arguments), not stdin, and `output_hash` needs Linux
   isolation ≥ 2; the spec claimed stdin. Quickstart trusted-keys path fixed.
 
-### Known gaps (macOS, ROADMAP P1-5)
+### Fixed (macOS, ROADMAP P1-5)
 
-- The Seatbelt sandbox is not enforced; receipts carry no output digest
-  or exit code. `scripts/macos_slice.sh` reports both as KNOWN GAP; CI
-  runs it on Apple Silicon.
+- `--landlock` bundles are now confined by Seatbelt (`sandbox_init`), and
+  the launch is refused if the profile cannot be installed. Before, the
+  profile was never applied. Payload reads are limited to the system trees
+  and the rootfs; writes go to the rootfs and a private `TMPDIR`.
+- With `ERE_ATTEST_KEY`, macOS receipts now carry `output_hash` and
+  `exit_code` (the Linux capture supervisor, shared).
+- A launch that failed inside the capture supervisor exited 0, so its
+  receipt would have signed a clean run. It now exits 126.
+- `scripts/macos_slice.sh`: no KNOWN GAP left; the chain check no longer
+  fails at random under `pipefail`.
+
+### Added (batch stdin)
+
+- Spec 2.1 `execution.stdin_hash`: with capture on, a non-terminal stdin
+  is relayed by the supervisor and its `sha256` signed, only when the whole
+  input was delivered (Linux isolation ≥ 2 and macOS). Receipts without it
+  keep the 2.0 bytes.
 
 ## [0.6.1] — 2026-09-29 — internal pilot
 

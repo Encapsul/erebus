@@ -1,62 +1,183 @@
-//! macOS sandboxing via Seatbelt (`sandbox-exec`).
+//! macOS filesystem sandbox via Seatbelt (`sandbox_init`), the counterpart
+//! of the Linux Landlock sandbox for bundles built with `--landlock`.
 //!
-//! macOS provides no `seccomp` or `landlock` equivalent. The closest
-//! counterpart is Seatbelt, an `sbpf`-based sandbox profile evaluated by
-//! `sandbox-exec`. This module provides a minimal baseline profile that
-//! restricts filesystem access to the erebus cache and the app rootfs.
+//! The profile is applied to the process that execs the payload and is
+//! inherited across `execve` by the payload and its children. It denies
+//! reading file *contents* and writing anywhere, then re-allows:
 //!
-//! Seatbelt profiles are textual rules evaluated by the kernel. The profile
-//! below is intentionally permissive (allowing network, standard IPC, etc.)
-//! because erebus is a general-purpose packager — it just constrains filesystem
-//! access to the extracted rootfs and the erebus cache directory.
+//! - reads of the system trees a Mach-O or interpreter needs (`/usr`,
+//!   `/System`, `/Library`, `/bin`, `/sbin`, `/dev`, `/private/etc`,
+//!   `/private/var/db`) and of the root directory entry itself (dyld fails
+//!   with SIGABRT without it);
+//! - reads and writes under the extracted rootfs and a private `TMPDIR`
+//!   beside it, plus `/dev/null`, `/dev/tty`, `/dev/dtracehelper`.
+//!
+//! The home directory, `/private/var/folders` (per-user temp), `/tmp`,
+//! `/Volumes` and every other path are unreadable. Metadata (`stat`) stays
+//! readable, and network, IPC and process operations are not restricted —
+//! like Landlock, this confines the filesystem only.
+//!
+//! `sandbox_init` with SBPL text is a deprecated but supported API (it backs
+//! `sandbox-exec`). Failure is fatal: a bundle that asked for a filesystem
+//! sandbox never runs without one.
 
 #![cfg(target_os = "macos")]
 
-use std::io::Write;
-use std::path::Path;
+use std::ffi::{CStr, CString};
+use std::io;
+use std::os::raw::{c_char, c_int};
+use std::path::{Path, PathBuf};
 
-/// Apply a Seatbelt sandbox profile when running under macOS.
-///
-/// The profile restricts the process to:
-/// - read/write/execute under the erebus cache directory
-/// - read/write/execute under the app rootfs
-/// - standard macOS system services (network, IPC, etc.)
-///
-/// This is a best-effort, non-blocking hardening measure. If `sandbox-exec`
-/// is not available the process continues without sandboxing.
-pub fn apply_sandbox(rootfs: &Path) {
-    let cache = dirs::cache_dir()
-        .map(|d| d.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "/Users/Shared/.cache/erebus".to_string());
+extern "C" {
+    fn sandbox_init(profile: *const c_char, flags: u64, errorbuf: *mut *mut c_char) -> c_int;
+    fn sandbox_free_error(errorbuf: *mut c_char);
+}
 
-    let profile = format!(
-        r#"(version 1)
-(deny default)
-(allow process-exec)
-(allow file-read* file-write* file-map-execute* (subpath "{rootfs}"))
-(allow file-read* file-write* file-map-execute* (subpath "{cache}"))
-(allow file-read* (literal "/dev/null"))
-(allow file-read* (regex "^/dev/random$"))
-(allow file-read* (regex "^/dev/urandom$"))
-(allow sysctl-read)
-(allow network*)
-(allow signal)
-(allow file-ioctl)
-"#,
-        rootfs = rootfs.display(),
-        cache = cache,
-    );
+/// Read-only system trees: what dyld, libSystem and the host interpreters
+/// open. Everything else is denied.
+const SYSTEM_READ: [&str; 8] = [
+    "/usr",
+    "/System",
+    "/Library",
+    "/bin",
+    "/sbin",
+    "/dev",
+    "/private/etc",
+    "/private/var/db",
+];
 
-    // Write the profile to a temp file and exec via sandbox-exec.
-    // We use `system_profiler SPDeveloperToolsDataType` to check if
-    // sandbox-exec is present; on macOS it always is in the base system.
-    if let Ok(mut tmp) = tempfile::NamedTempFile::new() {
-        if tmp.write_all(profile.as_bytes()).is_ok() {
-            let _ = std::process::Command::new("sandbox-exec")
-                .arg("-p")
-                .arg(tmp.path())
-                .arg("/usr/bin/true") // probe
-                .status();
+const DEVICE_WRITE: [&str; 3] = ["/dev/null", "/dev/tty", "/dev/dtracehelper"];
+
+/// SBPL string literal; paths come from the filesystem, so quote them.
+fn sbpl_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().saturating_add(2));
+    out.push('"');
+    for c in s.chars() {
+        if c == '"' || c == '\\' {
+            out.push('\\');
         }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
+/// The Seatbelt profile confining the payload to `rootfs` and `tmp`.
+/// Both must be canonical: Seatbelt matches resolved paths (`/private/var`,
+/// never the `/var` symlink).
+pub fn profile(rootfs: &Path, tmp: &Path) -> String {
+    let sub = |p: &str| format!("(subpath {})", sbpl_string(p));
+    let lit = |p: &str| format!("(literal {})", sbpl_string(p));
+    let own = [rootfs, tmp].map(|p| sub(&p.to_string_lossy()));
+    let reads: Vec<String> = SYSTEM_READ.iter().map(|p| sub(p)).collect();
+    let devices: Vec<String> = DEVICE_WRITE.iter().map(|p| lit(p)).collect();
+    format!(
+        "(version 1)\n(allow default)\n(deny file-read-data file-write*)\n\
+         (allow file-read-data {} {} {})\n(allow file-write* {} {})\n",
+        lit("/"),
+        reads.join(" "),
+        own.join(" "),
+        own.join(" "),
+        devices.join(" "),
+    )
+}
+
+/// Private temp directory beside the rootfs, so `TMPDIR` users keep working
+/// without opening the per-user temp tree (where other secrets live).
+fn private_tmp(rootfs: &Path) -> io::Result<PathBuf> {
+    let base = rootfs.parent().unwrap_or(rootfs);
+    let tmp = base.join("tmp");
+    std::fs::create_dir_all(&tmp)?;
+    tmp.canonicalize()
+}
+
+/// Confine this process (and the payload it is about to exec) to the
+/// rootfs. Sets `TMPDIR` to the private temp directory.
+pub fn apply_sandbox(rootfs: &Path) -> io::Result<()> {
+    let root = rootfs.canonicalize()?;
+    let tmp = private_tmp(&root)?;
+    let text = CString::new(profile(&root, &tmp))
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL byte in rootfs path"))?;
+    install(&text)?;
+    std::env::set_var("TMPDIR", &tmp);
+    Ok(())
+}
+
+fn install(profile: &CStr) -> io::Result<()> {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    // SAFETY: `profile` is a valid NUL-terminated string that outlives the
+    // call; flags 0 means "SBPL source text"; `err` is a valid out-pointer
+    // that the call either leaves null or sets to a buffer we must free.
+    let rc = unsafe { sandbox_init(profile.as_ptr(), 0, &mut err) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let msg = if err.is_null() {
+        "unknown error".to_string()
+    } else {
+        // SAFETY: on failure `err` points to a NUL-terminated message owned
+        // by libsandbox; it is copied before being released exactly once.
+        let m = unsafe { CStr::from_ptr(err) }
+            .to_string_lossy()
+            .into_owned();
+        // SAFETY: `err` came from sandbox_init and is not used afterwards.
+        unsafe { sandbox_free_error(err) };
+        m
+    };
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!("seatbelt sandbox_init failed: {msg}"),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_quotes_paths_and_scopes_writes_to_owned_trees() {
+        let p = profile(
+            Path::new("/private/x/ro\"o\\t"),
+            Path::new("/private/x/tmp"),
+        );
+        assert!(p.contains(r#"(subpath "/private/x/ro\"o\\t")"#), "{p}");
+        assert!(p.contains("(deny file-read-data file-write*)"));
+        let writes = p
+            .lines()
+            .find(|l| l.starts_with("(allow file-write*"))
+            .unwrap();
+        assert!(writes.contains("/private/x/tmp") && writes.contains("/dev/null"));
+        assert!(
+            !writes.contains("\"/usr\""),
+            "system trees are read-only: {writes}"
+        );
+    }
+
+    /// The real kernel check, in a child process so the test runner stays
+    /// unconfined: inside the rootfs is readable, a file beside it is not.
+    #[test]
+    fn seatbelt_blocks_reads_outside_the_rootfs() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        std::fs::write(rootfs.join("in.txt"), b"inside").unwrap();
+        std::fs::write(dir.path().join("canary.txt"), b"secret").unwrap();
+        let root = rootfs.canonicalize().unwrap();
+        let tmp = private_tmp(&root).unwrap();
+        let script = format!(
+            "cat {0}/in.txt; cat {1}/canary.txt 2>/dev/null || echo BLOCKED; \
+             echo w > {2}/w && echo TMP-OK",
+            root.display(),
+            dir.path().canonicalize().unwrap().display(),
+            tmp.display()
+        );
+        let out = std::process::Command::new("sandbox-exec")
+            .arg("-p")
+            .arg(profile(&root, &tmp))
+            .args(["/bin/sh", "-c", &script])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(stdout, "insideBLOCKED\nTMP-OK\n", "{out:?}");
     }
 }

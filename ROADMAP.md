@@ -128,7 +128,7 @@ CI job).
     facts are hashed once (`AttestationTemplate`); per call = one Ed25519
     signature + one atomic file write.
   - CLI agents keep stdout‖stderr capture; `input_hash` there is the launch
-    vector (argv), not stdin.
+    vector (argv); a non-terminal stdin is signed as `stdin_hash` (2.1).
   - Acceptance ✅: `erebus-cli/tests/serve_attest_e2e.rs` embeds a python
     `http.server` as `bin/llama-server`, runs the real `erebus serve
     --attest-key`, 3 calls → 3 chained receipts → `verify-attest --chain
@@ -308,6 +308,18 @@ CI job).
   Also found: batch `input_hash` covers the launch vector, not stdin — the
   spec said stdin; docs corrected, stdin capture needs a stub change.
   Done when both gaps are fixed and the job is green on Apple Silicon.
+  2026-10-01 (owner approved the stub change): both gaps fixed and stdin
+  captured. (1) `sandbox_init` FFI with a real SBPL profile, fail-closed:
+  reads limited to system trees + rootfs, writes to rootfs + a private
+  `TMPDIR`. (2) the capture supervisor now runs on macOS, keeping the
+  receipt writer outside the confined child. (3) a non-terminal stdin is
+  relayed and signed as `stdin_hash` (spec 2.1). Bug found on the way: a
+  failed launch inside the capture child exited 0 and would have been
+  signed as a clean run; now 126. `macos_slice.sh` has no KNOWN GAP left
+  (11 hard checks: digests re-derived independently, exit 3 relayed and
+  signed, canary blocked with an unsandboxed control that reads it). 5/5
+  green on Intel macOS 14.8; sandbox and stdin mutations both fail it.
+  Still open: the job is not yet seen green on Apple Silicon.
 
 ### 🔵 R — What the Fall 2026 RFS and the YC field ask for (after P1, before P2)
 
@@ -681,8 +693,8 @@ companies as T3, audit firms as T4), not just a competitor list.
 ### Known constraints
 - VPS disk chronically tight; purge `target/`, `~/.cache/erebus` before
   heavy builds. qemu-user: `unshare` → EINVAL (test ARM with
-  `--isolation none`). Wine < 7 lacks WMI. macOS: Seatbelt sandbox
-  not enforced and no output capture (P1-5). `serve`: encrypted and squashfs bundles unsupported.
+  `--isolation none`). Wine < 7 lacks WMI. macOS: Seatbelt confines the
+  filesystem only (no syscall filter like seccomp). `serve`: encrypted and squashfs bundles unsupported.
 
 ### Measured
 - FastCDC ~390 MB/s, SHA-256 ~50 MB/s (i5-7300U). 100 MB payload, 1 %

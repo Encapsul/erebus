@@ -2,8 +2,8 @@
 # ROADMAP P1-5: the macOS slice, run for real on the host it targets.
 #
 # Builds a native Mach-O agent into a signed bundle with the native stub, then
-# checks launch, receipts, chain, tamper refusal and evidence export. Known
-# gaps are printed as KNOWN GAP (they do not fail the run) until fixed.
+# checks launch, receipts, chain, tamper refusal, evidence export, output /
+# stdin / exit capture and the Seatbelt filesystem sandbox.
 #
 # Usage: scripts/macos_slice.sh [path/to/erebus] [path/to/erebus-stub]
 set -euo pipefail
@@ -62,8 +62,11 @@ ok "cold run executes the agent and writes a receipt"
 
 out="$(run_agent ./agent.erebus 'second' 2>&1)"
 grep -q "agent saw 6 bytes" <<<"$out" || die "warm run: $out"
-"$EREBUS" verify-attest --chain agent.erebus.attest.d --trusted-dir trusted \
-  --bundle agent.erebus 2>&1 | grep -q "2 receipt(s)" || die "chain of 2 not verified"
+# Captured first: `cmd | grep -q` under pipefail fails at random when grep
+# exits early and cmd gets EPIPE on its remaining lines.
+chain="$("$EREBUS" verify-attest --chain agent.erebus.attest.d --trusted-dir trusted \
+  --bundle agent.erebus 2>&1)" || die "chain verification failed: $chain"
+grep -q "2 receipt(s)" <<<"$chain" || die "chain of 2 not verified: $chain"
 "$EREBUS" verify-attest agent.erebus.attest --trusted-dir trusted \
   --bundle agent.erebus >/dev/null 2>&1 || die "latest receipt not verified"
 ok "warm run chained: 2 receipts verified against the bundle"
@@ -106,12 +109,34 @@ fp="$(basename "$KEY" .key)"
   >/dev/null 2>&1 || die "verify-evidence"
 ok "evidence pack exported and verified with the pinned operator key"
 
-cap="$(python3 -c 'import json;e=json.load(open("agent.erebus.attest"))["statement"]["predicate"]["execution"];print(e.get("output_hash"), e.get("exit_code"))')"
-if [[ "$cap" == "None None" ]]; then
-  echo "  KNOWN GAP output_hash / exit_code not captured on macOS (Linux isolation ≥ 2 only)"
-else
-  ok "output_hash and exit_code captured: $cap"
-fi
+# The last receipt is the warm run fed 'second': recompute every captured
+# digest independently from what the agent printed and was given.
+python3 - agent.erebus.attest <<'EOF' || die "captured digests do not match the run"
+import hashlib, json, sys
+h = lambda b: "sha256:" + hashlib.sha256(b).hexdigest()
+e = json.load(open(sys.argv[1]))["statement"]["predicate"]["execution"]
+out = h(b"agent saw 6 bytes: second\n")
+want = h((out + ":" + h(b"")).encode())
+assert e["exit_code"] == 0, e
+assert e["output_hash"] == want, (e["output_hash"], want)
+assert e["stdin_hash"] == h(b"second"), e.get("stdin_hash")
+EOF
+ok "signed output_hash, stdin_hash and exit_code re-derived from the run"
+
+cat >"$W/fail.c" <<'EOF'
+#include <stdio.h>
+int main(void) { fputs("failing\n", stderr); return 3; }
+EOF
+mkdir -p fail-app && cc -O2 -o fail-app/app "$W/fail.c"
+ERE_STUB_PATH="$STUB" "$EREBUS" build fail-app -o fail.erebus >/dev/null 2>&1
+chmod +x fail.erebus
+set +e
+run_agent ./fail.erebus '' >/dev/null 2>&1
+rc=$?
+set -e
+code="$(python3 -c 'import json;print(json.load(open("fail.erebus.attest"))["statement"]["predicate"]["execution"]["exit_code"])')"
+[[ $rc == 3 && $code == 3 ]] || die "exit 3 not relayed/signed (stub rc=$rc, signed=$code)"
+ok "non-zero exit relayed by the stub and signed (exit_code 3)"
 
 echo 'SECRET-CANARY' >"$W/canary.txt"
 cat >"$W/canary.c" <<EOF
@@ -120,11 +145,14 @@ int main(void) { FILE *f = fopen("$W/canary.txt", "r"); puts(f ? "READ" : "BLOCK
 EOF
 cc -O2 -o canary-app/app "$W/canary.c"
 ERE_STUB_PATH="$STUB" "$EREBUS" build canary-app -o canary.erebus --landlock >/dev/null 2>&1
-chmod +x canary.erebus
-if XDG_CACHE_HOME="$W/cache" ./canary.erebus 2>/dev/null | grep -q BLOCKED; then
-  ok "sandbox: file outside the rootfs is blocked"
-else
-  echo "  KNOWN GAP sandbox: payload read a file outside its rootfs (Seatbelt not enforced)"
-fi
+ERE_STUB_PATH="$STUB" "$EREBUS" build canary-app -o open.erebus >/dev/null 2>&1
+chmod +x canary.erebus open.erebus
+out="$(XDG_CACHE_HOME="$W/cache" ./open.erebus 2>/dev/null)"
+[[ "$out" == READ ]] || die "control: the unsandboxed canary could not read its file: $out"
+out="$(XDG_CACHE_HOME="$W/cache" ./canary.erebus 2>/dev/null)"
+[[ "$out" == BLOCKED ]] || die "sandbox: payload read a file outside its rootfs: $out"
+out="$(run_agent ./canary.erebus '' 2>&1)"
+grep -q BLOCKED <<<"$out" || die "sandbox lost under capture: $out"
+ok "Seatbelt: canary outside the rootfs blocked (control without --landlock reads it), also under capture"
 
 echo "VERDICT: macOS slice OK ($PASS checks)"

@@ -119,8 +119,9 @@ You cannot conclude, from the pack alone:
 - what the inputs and outputs *were* — receipts hold digests. For a served
   call, `input_hash` / `output_hash` are the SHA-256 of the request and
   response bodies: ask the operator for them and hash them yourself. For a
-  batch run, `input_hash` covers the launch arguments only (not stdin) and
-  `output_hash` combines the stdout and stderr digests;
+  batch run, `input_hash` covers the launch arguments, `stdin_hash` (when
+  present) the whole piped stdin, and `output_hash` combines the stdout
+  and stderr digests;
 - that **no later** execution was left out. The chain proves nothing was
   removed *before* the head; runs after the head are only visible in the
   transparency log. To close that gap, ask the registry for the current

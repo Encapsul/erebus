@@ -246,6 +246,14 @@ ok = ex.get('input_hash') is not None and ex.get('output_hash') is not None and 
 print('yes' if ok else 'no')
 " 2>/dev/null)
     test "$CAPTURE_OK" = "yes" && pass "Behavior capture complete (input_hash + output_hash + exit_code)" || fail "Behavior capture fields missing"
+    # Read from the SIGNED predicate and recomputed independently.
+    STDIN_OK=$(python3 -c "
+import hashlib, json
+pred = json.load(open('$WORK/agent.attest'))['statement']['predicate']['execution']
+want = 'sha256:' + hashlib.sha256(open('$WORK/input.json', 'rb').read()).hexdigest()
+print('yes' if pred.get('stdin_hash') == want else 'no: %s != %s' % (pred.get('stdin_hash'), want))
+" 2>&1)
+    test "$STDIN_OK" = "yes" && pass "Signed stdin_hash = sha256(input.json) — the piped input is proven" || fail "stdin_hash mismatch: $STDIN_OK"
 
     # Independent verification: operator signature + machine identity + bundle binding.
     VA_OUT=$($ERE verify-attest "$WORK/agent.attest" --trusted-dir "$WORK/trusted" \

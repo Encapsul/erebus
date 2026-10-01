@@ -131,6 +131,11 @@ pub struct ExecutionInfo {
     /// host and by a registry certificate.
     #[serde(default)]
     pub machine_id: Option<String>,
+    /// Spec 2.1, batch runs: `sha256` of every byte the launcher relayed to
+    /// the payload's non-terminal stdin. Omitted (not `null`) when stdin was
+    /// a terminal or not captured, so such receipts keep the 2.0 bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdin_hash: Option<String>,
 }
 
 /// One HTTP call through the attesting proxy.
@@ -203,6 +208,7 @@ pub struct ExecutionCapture {
     pub prev_attestation_hash: Option<String>,
     pub request: Option<RequestInfo>,
     pub rootfs_root: Option<String>,
+    pub stdin_hash: Option<String>,
 }
 
 /// Bundle facts hashed once, reusable for many receipts.
@@ -436,6 +442,7 @@ impl AttestationTemplate {
             prev_attestation_hash: capture.prev_attestation_hash.clone(),
             request: capture.request.clone(),
             rootfs_root: capture.rootfs_root.clone(),
+            stdin_hash: capture.stdin_hash.clone(),
             machine_id: signers.machine.map(MachineIdentity::machine_id),
         };
 
@@ -477,11 +484,11 @@ impl AttestationTemplate {
 
 /// Lowest spec version that describes every field of `execution`.
 fn spec_version_for(execution: &ExecutionInfo) -> &'static str {
-    if execution
+    let tools = execution
         .request
         .as_ref()
-        .is_some_and(RequestInfo::uses_tool_calls)
-    {
+        .is_some_and(RequestInfo::uses_tool_calls);
+    if tools || execution.stdin_hash.is_some() {
         ATTESTATION_SPEC_VERSION_TOOL_CALLS
     } else {
         ATTESTATION_SPEC_VERSION
@@ -627,14 +634,7 @@ pub fn build_statement(
         name: name.to_string(),
         digest: std::collections::HashMap::from([("sha256".to_string(), intoto_digest(prefixed))]),
     };
-    InTotoStatement {
-        statement_type: INTOTO_STATEMENT_TYPE.to_string(),
-        subject: vec![
-            subject("bundle", &artifact.bundle_hash),
-            subject("payload", &artifact.payload_hash),
-        ],
-        predicate_type: predicate_type.to_string(),
-        predicate: serde_json::json!({
+    let mut predicate = serde_json::json!({
             "builder": provenance.builder,
             "author": provenance.author,
             "license": provenance.license,
@@ -661,7 +661,19 @@ pub fn build_statement(
                 "format_version": artifact.format_version,
                 "flags": artifact.flags,
             },
-        }),
+    });
+    // Inserted only when present: a 2.0 predicate must keep its exact bytes.
+    if let Some(h) = &execution.stdin_hash {
+        predicate["execution"]["stdin_hash"] = h.as_str().into();
+    }
+    InTotoStatement {
+        statement_type: INTOTO_STATEMENT_TYPE.to_string(),
+        subject: vec![
+            subject("bundle", &artifact.bundle_hash),
+            subject("payload", &artifact.payload_hash),
+        ],
+        predicate_type: predicate_type.to_string(),
+        predicate,
     }
 }
 
@@ -1168,6 +1180,7 @@ mod tests {
                 request: None,
                 rootfs_root: None,
                 machine_id: None,
+                stdin_hash: None,
             },
         )
     }
@@ -1517,6 +1530,7 @@ mod tests {
             prev_attestation_hash: Some("sha256:prev".to_string()),
             request: None,
             rootfs_root: None,
+            stdin_hash: None,
         };
         let att =
             write_captured_execution_attestation(&bundle_path, &key_path, &out_path, &capture)
@@ -1541,6 +1555,34 @@ mod tests {
         // Flipping the unsigned copy of a captured field is caught.
         parsed.execution.output_hash = Some("sha256:forged".to_string());
         assert!(verify_attestation(&parsed, &[key.verifying_key()]).is_err());
+        assert_eq!(parsed.spec_version, ATTESTATION_SPEC_VERSION);
+        assert!(exec.get("stdin_hash").is_none(), "absent, not null");
+    }
+
+    #[test]
+    fn stdin_hash_is_signed_and_marks_the_receipt_2_1() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("key");
+        std::fs::write(&key_path, [9u8; 32]).unwrap();
+        let (bundle_path, _, _) = write_bundle(dir.path());
+        let out_path = dir.path().join("bundle.erebus.attest");
+        let capture = ExecutionCapture {
+            stdin_hash: Some(sha256_hex(b"hello mac")),
+            exit_code: Some(0),
+            ..Default::default()
+        };
+        write_captured_execution_attestation(&bundle_path, &key_path, &out_path, &capture).unwrap();
+        let mut parsed: Attestation =
+            serde_json::from_slice(&std::fs::read(&out_path).unwrap()).unwrap();
+        let key = SigningKey::from_bytes(&[9u8; 32]).verifying_key();
+        verify_attestation(&parsed, &[key]).unwrap();
+        assert_eq!(parsed.spec_version, ATTESTATION_SPEC_VERSION_TOOL_CALLS);
+        let exec = &parsed.statement.predicate["execution"];
+        assert_eq!(exec["stdin_hash"], sha256_hex(b"hello mac").as_str());
+
+        parsed.execution.stdin_hash = Some(sha256_hex(b"evil"));
+        let err = verify_attestation(&parsed, &[key]).unwrap_err().to_string();
+        assert!(err.contains("TAMPERED"), "{err}");
     }
 
     #[test]

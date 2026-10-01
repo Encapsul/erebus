@@ -184,8 +184,9 @@ The registry key that signs certificates is the transparency-log key
                                    "description": "fingerprint of the enrolled machine key that co-signed the envelope" },
         "os":                    { "type": "string" },
         "arch":                  { "type": "string" },
-        "input_hash":            { "type": ["string", "null"], "description": "served call: sha256 of the proxied request body; batch run: sha256 of the launch vector (entrypoint then argv, NUL-joined) — stdin is not hashed" },
-        "output_hash":           { "type": ["string", "null"], "description": "served call: sha256 of the proxied response body; batch run: sha256(stdout digest \":\" stderr digest), Linux isolation ≥ 2 only, else null" },
+        "input_hash":            { "type": ["string", "null"], "description": "served call: sha256 of the proxied request body; batch run: sha256 of the launch vector (entrypoint then argv, NUL-joined); stdin is `stdin_hash`" },
+        "output_hash":           { "type": ["string", "null"], "description": "served call: sha256 of the proxied response body; batch run: sha256(stdout digest \":\" stderr digest), captured on Linux isolation ≥ 2 and on macOS when ERE_ATTEST_KEY is set, else null" },
+        "stdin_hash":            { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "spec 2.1, batch run — sha256 of every byte relayed to a non-terminal stdin; omitted when stdin was a terminal, when the payload exited before stdin reached EOF (or stopped reading), or when not captured" },
         "exit_code":             { "type": ["integer", "null"] },
         "prev_attestation_hash": { "type": ["string", "null"], "description": "sha256 of the previous receipt bytes in the local trail" },
         "request": {
@@ -248,6 +249,14 @@ The registry key that signs certificates is the transparency-log key
   }
 }
 ```
+
+**Batch stdin (spec 2.1).** With capture on, a non-terminal stdin is relayed
+by the launcher supervisor through a pipe and hashed. The digest is signed
+only when stdin reached EOF and every byte was delivered before the payload
+exited (500 ms grace), so `stdin_hash` always equals `sha256` of the whole
+input an auditor holds: `printf 'job' | ./agent.erebus` signs
+`sha256("job")`. Its absence is not evidence of empty input. A terminal is
+left attached and never hashed.
 
 Differences from v1 (`…/execution/v1`): `execution.machine_id` added.
 Everything else is byte-identical, which is why a single `build_statement`
@@ -431,7 +440,7 @@ blobs over 128 MiB unless `COSIGN_MAX_ATTACHMENT_SIZE` is raised (e.g.
 | 1.0 – 1.2 (pretty-JSON signature) | ✅ legacy path | ❌ `STRICT: spec 1.x` | ✅ if pushed | ❌ |
 | 2.0, host not enrolled | ✅ | ❌ `STRICT: … not enrolled` | ✅ | ✅ |
 | 2.0, enrolled host | ✅ | ✅ with registry key | ✅ | ✅ |
-| 2.1 (served call with tool calls or tool context) | ✅ erebus after 0.6.1; ❌ `TAMPERED` on 0.6.1 and older, which rebuild the statement without the new fields | as 2.0 | ✅ | ✅ (same v2 predicate URI) |
+| 2.1 (served call with tool calls or tool context, tool receipt, batch run with `stdin_hash`) | ✅ erebus after 0.6.1; ❌ `TAMPERED` on 0.6.1 and older, which rebuild the statement without the new fields | as 2.0 | ✅ | ✅ (same v2 predicate URI) |
 
 ## 7. Files and locations
 

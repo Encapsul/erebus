@@ -700,7 +700,7 @@ fn relay_child_status(pid: libc::pid_t) -> io::Result<()> {
 
 /// Terminate the current (supervisor) process with the child's exit status:
 /// non-zero code → exit(code); signaled → re-raise the signal; else 129.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn relay_exit_status(status: libc::c_int) -> io::Result<()> {
     if libc::WIFEXITED(status) {
         let code = libc::WEXITSTATUS(status);
@@ -721,8 +721,19 @@ fn relay_exit_status(status: libc::c_int) -> io::Result<()> {
     std::process::exit(128 + 1)
 }
 
+/// Seatbelt for `--landlock` bundles; fail-closed like Landlock on Linux.
+#[cfg(target_os = "macos")]
+fn apply_macos_sandbox(rootfs: &Path) -> io::Result<()> {
+    crate::macos_sandbox::apply_sandbox(rootfs).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("seatbelt unavailable, refusing to run without filesystem sandbox: {e}"),
+        )
+    })
+}
+
 /// Whether behavior capture is requested (opt-in) via `ERE_ATTEST_KEY`.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn attest_capture_enabled() -> bool {
     std::env::var_os("ERE_ATTEST_KEY").is_some()
 }
@@ -732,7 +743,7 @@ fn attest_capture_enabled() -> bool {
 static CAPTURE_CHILD: AtomicBool = AtomicBool::new(false);
 
 /// Canonical launch vector (entrypoint ++ runtime args) used for the input hash.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn launch_vector_for_hash(meta: &Metadata) -> Vec<String> {
     let mut v: Vec<String> = meta.effective_entrypoint().to_vec();
     for part in std::env::args_os().skip(1) {
@@ -816,7 +827,7 @@ fn write_receipt_or_warn(
 }
 
 /// Create a pipe pair (read, write).
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn unix_pipe() -> io::Result<(libc::c_int, libc::c_int)> {
     let mut fds = [0 as libc::c_int; 2];
     // SAFETY: pipe(2) writes the read/write ends into `fds` on success.
@@ -828,7 +839,7 @@ fn unix_pipe() -> io::Result<(libc::c_int, libc::c_int)> {
 
 /// Drain a pipe into a SHA-256 hasher while teeing the bytes to `tee_fd` so the
 /// user still sees the payload's output verbatim. Returns the stream digest.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn read_pipe_to_hash(fd: libc::c_int, tee_fd: libc::c_int) -> io::Result<String> {
     let mut hasher = erebus_core::attest::StreamHasher::new();
     let mut buf = [0u8; 65536];
@@ -844,31 +855,80 @@ fn read_pipe_to_hash(fd: libc::c_int, tee_fd: libc::c_int) -> io::Result<String>
         }
         let chunk = &buf[..n as usize];
         hasher.update(chunk);
-        // SAFETY: `tee_fd` is the preserved original stream fd (dup'd before the
-        // child redirected its 1/2 into the pipes); partial writes are resumed.
-        let mut off = 0usize;
-        while off < chunk.len() {
-            let w = unsafe {
-                libc::write(
-                    tee_fd,
-                    chunk[off..].as_ptr() as *const libc::c_void,
-                    chunk.len() - off,
-                )
-            };
-            if w <= 0 {
-                break;
-            }
-            off += w as usize;
-        }
+        // The tee is best effort: a closed terminal must not stop the hash.
+        write_all_fd(tee_fd, chunk);
     }
     // SAFETY: `fd` is owned by this thread and no longer needed.
     unsafe { libc::close(fd) };
     Ok(hasher.finish_hex())
 }
 
+/// Write all of `bytes` to `fd`, resuming partial writes; `false` when the
+/// reader went away (EPIPE: SIGPIPE is ignored by the Rust runtime).
+#[cfg(unix)]
+fn write_all_fd(fd: libc::c_int, bytes: &[u8]) -> bool {
+    let mut off = 0usize;
+    while off < bytes.len() {
+        // SAFETY: `fd` is an open fd owned by the caller and the slice
+        // `bytes[off..]` is valid for `bytes.len() - off` bytes.
+        let w = unsafe {
+            libc::write(
+                fd,
+                bytes[off..].as_ptr() as *const libc::c_void,
+                bytes.len() - off,
+            )
+        };
+        if w < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        if w <= 0 {
+            return false;
+        }
+        off += w as usize;
+    }
+    true
+}
+
+/// Supervisor side of the stdin relay: copy our stdin into the payload's
+/// stdin pipe and report the digest of what was delivered — only once stdin
+/// reached EOF with every byte delivered, so a digest always covers the
+/// whole input. A read error or a payload that stopped reading reports
+/// nothing.
+#[cfg(unix)]
+fn relay_stdin(in_w: libc::c_int, done: std::sync::mpsc::Sender<String>) {
+    let mut hasher = erebus_core::attest::StreamHasher::new();
+    let mut buf = [0u8; 65536];
+    let complete = loop {
+        // SAFETY: fd 0 is this process's stdin; `buf` is writable for its length.
+        let n = unsafe { libc::read(0, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        if n <= 0 {
+            break n == 0;
+        }
+        let chunk = &buf[..n as usize];
+        if !write_all_fd(in_w, chunk) {
+            break false;
+        }
+        hasher.update(chunk);
+    };
+    // SAFETY: closing the write end delivers EOF to the payload; this thread
+    // is its only owner.
+    unsafe { libc::close(in_w) };
+    if complete {
+        let _ = done.send(hasher.finish_hex());
+    }
+}
+
+/// How long the supervisor waits, after the payload exited, for the stdin
+/// relay to reach EOF before signing the receipt without `stdin_hash`.
+#[cfg(unix)]
+const STDIN_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Normalize a wait status into the payload's exit code (128 + signal when the
 /// payload was killed by a signal).
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn exit_code_from_status(status: libc::c_int) -> Option<i32> {
     if libc::WIFEXITED(status) {
         Some(libc::WEXITSTATUS(status) as i32)
@@ -892,7 +952,11 @@ fn exit_code_from_status(status: libc::c_int) -> Option<i32> {
 /// threads only see EOF when every holder exits, so the supervisor can wait for
 /// it. That is the price of capturing output for interactive/daemon apps, and
 /// capture is opt-in.
-#[cfg(target_os = "linux")]
+///
+/// A non-terminal stdin (pipe, file, `/dev/null`) is relayed through a pipe
+/// too and its digest signed as `stdin_hash`; a terminal is left attached
+/// so interactive apps keep job control and line editing.
+#[cfg(unix)]
 fn exec_app_captured(
     meta: &Metadata,
     rootfs: &Path,
@@ -905,6 +969,12 @@ fn exec_app_captured(
 
     let (out_r, out_w) = unix_pipe()?;
     let (err_r, err_w) = unix_pipe()?;
+    // SAFETY: isatty(3) only inspects fd 0.
+    let stdin_pipe = if unsafe { libc::isatty(0) } == 0 {
+        Some(unix_pipe()?)
+    } else {
+        None
+    };
     // SAFETY: dup(2) stores a private copy of the current stdout/stderr fds in
     // the supervisor so the tee threads can write through while the payload's
     // 1/2 point at the pipes. The originals stay valid across the child's exec
@@ -932,12 +1002,21 @@ fn exec_app_captured(
             libc::close(err_w);
             libc::close(orig_out);
             libc::close(orig_err);
+            if let Some((in_r, in_w)) = stdin_pipe {
+                libc::dup2(in_r, 0);
+                libc::close(in_r);
+                libc::close(in_w);
+            }
         }
         CAPTURE_CHILD.store(true, Ordering::SeqCst);
-        let _ = exec_app(meta, rootfs, app_config, bin_path);
         // exec_app's pivot path relays the payload's exit status by exiting the
         // nested process; returning `Ok` here means the payload exited 0, so
-        // mirror that and let the outer supervisor see a 0 status.
+        // mirror that. An `Err` is a launch that never ran the payload: it
+        // must not be signed as a clean exit.
+        if let Err(e) = exec_app(meta, rootfs, app_config, bin_path) {
+            eprintln!("[erebus] error: {e}");
+            std::process::exit(126);
+        }
         std::process::exit(0);
     }
 
@@ -950,6 +1029,15 @@ fn exec_app_captured(
     }
     let out_thread = std::thread::spawn(move || read_pipe_to_hash(out_r, orig_out));
     let err_thread = std::thread::spawn(move || read_pipe_to_hash(err_r, orig_err));
+    let stdin_done = stdin_pipe.map(|(in_r, in_w)| {
+        // SAFETY: the read end now belongs to the child's fd 0 only.
+        unsafe { libc::close(in_r) };
+        let (tx, rx) = std::sync::mpsc::channel();
+        // Detached: if our stdin never reaches EOF the thread stays blocked
+        // in read(0) until the supervisor exits; no digest is signed then.
+        std::thread::spawn(move || relay_stdin(in_w, tx));
+        rx
+    });
 
     // SAFETY: waitpid(2) blocks until the capture child (and, through it, the
     // nested launch tree that relays the payload status) exits.
@@ -969,6 +1057,7 @@ fn exec_app_captured(
         &err_digest,
     ));
     let exit_code = exit_code_from_status(status);
+    let stdin_hash = stdin_done.and_then(|rx| rx.recv_timeout(STDIN_SETTLE).ok());
 
     if let Some((key_path, out_path)) = attest_paths(bin_path) {
         let capture = erebus_core::attest::ExecutionCapture {
@@ -978,6 +1067,7 @@ fn exec_app_captured(
             prev_attestation_hash: None, // set from the trail head by write_receipt
             request: None,
             rootfs_root: rootfs_root_of(rootfs),
+            stdin_hash,
         };
         let phase = format!(
             "updated (exit {})",
@@ -1011,8 +1101,14 @@ pub fn exec_app(
     // fork supervisor this needs; elsewhere we fall back to the plain
     // pre-launch attestation. The guard flag stops the nested re-entry (the
     // capture fork reverts to the normal exec_app path) from recursing.
+    // macOS has no pivot path; the capture fork works there unchanged, and
+    // it keeps the receipt writer outside the Seatbelt-confined child.
     #[cfg(target_os = "linux")]
-    if use_pivot && attest_capture_enabled() && !CAPTURE_CHILD.load(Ordering::Relaxed) {
+    let capture_here = use_pivot;
+    #[cfg(target_os = "macos")]
+    let capture_here = true;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if capture_here && attest_capture_enabled() && !CAPTURE_CHILD.load(Ordering::Relaxed) {
         return exec_app_captured(meta, rootfs, app_config, bin_path);
     }
 
@@ -1096,10 +1192,8 @@ pub fn exec_app(
     crate::health_gate::maybe_start_health(meta);
 
     #[cfg(target_os = "macos")]
-    {
-        if meta.landlock {
-            crate::macos_sandbox::apply_sandbox(rootfs);
-        }
+    if meta.landlock {
+        apply_macos_sandbox(rootfs)?;
     }
 
     // ── Platform-specific argv build + process launch ─────────────────────
@@ -1491,10 +1585,8 @@ pub fn supervise_services(
     }
 
     #[cfg(target_os = "macos")]
-    {
-        if meta.landlock {
-            crate::macos_sandbox::apply_sandbox(rootfs);
-        }
+    if meta.landlock {
+        apply_macos_sandbox(rootfs)?;
     }
 
     let base_env = setup_env(meta, rootfs, use_pivot, None, app_config)?;
