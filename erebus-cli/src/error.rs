@@ -55,6 +55,7 @@ pub fn exit_code_for_error(err: &anyhow::Error) -> ExitCode {
         || lower.contains("already signed")
         || lower.contains("verification")
         || lower.contains("mismatch")
+        || lower.contains("tampered")
     {
         return ExitCode::from(2);
     }

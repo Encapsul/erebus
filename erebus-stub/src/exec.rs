@@ -11,6 +11,8 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::exit;
+#[cfg(unix)]
+use std::sync::atomic::AtomicI32;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::config::AppConfig;
@@ -953,6 +955,114 @@ fn relay_stdin(in_w: libc::c_int, done: std::sync::mpsc::Sender<String>) {
     }
 }
 
+/// Supervisor side: which capture child should receive a forwarded stop.
+#[cfg(unix)]
+static CAPTURE_CHILD_PID: AtomicI32 = AtomicI32::new(0);
+/// First stop signal latched for the capture supervisor (`0` = none).
+#[cfg(unix)]
+static CAPTURE_STOP_SIG: AtomicI32 = AtomicI32::new(0);
+/// Unix seconds when the first stop was latched (`0` = none).
+#[cfg(unix)]
+static CAPTURE_STOP_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Async-signal-safe stop latch + forward to the capture child.
+///
+/// # Safety
+///
+/// Called only from a signal handler. Uses only async-signal-safe ops:
+/// atomic loads/stores and `kill(2)`. `time(NULL)` is async-signal-safe.
+#[cfg(unix)]
+extern "C" fn capture_stop_handler(sig: i32) {
+    if CAPTURE_STOP_SIG
+        .compare_exchange(0, sig, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        // SAFETY: time(2) with a null pointer returns the current time; it is
+        // async-signal-safe and does not touch Rust heap state.
+        let now = unsafe { libc::time(std::ptr::null_mut()) };
+        if now > 0 {
+            CAPTURE_STOP_AT.store(now as u64, Ordering::SeqCst);
+        }
+    }
+    let pid = CAPTURE_CHILD_PID.load(Ordering::SeqCst);
+    if pid > 0 {
+        // SAFETY: kill(2) to a child we forked; signal number is SIGTERM/SIGINT.
+        unsafe {
+            libc::kill(pid, sig);
+        }
+    }
+}
+
+/// Install SIGTERM/SIGINT handlers that latch stop metadata and forward to `pid`.
+#[cfg(unix)]
+fn install_capture_stop_handler(pid: libc::pid_t) {
+    CAPTURE_CHILD_PID.store(pid, Ordering::SeqCst);
+    CAPTURE_STOP_SIG.store(0, Ordering::SeqCst);
+    CAPTURE_STOP_AT.store(0, Ordering::SeqCst);
+    // SAFETY: signal(2) installs a C handler that only uses AS-safe ops
+    // (see `capture_stop_handler`). Replaces any prior disposition for the
+    // life of this supervisor wait; cleared after reap.
+    unsafe {
+        libc::signal(libc::SIGTERM, capture_stop_handler as *const () as usize);
+        libc::signal(libc::SIGINT, capture_stop_handler as *const () as usize);
+    }
+}
+
+/// Clear the capture stop handler after the child is reaped.
+#[cfg(unix)]
+fn clear_capture_stop_handler() {
+    CAPTURE_CHILD_PID.store(0, Ordering::SeqCst);
+    // SAFETY: restore default dispositions once the child is gone so a later
+    // supervisor does not forward to a stale PID.
+    unsafe {
+        libc::signal(libc::SIGTERM, libc::SIG_DFL);
+        libc::signal(libc::SIGINT, libc::SIG_DFL);
+    }
+}
+
+/// Build [`StopInfo`] from the capture latch once the child has been reaped.
+///
+/// `kill_timeout: true` matches `erebus serve` (immediate forward / kill).
+#[cfg(unix)]
+fn capture_stop_info() -> Option<erebus_core::attest::StopInfo> {
+    let sig = CAPTURE_STOP_SIG.load(Ordering::SeqCst);
+    if sig == 0 {
+        return None;
+    }
+    let secs = CAPTURE_STOP_AT.load(Ordering::SeqCst);
+    let requested_at = if secs > 0 {
+        erebus_core::attest::iso8601_from_unix(secs)
+    } else {
+        erebus_core::attest::utc_now_iso8601()
+    };
+    let signal = match sig {
+        s if s == libc::SIGTERM => "SIGTERM",
+        s if s == libc::SIGINT => "SIGINT",
+        _ => "SIGTERM",
+    };
+    Some(erebus_core::attest::StopInfo {
+        requested_at,
+        reaped_at: erebus_core::attest::utc_now_iso8601(),
+        signal: signal.to_string(),
+        kill_timeout: true,
+    })
+}
+
+/// Pure helper for tests: populate a stop receipt with the serve semantics.
+#[cfg(test)]
+fn stop_info_for_capture(
+    requested_at: &str,
+    signal: &str,
+    reaped_at: &str,
+) -> erebus_core::attest::StopInfo {
+    erebus_core::attest::StopInfo {
+        requested_at: requested_at.to_string(),
+        reaped_at: reaped_at.to_string(),
+        signal: signal.to_string(),
+        kill_timeout: true,
+    }
+}
+
 /// How long the supervisor waits, after the payload exited, for the stdin
 /// relay to reach EOF before signing the receipt without `stdin_hash`.
 #[cfg(unix)]
@@ -1071,12 +1181,18 @@ fn exec_app_captured(
         rx
     });
 
+    // Latch SIGTERM/SIGINT so a stop enriches the completion receipt with
+    // `execution.stop` (same schema as `erebus serve`).
+    install_capture_stop_handler(pid);
+
     // SAFETY: waitpid(2) blocks until the capture child (and, through it, the
     // nested launch tree that relays the payload status) exits.
     let mut status: libc::c_int = 0;
     unsafe {
         libc::waitpid(pid, &mut status, 0);
     }
+    let stop = capture_stop_info();
+    clear_capture_stop_handler();
 
     let out_digest = out_thread
         .join()
@@ -1101,6 +1217,8 @@ fn exec_app_captured(
             rootfs_root: rootfs_root_of(rootfs),
             stdin_hash,
             egress: signed_egress(),
+            stop,
+            ..Default::default()
         };
         let phase = format!(
             "updated (exit {})",
@@ -1869,7 +1987,7 @@ pub fn wait_for_port(port: u16, timeout_secs: u64) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-use std::sync::atomic::{AtomicI32, AtomicUsize};
+use std::sync::atomic::AtomicUsize;
 
 /// Maximum number of child PIDs the signal handler can forward to.
 /// Fixed-size array avoids heap allocation and Mutex in signal context.
@@ -2191,5 +2309,14 @@ mod tests {
         for name in ["binary", "cobol", "wasm"] {
             assert!(runtime_interpreter(name).is_none(), "runtime: {name}");
         }
+    }
+
+    #[test]
+    fn capture_stop_info_helper_matches_serve_semantics() {
+        let stop = stop_info_for_capture("2026-10-01T12:00:00Z", "SIGTERM", "2026-10-01T12:00:01Z");
+        assert_eq!(stop.signal, "SIGTERM");
+        assert!(stop.kill_timeout);
+        assert_eq!(stop.requested_at, "2026-10-01T12:00:00Z");
+        assert_eq!(stop.reaped_at, "2026-10-01T12:00:01Z");
     }
 }

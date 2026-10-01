@@ -51,3 +51,4 @@ pub mod tool_calls;
 pub mod tool_exec;
 pub mod tool_linkage;
 pub mod tool_requests;
+pub mod witness;

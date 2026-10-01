@@ -188,20 +188,32 @@ impl ReceiptPublisher {
     fn publish(&self, path: &Path) -> Result<()> {
         let bytes = std::fs::read(path)
             .with_context(|| format!("cannot read receipt {}", path.display()))?;
-        let published = crate::commands::attest::publish_receipt(
+        match crate::commands::attest::publish_receipt(
             &self.registry,
             self.token.as_deref(),
             path,
             &bytes,
-        )?;
-        if std::env::var_os("ERE_VERBOSE").is_some() {
-            eprintln!(
-                "[erebus] published receipt {} → {}",
-                path.display(),
-                published.id
-            );
+        ) {
+            Ok(published) => {
+                if std::env::var_os("ERE_VERBOSE").is_some() {
+                    eprintln!(
+                        "[erebus] published receipt {} → {}",
+                        path.display(),
+                        published.id
+                    );
+                }
+                Ok(())
+            }
+            Err(e) => {
+                // Parent trail of the receipt file: seal for DDIL store-and-forward.
+                if let Some(dir) = path.parent() {
+                    if let Ok(log) = AttestationLog::open(dir) {
+                        erebus_core::witness::seal_trail_best_effort(&log);
+                    }
+                }
+                Err(e).context("registry publish failed; receipt kept and witness sealed")
+            }
         }
-        Ok(())
     }
 }
 

@@ -323,17 +323,18 @@ Derived from §7.2 (RFS re-read 2026-10-01) and §7.5 (YC field). Each item
 closes a question a defense buyer, an agent insurer or an auditor asks on day
 one. Same rule as P0: done only when the acceptance test runs in CI.
 
-- [ ] **R1 Disconnected anchoring (DDIL)** — Army RFS: "survive the most
-  extreme climates … from the Arctic to subterranean". Today a receipt is
-  anchored only if the registry and the TSA are reachable. Add
-  store-and-forward: receipts are co-signed by a local **witness** (vehicle,
-  base, gateway: a second enrolled key that signs checkpoints of the local
-  trail), queued, and published when the link returns; the registry then
-  proves consistency from the witness checkpoint to its own tree head.
-  Acceptance: CI harness cuts the network for N receipts, restores it, and
-  `verify-attest --strict --proof` passes on all of them with a provable
-  "witnessed at T1, anchored at T2" gap; a receipt inserted during the
-  outage is refused.
+- [x] **R1 Disconnected anchoring (DDIL)** — Army RFS: "survive the most
+  extreme climates … from the Arctic to subterranean". MVP landed 2026-10-01:
+  a local **witness** key co-signs checkpoints of the local trail head
+  (`erebus witness keygen` / `seal` → `HEAD.witness.json`;
+  `root = sha256(head receipt bytes)`, `size = receipt count`). Failed
+  `attest --push` / publisher paths leave the receipt and seal the head;
+  on reconnect, backlog publish + `verify-attest --proof` work as today.
+  `verify-attest --witness-key [--require-witness]` prints `witnessed at T1`
+  and, with a log proof, `anchored at T2` (`witnessed_at ≤ checkpoint`);
+  an insertion past the sealed size is refused. Acceptance:
+  `erebus-cli/tests/witness_e2e.rs` + `erebus-core` `witness` unit tests.
+  (Not a full offline Merkle log — trail-head seal only.)
 - [x] **R2 Action receipts** — Klaimee's covered failures (unauthorized
   action, scope violation, prompt injection) and Salus / Agentic Fabriq all
   centre on *what the agent did*, not what the model said. The `serve`
@@ -394,14 +395,18 @@ one. Same rule as P0: done only when the acceptance test runs in CI.
   SIGINT with signed `execution.stop` (`requested_at`, `reaped_at`, `signal`,
   `kill_timeout`). Acceptance: `stop_receipt_closes_chain_after_sigterm` in
   `serve_attest_e2e.rs` (reap ≥ request, chain still verifies). Startup abort
-  during `wait_healthy` skips the stop receipt.
+  during `wait_healthy` skips the stop receipt. Stub capture supervisor
+  (2026-10-01): same `execution.stop` on the completion receipt when
+  SIGTERM/SIGINT is latched during `exec_app_captured` (unit:
+  `capture_stop_info_helper_matches_serve_semantics`; serve e2e covers schema).
 - [x] **R4 Human approval in the receipt** — EU AI Act Art. 14 (human
   oversight); GrayPass (Fall 2026) already signs per-action approvals.
   Landed 2026-10-01. Optional signed `execution.approval` (`erebus approve`
   → `erebus attest --approval` → `verify-attest --approver-key`); canonical
   message `erebus-approval/v1\n…`. Forged approval signature → exit 2
   (`TAMPERED`). Unit tests: `approval_sign_verify_roundtrip`,
-  `approval_forged_signature_refused`.
+  `approval_forged_signature_refused`. CLI e2e (2026-10-01):
+  `approval_roundtrip_and_forged_signature_refused` in `attest_e2e.rs`.
 - [ ] **R5 Bundle-to-source provenance** — lesson from Caution (Summer 2026):
   "a hash proves *a* binary ran, not *which source*". `erebus build` emits a
   SLSA v1 provenance statement (git commit, dirty flag, source tree digest,

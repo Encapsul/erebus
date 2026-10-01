@@ -115,6 +115,17 @@ enum Commands {
     ///   erebus enroll --registry <http://host:8080> --token "$TOKEN"
     Enroll(commands::enroll::EnrollArgs),
 
+    /// Local trail witness for disconnected anchoring (DDIL)
+    ///
+    /// Co-signs the local trail head while offline; receipts publish when
+    /// the link returns. `verify-attest --witness-key` / `--require-witness`
+    /// refuse insertions that happened after the seal.
+    ///
+    /// Examples:
+    ///   erebus witness keygen [--dir DIR]
+    ///   erebus witness seal --trail agent.erebus.attest.d
+    Witness(commands::witness::WitnessArgs),
+
     /// Generate or verify a signed compliance audit report
     ///
     /// Aggregates attestations, SBOM, and integrity info into a single
@@ -413,6 +424,7 @@ fn main() -> ExitCode {
         Commands::Approve(args) => commands::approve::run(args),
         Commands::AttestHistory(args) => commands::attest_history::run(args),
         Commands::Enroll(args) => commands::enroll::run(args),
+        Commands::Witness(args) => commands::witness::run(args),
         Commands::Audit(mut args) => {
             if cli.quiet {
                 args.quiet = true;

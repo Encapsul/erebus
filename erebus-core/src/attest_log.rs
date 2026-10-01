@@ -88,8 +88,10 @@ impl AttestationLog {
             .filter_map(Result::ok)
             .map(|e| e.path())
             .filter(|p| {
+                let name = p.to_string_lossy();
                 p.extension().is_some_and(|ext| ext == "json")
-                    && !p.to_string_lossy().ends_with(".proof.json")
+                    && !name.ends_with(".proof.json")
+                    && !name.ends_with(".witness.json")
             })
             .collect();
         entries.sort();

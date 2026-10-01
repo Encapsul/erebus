@@ -180,42 +180,52 @@ pub fn run(args: AttestArgs) -> Result<()> {
         })?;
         let registry = registry.trim_end_matches('/').to_string();
         let token = resolve_token(args.token.as_deref(), args.token_file.as_deref())?;
-        let published = publish_receipt(&registry, token.as_deref(), &output_path, &json_bytes)?;
-        // The trail entry holds the same bytes, so the proof covers it too;
-        // `evidence export` and `verify-attest --chain` read it from there.
-        if let (Some(entry), Some(proof)) = (&entry, &published.proof) {
-            std::fs::copy(proof, proof_path_for(entry))
-                .with_context(|| format!("failed to store proof beside {}", entry.display()))?;
-        }
-        if args.json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "id": published.id,
-                    "status": published.status,
-                    "recorded": published.body.get("recorded"),
-                    "proof": published.proof.as_ref().map(|p| p.display().to_string()),
-                    "log": published.body.get("log"),
-                }))?
-            );
-        } else if !args.quiet {
-            eprintln!("Pushed attestation to {registry}");
-            eprintln!("  id:      {}", published.id);
-            eprintln!("  status:  {}", published.status);
-            match (&published.proof, published.body.get("log")) {
-                (Some(p), Some(log)) => {
-                    eprintln!(
-                        "  log:     leaf #{} of {} (root {})",
-                        log["leaf_index"],
-                        log["tree_size"],
-                        log["root"].as_str().unwrap_or("?")
-                    );
-                    if log.get("anchor").is_some_and(|a| !a.is_null()) {
-                        eprintln!("  anchor:  RFC 3161 token stored");
-                    }
-                    eprintln!("  proof:   {}", p.display());
+        match publish_receipt(&registry, token.as_deref(), &output_path, &json_bytes) {
+            Ok(published) => {
+                if let (Some(entry), Some(proof)) = (&entry, &published.proof) {
+                    std::fs::copy(proof, proof_path_for(entry)).with_context(|| {
+                        format!("failed to store proof beside {}", entry.display())
+                    })?;
                 }
-                _ => eprintln!("  proof:   none (registry predates the transparency log)"),
+                if args.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "id": published.id,
+                            "status": published.status,
+                            "recorded": published.body.get("recorded"),
+                            "proof": published.proof.as_ref().map(|p| p.display().to_string()),
+                            "log": published.body.get("log"),
+                        }))?
+                    );
+                } else if !args.quiet {
+                    eprintln!("Pushed attestation to {registry}");
+                    eprintln!("  id:      {}", published.id);
+                    eprintln!("  status:  {}", published.status);
+                    match (&published.proof, published.body.get("log")) {
+                        (Some(p), Some(log)) => {
+                            eprintln!(
+                                "  log:     leaf #{} of {} (root {})",
+                                log["leaf_index"],
+                                log["tree_size"],
+                                log["root"].as_str().unwrap_or("?")
+                            );
+                            if log.get("anchor").is_some_and(|a| !a.is_null()) {
+                                eprintln!("  anchor:  RFC 3161 token stored");
+                            }
+                            eprintln!("  proof:   {}", p.display());
+                        }
+                        _ => eprintln!("  proof:   none (registry predates the transparency log)"),
+                    }
+                }
+            }
+            Err(e) => {
+                // Store-and-forward (R1): keep the local receipt and seal the
+                // trail head so an outage window is witnessed until sync.
+                if let Some(log) = &log {
+                    erebus_core::witness::seal_trail_best_effort(log);
+                }
+                return Err(e).context("registry publish failed; receipt kept locally");
             }
         }
     }

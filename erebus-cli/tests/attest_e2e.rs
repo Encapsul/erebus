@@ -318,3 +318,80 @@ fn verify_attest_requires_receipt_or_chain() {
         .failure()
         .stderr(predicate::str::contains("required"));
 }
+
+/// ROADMAP R4: approve → attest --approval → verify-attest --approver-key;
+/// forged `approval.signature_hex` → exit 2 TAMPERED.
+#[test]
+fn approval_roundtrip_and_forged_signature_refused() {
+    let dir = tempdir().unwrap();
+    let bundle = make_bundle(dir.path(), "agent", "hello");
+    let (operator, trusted) = keygen(dir.path());
+    let (approver, _) = keygen(&dir.path().join("approver-keys"));
+    let subject = format!("sha256:{}", "ab".repeat(32));
+    let approval = dir.path().join("approval.json");
+
+    erebus()
+        .args([
+            "approve",
+            "--key",
+            approver.to_str().unwrap(),
+            "--decision",
+            "allow",
+            "--subject",
+            &subject,
+            "-o",
+            approval.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let out = dir.path().join("agent.erebus.attest");
+    attest(
+        &bundle,
+        &operator,
+        &out,
+        &["--no-log", "--approval", approval.to_str().unwrap()],
+    );
+
+    let approver_pub = approver.with_extension("pub");
+    erebus()
+        .args([
+            "verify-attest",
+            out.to_str().unwrap(),
+            "--trusted-dir",
+            trusted.to_str().unwrap(),
+            "--approver-key",
+            approver_pub.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("OK: approval"))
+        .stderr(predicate::str::contains("sha256:"));
+
+    // Forge the approval JSON, then re-attest so the operator signature covers
+    // the bad approval — --approver-key must still refuse it.
+    let mut appr: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&approval).unwrap()).unwrap();
+    appr["signature_hex"] = serde_json::json!("00".repeat(64));
+    std::fs::write(&approval, serde_json::to_vec_pretty(&appr).unwrap()).unwrap();
+    let forged_out = dir.path().join("forged.erebus.attest");
+    attest(
+        &bundle,
+        &operator,
+        &forged_out,
+        &["--no-log", "--approval", approval.to_str().unwrap()],
+    );
+
+    erebus()
+        .args([
+            "verify-attest",
+            forged_out.to_str().unwrap(),
+            "--trusted-dir",
+            trusted.to_str().unwrap(),
+            "--approver-key",
+            approver_pub.to_str().unwrap(),
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("TAMPERED"));
+}

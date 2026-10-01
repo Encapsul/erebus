@@ -488,6 +488,10 @@ carries only `execution.stop`:
 A signal during startup (`wait_healthy`) aborts without a stop receipt.
 `reaped_at` is always ≥ `requested_at`. Spec version is `2.1`.
 
+The stub capture supervisor (`ERE_ATTEST_KEY` + pivot/macOS capture path)
+latches the same fields into the **completion** receipt when SIGTERM/SIGINT
+arrives during the run (`kill_timeout: true`, same semantics as serve).
+
 ### 3.6 Human approval (spec 2.1)
 
 Optional oversight evidence (EU AI Act Art. 14). `erebus approve` signs:
@@ -501,6 +505,41 @@ resulting JSON is attached with `erebus attest --approval FILE` into
 `execution.approval`. `verify-attest --approver-key <hex|.pub>` checks the
 signature and prints the approver fingerprint; a forged signature is
 `TAMPERED` (exit 2). Spec version is `2.1` when present.
+
+### 3.7 Local witness checkpoint (R1 / DDIL)
+
+While offline, a second Ed25519 **witness** key co-signs the local trail
+head. Design (trail head only — not a full Merkle tree offline):
+
+| Field | Meaning |
+|---|---|
+| `origin` | Absolute path of the trail directory |
+| `size` | Number of receipt files covered |
+| `root` | `sha256:` of the **head receipt file bytes** (same digest as `HEAD`) |
+| `witnessed_at` | ISO 8601 UTC when the witness signed |
+| `witness_id` | Fingerprint of the witness verifying key |
+| `signature_hex` | Ed25519 over the canonical bytes below |
+
+Canonical message:
+
+```
+erebus-witness-checkpoint/v1\n{origin}\n{size}\n{root_hex}\n{witnessed_at}\n{witness_id}\n
+```
+
+Stored as `<trail>/HEAD.witness.json`. CLI:
+
+```sh
+erebus witness keygen [--dir DIR]          # ~/.local/share/erebus/witness/witness.key
+erebus witness seal --trail agent.attest.d
+erebus verify-attest --chain DIR --witness-key <hex|.pub> [--require-witness]
+erebus verify-attest receipt.attest --proof --witness-key …
+```
+
+`--require-witness` refuses a trail that grew past the sealed `size` /
+`root` (insertion during an outage). Without it, a historical seal still
+verifies and prints `witnessed at T1`; with `--proof`, also `anchored at T2`,
+requiring `witnessed_at ≤ checkpoint.timestamp`. A failed `--push` leaves
+the receipt in the trail and seals the head (store-and-forward).
 
 ## 4. Display copies and consistency
 
@@ -547,6 +586,8 @@ blobs over 128 MiB unless `COSIGN_MAX_ATTACHMENT_SIZE` is raised (e.g.
 |---|---|---|
 | `~/.local/share/erebus/machine/machine.key` (or `$ERE_MACHINE_DIR`) | machine seed, never rotated implicitly | 0600 |
 | `…/machine/machine.cert.json` | registry certificate | 0644 |
+| `~/.local/share/erebus/witness/witness.key` (or `$ERE_WITNESS_KEY` / `$ERE_WITNESS_DIR`) | local trail witness seed (R1) | 0600 |
+| `<trail>/HEAD.witness.json` | signed trail-head checkpoint while offline | 0644 |
 | `<bundle>.erebus.attest` | latest receipt | 0644 |
 | `<bundle>.erebus.attest.d/` | hash-chained trail | 0644 |
 | `<receipt>.proof.json` | transparency-log proof (`erebus-log-proof/v1`) | 0644 |

@@ -40,3 +40,4 @@ pub mod upgrade_binary;
 pub mod verify;
 pub mod verify_attest;
 pub mod webchat;
+pub mod witness;

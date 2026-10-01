@@ -98,6 +98,16 @@ pub struct VerifyAttestArgs {
     #[arg(long, value_name = "HEX|FILE")]
     pub approver_key: Option<String>,
 
+    /// Witness public key (64 hex chars) or `.pub`: verify `HEAD.witness.json`
+    /// on the trail (with `--chain`) or next to the receipt's trail dir
+    #[arg(long, value_name = "HEX|FILE")]
+    pub witness_key: Option<String>,
+
+    /// With `--witness-key`: refuse if the seal is missing or the trail grew
+    /// past the sealed size / head (detects insertions during an outage)
+    #[arg(long, requires = "witness_key")]
+    pub require_witness: bool,
+
     /// Output verification result as JSON
     #[arg(long)]
     pub json: bool,
@@ -124,6 +134,12 @@ pub fn run(args: VerifyAttestArgs) -> Result<()> {
 
     let mut report = match (&args.chain, &args.attest_file) {
         (Some(dir), _) => {
+            // With --require-witness, refuse a trail that grew past the seal
+            // before parsing every file (so a forged extra JSON is TAMPERED
+            // on size, not a confusing parse error).
+            if let (Some(spec), true) = (&args.witness_key, args.require_witness) {
+                let _ = verify_witness_trail(dir, spec, true)?;
+            }
             let separate = separate_tool_keys(args.tool_trusted_dir.as_deref(), &keys)?;
             let tools = ToolTrails {
                 specs: &args.tool_trail,
@@ -184,6 +200,29 @@ pub fn run(args: VerifyAttestArgs) -> Result<()> {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("--approver-key needs a receipt path"))?;
         report["approval"] = verify_approver(file, spec)?;
+    }
+    if let Some(spec) = &args.witness_key {
+        let trail_dir = resolve_witness_trail(&args)?;
+        let witness = verify_witness_trail(&trail_dir, spec, args.require_witness)?;
+        if let (Some(w), Some(lp)) = (
+            witness.as_ref().filter(|v| v.is_object()),
+            report.get("log_proof").filter(|v| v.is_object()),
+        ) {
+            let witnessed = w
+                .get("witnessed_at")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let anchored = lp
+                .get("checkpoint_time")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if !witnessed.is_empty() && !anchored.is_empty() {
+                erebus_core::witness::check_witness_before_anchor(witnessed, anchored)?;
+            }
+        }
+        if let Some(w) = witness {
+            report["witness"] = w;
+        }
     }
 
     if args.json {
@@ -423,6 +462,39 @@ fn load_approver_key(spec: &str) -> Result<VerifyingKey> {
     parse_log_key(spec).map_err(|e| anyhow::anyhow!("--approver-key: {e}"))
 }
 
+/// Trail directory that holds `HEAD.witness.json`.
+fn resolve_witness_trail(args: &VerifyAttestArgs) -> Result<PathBuf> {
+    if let Some(dir) = &args.chain {
+        return Ok(dir.clone());
+    }
+    let file = args
+        .attest_file
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("--witness-key needs a receipt path or --chain"))?;
+    Ok(erebus_core::attest_log::default_log_dir(file))
+}
+
+fn verify_witness_trail(
+    trail: &Path,
+    spec: &str,
+    require: bool,
+) -> Result<Option<serde_json::Value>> {
+    let key = erebus_core::witness::load_verifying_key(spec)?;
+    let log = AttestationLog::open(trail)
+        .with_context(|| format!("cannot open trail {}", trail.display()))?;
+    let Some(cp) = erebus_core::witness::check_trail_witness(&log, &key, require)? else {
+        return Ok(None);
+    };
+    Ok(Some(serde_json::json!({
+        "verified": true,
+        "witnessed_at": cp.witnessed_at,
+        "witness_id": cp.witness_id,
+        "size": cp.size,
+        "root": cp.root,
+        "origin": cp.origin,
+    })))
+}
+
 pub(crate) fn verify_chain(
     dir: &Path,
     keys: &[VerifyingKey],
@@ -653,6 +725,22 @@ fn print_human(report: &serde_json::Value) {
             s("key_fingerprint"),
             s("subject_digest")
         );
+    }
+    if let Some(w) = report.get("witness").filter(|w| w.is_object()) {
+        let s = |k: &str| w.get(k).and_then(|v| v.as_str()).unwrap_or("?");
+        let n = w.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+        eprintln!(
+            "OK: witnessed at {} — size {n}, witness {}",
+            s("witnessed_at"),
+            s("witness_id")
+        );
+        if let Some(lp) = report.get("log_proof").filter(|v| v.is_object()) {
+            let anchored = lp
+                .get("checkpoint_time")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            eprintln!("  anchored at {anchored} (after witness)");
+        }
     }
 }
 
