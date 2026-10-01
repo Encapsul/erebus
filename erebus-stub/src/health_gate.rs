@@ -19,6 +19,10 @@ pub fn spawn_health_server(port: u16, endpoint: String) {
             return;
         }
     };
+    serve_health(listener, endpoint);
+}
+
+fn serve_health(listener: TcpListener, endpoint: String) {
     let _ = listener.set_nonblocking(true);
 
     thread::spawn(move || {
@@ -29,6 +33,11 @@ pub fn spawn_health_server(port: u16, endpoint: String) {
         loop {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    // BSD/macOS sockets inherit O_NONBLOCK from the listener:
+                    // a probe that has not written yet would get a reset. The
+                    // timeout keeps a silent client from wedging this thread.
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
                     let mut buf = [0u8; 1024];
                     let n = stream.read(&mut buf).unwrap_or(0);
                     let first_line_bytes = buf[..n].split(|&b| b == b'\n').next().unwrap_or(&[]);
@@ -61,5 +70,28 @@ pub fn maybe_start_health(meta: &Metadata) {
         if hc.enabled && hc.port > 0 {
             spawn_health_server(hc.port, hc.endpoint.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    #[test]
+    fn a_probe_that_writes_after_connecting_still_gets_200() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        serve_health(listener, "/health".to_string());
+        let mut probe = TcpStream::connect(addr).expect("connect");
+        // Real probes (curl, k8s) may send the request after accept() returns.
+        thread::sleep(Duration::from_millis(300));
+        probe
+            .write_all(b"GET /health HTTP/1.1\r\n\r\n")
+            .expect("send");
+        let mut answer = String::new();
+        probe.read_to_string(&mut answer).expect("read");
+        assert!(answer.starts_with("HTTP/1.1 200"), "got: {answer:?}");
     }
 }

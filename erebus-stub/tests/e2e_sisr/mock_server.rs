@@ -44,6 +44,12 @@ impl MockHttpServer {
             while !accept_shutdown.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // BSD/macOS sockets inherit O_NONBLOCK from the
+                        // listener: the first read would hit WouldBlock and
+                        // drop the request ("Peer disconnected").
+                        if stream.set_nonblocking(false).is_err() {
+                            continue;
+                        }
                         let routes = accept_routes.clone();
                         thread::spawn(move || serve(&mut stream, &routes));
                     }
