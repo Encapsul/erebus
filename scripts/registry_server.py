@@ -3067,8 +3067,11 @@ def main() -> None:
     bootstrap = Handler.store.bootstrap_open_uploads()
     billing_state = ("on" if Handler.billing.get("secret_key")
                      and Handler.billing.get("webhook_secret") else "off")
+    # The bound port, not args.port: with --port 0 the OS picks a free one
+    # and this line is how callers (tests, harnesses) learn it race-free.
+    port = server.server_address[1]
     print(
-        f"erebus registry v2 on {scheme}://{args.host}:{args.port} dir={args.dir} "
+        f"erebus registry v2 on {scheme}://{args.host}:{port} dir={args.dir} "
         f"quota={args.quota_gb}GB/month cap={args.upload_cap_gb}GB/upload "
         f"auth={'required (strict, --require-auth)' if args.require_auth else 'OPEN — anonymous uploads (opt-in --allow-anon-uploads)' if bootstrap else 'required (fail-closed by default)'} "
         f"billing={billing_state}",

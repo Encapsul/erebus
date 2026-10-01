@@ -6,12 +6,13 @@
 //! and Merkle tree agree byte-for-byte with `ed25519-dalek` / `merkle.rs`.
 //! Skips (with a notice) when `python3` is unavailable.
 
+mod common;
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tempfile::tempdir;
 
 fn erebus() -> Command {
@@ -62,49 +63,20 @@ fn keygen(dir: &Path) -> (PathBuf, PathBuf) {
     (key, key_dir)
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
 /// The real registry, killed on drop.
 struct Registry {
-    child: Child,
+    _process: common::registry::RegistryProcess,
     base: String,
 }
 
 impl Registry {
     fn start(root: &Path) -> Option<Self> {
-        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/registry_server.py");
-        let port = free_port();
-        let child = std::process::Command::new("python3")
-            .arg(&script)
-            .args(["--dir", root.to_str().unwrap(), "--port", &port.to_string()])
-            .args(["--log-origin", "e2e-origin", "--anchor-every", "0"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .ok()?;
-        let reg = Self {
-            child,
-            base: format!("http://127.0.0.1:{port}"),
-        };
-        reg.wait_ready();
-        Some(reg)
-    }
-
-    fn wait_ready(&self) {
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while Instant::now() < deadline {
-            if http(&self.base, "GET", "/health", None, None).is_some() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        panic!("registry never became healthy");
+        let process = common::registry::spawn_registry(root, "e2e-origin")?;
+        let base = process.base.clone();
+        Some(Self {
+            _process: process,
+            base,
+        })
     }
 
     fn register(&self) -> String {
@@ -124,13 +96,6 @@ impl Registry {
     fn log_key_hex(&self) -> String {
         let (_, json) = http(&self.base, "GET", "/log/key", None, None).unwrap();
         json["public_key_hex"].as_str().unwrap().to_string()
-    }
-}
-
-impl Drop for Registry {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 }
 

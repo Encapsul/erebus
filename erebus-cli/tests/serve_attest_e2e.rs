@@ -7,6 +7,8 @@
 
 #![cfg(unix)]
 
+mod common;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -177,39 +179,18 @@ impl Drop for Serve {
 /// Real Python registry, used to prove that `serve --push` stores a verified
 /// inclusion proof next to every per-call receipt.
 struct Registry {
-    child: Child,
+    _process: common::registry::RegistryProcess,
     base: String,
 }
 
 impl Registry {
     fn start(root: &Path) -> Self {
-        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/registry_server.py");
-        let port = free_port();
-        let child = Command::new("python3")
-            .arg(script)
-            .args(["--dir", root.to_str().unwrap(), "--port", &port.to_string()])
-            .args(["--log-origin", "serve-e2e", "--anchor-every", "0"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap();
-        let registry = Self {
-            child,
-            base: format!("http://127.0.0.1:{port}"),
-        };
-        registry.wait_ready();
-        registry
-    }
-
-    fn wait_ready(&self) {
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while Instant::now() < deadline {
-            if registry_http(&self.base, "GET", "/health", None, None).is_some() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(100));
+        let process = common::registry::spawn_registry(root, "serve-e2e").expect("python3");
+        let base = process.base.clone();
+        Self {
+            _process: process,
+            base,
         }
-        panic!("registry never became healthy");
     }
 
     fn register(&self) -> String {
@@ -222,13 +203,6 @@ impl Registry {
     fn log_key(&self) -> String {
         let (_, json) = registry_http(&self.base, "GET", "/log/key", None, None).unwrap();
         json["public_key_hex"].as_str().unwrap().to_string()
-    }
-}
-
-impl Drop for Registry {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 }
 
