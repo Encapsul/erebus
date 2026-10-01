@@ -161,7 +161,7 @@ s = [socket.create_server(("127.0.0.1", 0)) for _ in range(2)]
 open(sys.argv[1], "w").write(" ".join(str(x.getsockname()[1]) for x in s) + "\n")
 time.sleep(300)' "$W/ports" &
 LISTENERS=$!
-trap 'kill $LISTENERS 2>/dev/null; wait $LISTENERS 2>/dev/null; rm -rf "$W"' EXIT
+trap 'kill $LISTENERS 2>/dev/null || true; wait $LISTENERS 2>/dev/null || true; rm -rf "$W"' EXIT
 for _ in $(seq 50); do [[ -s "$W/ports" ]] && break; sleep 0.1; done
 read -r PA PB <"$W/ports"
 cat >"$W/net.c" <<'EOF'

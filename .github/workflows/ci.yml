@@ -101,6 +101,7 @@ jobs:
   arm-qemu:
     name: arm qemu ${{ matrix.target }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -120,8 +121,9 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-user-static musl-tools
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            qemu-user-static musl-tools
 
       # cc-rs needs a C cross-compiler for the vendored C in zstd/ring; zig
       # ships one for every musl target, so no distro cross toolchain is needed.
