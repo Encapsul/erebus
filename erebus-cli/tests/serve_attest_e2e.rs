@@ -357,6 +357,28 @@ fn serve_command(
     cmd
 }
 
+/// True when the receipt is an R3 stop record (`execution.stop` set).
+fn is_stop_receipt(path: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    let Ok(att) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    let stop = att
+        .pointer("/statement/predicate/execution/stop")
+        .or_else(|| att.pointer("/execution/stop"));
+    stop.is_some_and(|value| !value.is_null())
+}
+
+/// Inference receipts only. SIGTERM teardown appends one stop receipt.
+fn call_receipts(trail: &Path) -> Vec<PathBuf> {
+    trail_receipts(trail)
+        .into_iter()
+        .filter(|path| !is_stop_receipt(path))
+        .collect()
+}
+
 /// Receipts of a trail, in chain order (proof sidecars excluded).
 fn trail_receipts(trail: &Path) -> Vec<PathBuf> {
     let mut receipts: Vec<PathBuf> = std::fs::read_dir(trail)
@@ -439,13 +461,15 @@ fn serve_attests_every_call_into_a_verifiable_chain() {
     }
     drop(serve);
 
-    let receipts = trail_receipts(&trail);
+    let receipts = call_receipts(&trail);
     assert_eq!(
         receipts.len(),
         3,
         "one receipt per POST (health GETs excluded)"
     );
-    for receipt in &receipts {
+    let all = trail_receipts(&trail);
+    assert_eq!(all.len(), 4, "3 calls plus the SIGTERM stop receipt");
+    for receipt in &all {
         assert!(
             proof_path(receipt).is_file(),
             "serve --push must store a verified proof for every receipt"
@@ -455,7 +479,7 @@ fn serve_attests_every_call_into_a_verifiable_chain() {
     let out = verify_chain(&trail, &trusted, &bundle);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
-    assert!(stderr.contains("3 receipt(s)"), "{stderr}");
+    assert!(stderr.contains("4 receipt(s)"), "{stderr}");
 
     // Every receipt names the call and binds it to the response bytes.
     let att: serde_json::Value =
@@ -555,8 +579,13 @@ fn serve_signs_tool_calls_and_the_auditor_rederives_them() {
     }
     drop(serve);
 
-    let receipts = trail_receipts(&trail);
-    assert_eq!(receipts.len(), 2);
+    let receipts = call_receipts(&trail);
+    assert_eq!(receipts.len(), 2, "one receipt per tool-bearing POST");
+    assert_eq!(
+        trail_receipts(&trail).len(),
+        3,
+        "2 calls plus the SIGTERM stop receipt"
+    );
     for receipt in &receipts {
         let att: serde_json::Value =
             serde_json::from_slice(&std::fs::read(receipt).unwrap()).unwrap();

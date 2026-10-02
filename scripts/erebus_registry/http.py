@@ -15,9 +15,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
 
-from erebus_registry.artifacts import parse_gguf
+from erebus_registry.artifacts import artifact_lifecycle, parse_gguf, verify_integrity
 from erebus_registry.auth import (
     _get_cached_discovery,
     _jwt_verify_id_token,
