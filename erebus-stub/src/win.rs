@@ -17,6 +17,12 @@ const CREATE_UNICODE_ENVIRONMENT: u32 = 0x0000_0400;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const DETACHED_PROCESS: u32 = 0x0000_0008;
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+/// `CreateProcess` reads `STARTUPINFOEXW` instead of `STARTUPINFOW`.
+const EXTENDED_STARTUPINFO_PRESENT: u32 = 0x0008_0000;
+/// `ProcThreadAttributeValue(9, FALSE, TRUE, FALSE)`.
+const PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES: usize = 0x2_0009;
+/// `ProcThreadAttributeValue(2, FALSE, TRUE, FALSE)`.
+const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x2_0002;
 const INFINITE: u32 = 0xFFFF_FFFF;
 const WAIT_OBJECT_0: u32 = 0;
 const WAIT_TIMEOUT: u32 = 0x0000_0102;
@@ -42,6 +48,20 @@ struct StartupInfoW {
     h_std_input: *mut c_void,
     h_std_output: *mut c_void,
     h_std_error: *mut c_void,
+}
+
+#[repr(C)]
+struct StartupInfoExW {
+    startup: StartupInfoW,
+    attr: *mut c_void,
+}
+
+#[repr(C)]
+struct SecurityCapabilities {
+    app_container_sid: *mut c_void,
+    capabilities: *mut c_void,
+    capability_count: u32,
+    reserved: u32,
 }
 
 #[repr(C)]
@@ -72,6 +92,32 @@ extern "system" {
     fn CreateJobObjectW(attrs: *mut c_void, name: *const u16) -> *mut c_void;
     fn SetInformationJobObject(job: *mut c_void, class: i32, info: *const c_void, len: u32) -> i32;
     fn AssignProcessToJobObject(job: *mut c_void, process: *mut c_void) -> i32;
+    fn LoadLibraryW(name: *const u16) -> *mut c_void;
+    fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
+    fn GetStdHandle(kind: u32) -> *mut c_void;
+    fn InitializeProcThreadAttributeList(
+        list: *mut c_void,
+        count: u32,
+        flags: u32,
+        size: *mut usize,
+    ) -> i32;
+    fn UpdateProcThreadAttribute(
+        list: *mut c_void,
+        flags: u32,
+        attribute: usize,
+        value: *mut c_void,
+        size: usize,
+        previous: *mut c_void,
+        returned: *mut usize,
+    ) -> i32;
+    fn DeleteProcThreadAttributeList(list: *mut c_void);
+}
+
+#[link(name = "advapi32")]
+extern "system" {
+    fn FreeSid(sid: *mut c_void) -> *mut c_void;
+    fn ConvertSidToStringSidW(sid: *mut c_void, out: *mut *mut u16) -> i32;
+    fn LocalFree(mem: *mut c_void) -> *mut c_void;
 }
 
 /// A handle to a spawned child process.
@@ -192,10 +238,32 @@ pub fn spawn(
     if detached {
         flags |= CREATE_NO_WINDOW | DETACHED_PROCESS;
     }
+    // Detached re-exec must outlive the launcher, so it stays out of the jail.
+    let jail = if detached {
+        None
+    } else {
+        prepare_app_container(cwd)?
+    };
+    let inherit = jail.as_ref().map(|j| j.inherit).unwrap_or(1);
+    if jail.is_some() {
+        flags |= EXTENDED_STARTUPINFO_PRESENT;
+        si.cb = std::mem::size_of::<StartupInfoExW>() as u32;
+    }
+    let attr = jail
+        .as_ref()
+        .map(|j| j.list.as_ptr() as *mut c_void)
+        .unwrap_or(std::ptr::null_mut());
+    let mut ex = StartupInfoExW { startup: si, attr };
+    let startup = if jail.is_some() {
+        &mut ex as *mut StartupInfoExW as *mut StartupInfoW
+    } else {
+        &mut ex.startup
+    };
 
     // SAFETY: all pointers are valid null-terminated UTF-16 buffers or
-    // initialized structures. CreateProcessW copies the command line and
-    // environment before returning.
+    // initialized structures. CreateProcessW copies the command line,
+    // environment and security capabilities before returning. `jail` stays
+    // alive until that copy is done.
     let ok = unsafe {
         CreateProcessW(
             prog_wide.as_ptr(),
@@ -204,12 +272,13 @@ pub fn spawn(
             std::ptr::null_mut(),
             // Inherit std handles: unlike a Unix console, piped/redirected
             // stdout only reaches the child through handle inheritance
-            // (execvp semantics — `app.exe > log` must work).
-            1, // bInheritHandles = TRUE
+            // (execvp semantics — `app.exe > log` must work). An AppContainer
+            // passes those handles through the attribute list instead.
+            inherit,
             flags,
             env_block.as_ptr() as *mut c_void,
             cwd_wide.as_ref().map_or(std::ptr::null(), Vec::as_ptr),
-            &mut si,
+            startup,
             &mut pi,
         )
     };
@@ -308,6 +377,265 @@ fn confine_in_job(process: *mut c_void) -> io::Result<*mut c_void> {
         ));
     }
     Ok(job)
+}
+
+/// AppContainer bound to the payload directory, plus the std handles the
+/// child is allowed to inherit. Missing `userenv` exports (Wine) yield
+/// `None` so the launch still happens; a real Windows failure is an error.
+struct AppJail {
+    sid: *mut c_void,
+    /// Pointer-aligned buffer. `Vec<u8>` is only 1-aligned; Windows rejects
+    /// an attribute list that is not DWORD-aligned.
+    list: Vec<u64>,
+    caps: SecurityCapabilities,
+    handles: Vec<*mut c_void>,
+    inherit: i32,
+    list_ready: bool,
+}
+
+impl Drop for AppJail {
+    fn drop(&mut self) {
+        // SAFETY: `list` is an initialized attribute list when `list_ready`,
+        // and `sid` came from CreateAppContainerProfile / Derive…Sid.
+        unsafe {
+            if self.list_ready {
+                DeleteProcThreadAttributeList(self.list.as_mut_ptr() as *mut c_void);
+            }
+            if !self.sid.is_null() {
+                FreeSid(self.sid);
+            }
+        }
+    }
+}
+
+fn prepare_app_container(cwd: Option<&Path>) -> io::Result<Option<AppJail>> {
+    let Some(dir) = cwd else {
+        return Ok(None);
+    };
+    let Some(sid) = app_container_sid()? else {
+        return Ok(None);
+    };
+    if let Err(err) = grant_payload_dir(dir, sid) {
+        // SAFETY: CreateAppContainerProfile allocated this SID.
+        unsafe { FreeSid(sid) };
+        return Err(err);
+    }
+    let mut jail = AppJail {
+        sid,
+        list: Vec::new(),
+        caps: SecurityCapabilities {
+            app_container_sid: sid,
+            capabilities: std::ptr::null_mut(),
+            capability_count: 0,
+            reserved: 0,
+        },
+        handles: std_handles(),
+        inherit: 0,
+        list_ready: false,
+    };
+    jail.inherit = i32::from(!jail.handles.is_empty());
+    init_attr_list(&mut jail)?;
+    Ok(Some(jail))
+}
+
+fn app_container_sid() -> io::Result<Option<*mut c_void>> {
+    type CreateProfile = unsafe extern "system" fn(
+        *const u16,
+        *const u16,
+        *const u16,
+        *const c_void,
+        u32,
+        *mut *mut c_void,
+    ) -> i32;
+    type DeriveSid = unsafe extern "system" fn(*const u16, *mut *mut c_void) -> i32;
+    let name = to_wide_null(OsStr::new("userenv.dll"));
+    // SAFETY: LoadLibraryW of a null-terminated name. A null module means
+    // userenv is absent (Wine); the caller falls back to the job object.
+    let module = unsafe { LoadLibraryW(name.as_ptr()) };
+    if module.is_null() {
+        return Ok(None);
+    }
+    // SAFETY: `module` is a loaded userenv. Null exports mean this host
+    // cannot build an AppContainer (Wine); that is a fallback, not an error.
+    let create = unsafe { GetProcAddress(module, b"CreateAppContainerProfile\0".as_ptr()) };
+    let derive = unsafe {
+        GetProcAddress(
+            module,
+            b"DeriveAppContainerSidFromAppContainerName\0".as_ptr(),
+        )
+    };
+    if create.is_null() || derive.is_null() {
+        return Ok(None);
+    }
+    // SAFETY: the addresses are the two userenv exports named above.
+    let create = unsafe { std::mem::transmute::<*mut c_void, CreateProfile>(create) };
+    let derive = unsafe { std::mem::transmute::<*mut c_void, DeriveSid>(derive) };
+    let profile = to_wide_null(OsStr::new("erebus.payload"));
+    let display = to_wide_null(OsStr::new("erebus"));
+    let mut sid = std::ptr::null_mut();
+    // SAFETY: profile and display are null-terminated. The function writes
+    // one SID we own on success.
+    let hr = unsafe {
+        create(
+            profile.as_ptr(),
+            display.as_ptr(),
+            display.as_ptr(),
+            std::ptr::null(),
+            0,
+            &mut sid,
+        )
+    };
+    if hr == 0 {
+        return Ok(Some(sid));
+    }
+    // HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS).
+    if hr as u32 != 0x8007_00B7 {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("CreateAppContainerProfile failed: {hr:#x}"),
+        ));
+    }
+    // SAFETY: same profile name; writes a SID we own on success.
+    let hr = unsafe { derive(profile.as_ptr(), &mut sid) };
+    if hr == 0 {
+        return Ok(Some(sid));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::Other,
+        format!("DeriveAppContainerSidFromAppContainerName failed: {hr:#x}"),
+    ))
+}
+
+fn grant_payload_dir(dir: &Path, sid: *mut c_void) -> io::Result<()> {
+    let sid_str = sid_string(sid)?;
+    let status = std::process::Command::new("icacls")
+        .arg(dir)
+        .arg("/grant")
+        .arg(format!("*{sid_str}:(OI)(CI)M"))
+        .arg("/Q")
+        .status()
+        .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("icacls: {err}")))?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::Other,
+        format!("icacls /grant failed: {status}"),
+    ))
+}
+
+fn sid_string(sid: *mut c_void) -> io::Result<String> {
+    let mut raw = std::ptr::null_mut();
+    // SAFETY: `sid` is a valid SID. ConvertSidToStringSidW allocates `raw`.
+    let ok = unsafe { ConvertSidToStringSidW(sid, &mut raw) };
+    if ok == 0 || raw.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("ConvertSidToStringSidW failed: {}", last_error()),
+        ));
+    }
+    let mut len = 0usize;
+    // SAFETY: `raw` is a null-terminated UTF-16 string from advapi32.
+    unsafe {
+        while *raw.add(len) != 0 {
+            len += 1;
+        }
+    }
+    let text = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(raw, len) });
+    // SAFETY: `raw` was allocated by ConvertSidToStringSidW.
+    unsafe { LocalFree(raw) };
+    Ok(text)
+}
+
+fn std_handles() -> Vec<*mut c_void> {
+    const STDS: [u32; 3] = [0xFFFF_FFF6, 0xFFFF_FFF5, 0xFFFF_FFF4];
+    let invalid = -1isize as *mut c_void;
+    let mut out = Vec::new();
+    for kind in STDS {
+        // SAFETY: GetStdHandle only reads a well-known standard-handle id.
+        let handle = unsafe { GetStdHandle(kind) };
+        if !handle.is_null() && handle != invalid {
+            out.push(handle);
+        }
+    }
+    out
+}
+
+fn init_attr_list(jail: &mut AppJail) -> io::Result<()> {
+    let count = if jail.handles.is_empty() { 1 } else { 2 };
+    let mut size = 0usize;
+    // SAFETY: a null list asks for the byte size. Failure is expected.
+    unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), count, 0, &mut size) };
+    if size == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("InitializeProcThreadAttributeList size: {}", last_error()),
+        ));
+    }
+    jail.list = vec![0u64; size.div_ceil(8)];
+    // SAFETY: `jail.list` has the size the previous call reported.
+    let ok = unsafe {
+        InitializeProcThreadAttributeList(
+            jail.list.as_mut_ptr() as *mut c_void,
+            count,
+            0,
+            &mut size,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("InitializeProcThreadAttributeList failed: {}", last_error()),
+        ));
+    }
+    jail.list_ready = true;
+    let list = jail.list.as_mut_ptr() as *mut c_void;
+    let caps = std::ptr::addr_of_mut!(jail.caps).cast::<c_void>();
+    update_attr(
+        list,
+        PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+        caps,
+        std::mem::size_of::<SecurityCapabilities>(),
+    )?;
+    if jail.handles.is_empty() {
+        return Ok(());
+    }
+    let handles = jail.handles.as_mut_ptr().cast::<c_void>();
+    let handle_bytes = std::mem::size_of::<*mut c_void>() * jail.handles.len();
+    update_attr(
+        list,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        handles,
+        handle_bytes,
+    )
+}
+
+fn update_attr(
+    list: *mut c_void,
+    attribute: usize,
+    value: *mut c_void,
+    size: usize,
+) -> io::Result<()> {
+    // SAFETY: `list` is an initialized attribute list and `value` points at
+    // memory that outlives CreateProcessW (the caps or the handle vec).
+    let ok = unsafe {
+        UpdateProcThreadAttribute(
+            list,
+            0,
+            attribute,
+            value,
+            size,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("UpdateProcThreadAttribute failed: {}", last_error()),
+        ));
+    }
+    Ok(())
 }
 
 /// Block until the child exits and return its exit code.
@@ -434,4 +762,72 @@ extern "system" fn ProcessPrng(pb_data: *mut u8, cb_data: usize) -> i32 {
         remaining -= chunk;
     }
     1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{spawn, CloseHandle, GetExitCodeProcess, STILL_ACTIVE};
+    use std::collections::BTreeMap;
+    use std::ffi::OsString;
+    use std::path::Path;
+    use std::time::Duration;
+
+    #[test]
+    fn sandbox_kills_child_and_blocks_outside_write() {
+        let root = std::env::temp_dir().join(format!("erebus-sandbox-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let allowed = root.join("payload");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let script = allowed.join("run.cmd");
+        std::fs::write(
+            &script,
+            "@echo off\r\necho in>\"%~dp0in.txt\"\r\necho out>\"%~dp0..\\outside\\out.txt\"\r\n:loop\r\ngoto loop\r\n",
+        )
+        .unwrap();
+        let child = spawn(
+            Path::new("cmd.exe"),
+            &[
+                OsString::from("cmd.exe"),
+                OsString::from("/c"),
+                script.as_os_str().to_os_string(),
+            ],
+            &BTreeMap::new(),
+            Some(&allowed),
+            false,
+        )
+        .expect("spawn confined child");
+        let pid = child.pid;
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(
+            allowed.join("in.txt").is_file(),
+            "write inside the payload directory"
+        );
+        assert!(
+            !outside.join("out.txt").exists(),
+            "write outside the payload directory"
+        );
+        assert!(process_alive(pid), "child still running before drop");
+        drop(child);
+        std::thread::sleep(Duration::from_millis(800));
+        assert!(!process_alive(pid), "job kill-on-close reaped the child");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn process_alive(pid: u32) -> bool {
+        extern "system" {
+            fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+        }
+        // SAFETY: query-limited access. A null handle means the pid is gone.
+        let handle = unsafe { OpenProcess(0x1000, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        // SAFETY: `handle` is a process we opened; GetExitCodeProcess writes `code`.
+        let ok = unsafe { GetExitCodeProcess(handle, &mut code) };
+        unsafe { CloseHandle(handle) };
+        ok != 0 && code == STILL_ACTIVE
+    }
 }

@@ -199,6 +199,16 @@ fn unseal_key_file(
     path: &Path,
     bytes: &[u8],
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, anyhow::Error> {
+    if bytes.starts_with(crate::tpm::TPM2_MAGIC) {
+        let tcti = std::env::var("TPM2TOOLS_TCTI").map_err(|_| {
+            anyhow::anyhow!(
+                "{} is TPM2-sealed; set TPM2TOOLS_TCTI to this host's TPM",
+                path.display()
+            )
+        })?;
+        let key = crate::tpm::unseal_tpm2(bytes, &tcti)?;
+        return Ok(zeroize::Zeroizing::new(key.to_vec()));
+    }
     if !bytes.starts_with(crate::tpm::SEAL_MAGIC) {
         return Ok(zeroize::Zeroizing::new(bytes.to_vec()));
     }

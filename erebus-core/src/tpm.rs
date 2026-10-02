@@ -60,6 +60,150 @@ pub fn unseals_to(blob: &[u8], binding: &[u8], key: &[u8; 32]) -> bool {
     unseal(blob, binding).ok().as_ref() == Some(key)
 }
 
+/// Blob produced by `tpm2_create` against a TPM2 (or swtpm). The parent
+/// primary lives in the TPM, not in this file, so another TPM cannot unseal it.
+pub const TPM2_MAGIC: &[u8] = b"erebus-tpm2-seal/v1\n";
+
+/// `tpm2_createprimary` is on `PATH`.
+pub fn tpm2_tools_present() -> bool {
+    std::process::Command::new("tpm2_createprimary")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Seal `key` with the TPM selected by `tcti` (`TPM2TOOLS_TCTI` syntax).
+pub fn seal_tpm2(key: &[u8; 32], tcti: &str) -> Result<Vec<u8>, anyhow::Error> {
+    let dir = tempfile::tempdir()?;
+    std::fs::write(dir.path().join("secret"), key)?;
+    tpm2(
+        tcti,
+        dir.path(),
+        &["tpm2_createprimary", "-Q", "-C", "o", "-c", "primary.ctx"],
+    )?;
+    tpm2(
+        tcti,
+        dir.path(),
+        &[
+            "tpm2_create",
+            "-Q",
+            "-C",
+            "primary.ctx",
+            "-i",
+            "secret",
+            "-u",
+            "seal.pub",
+            "-r",
+            "seal.priv",
+        ],
+    )?;
+    pack_tpm2(
+        &std::fs::read(dir.path().join("seal.pub"))?,
+        &std::fs::read(dir.path().join("seal.priv"))?,
+    )
+}
+
+/// Unseal a [`TPM2_MAGIC`] blob with `tcti`. A different TPM fails the load.
+pub fn unseal_tpm2(blob: &[u8], tcti: &str) -> Result<[u8; 32], anyhow::Error> {
+    let (public, private) = unpack_tpm2(blob)?;
+    let dir = tempfile::tempdir()?;
+    std::fs::write(dir.path().join("seal.pub"), &public)?;
+    std::fs::write(dir.path().join("seal.priv"), &private)?;
+    tpm2(
+        tcti,
+        dir.path(),
+        &["tpm2_createprimary", "-Q", "-C", "o", "-c", "primary.ctx"],
+    )?;
+    tpm2(
+        tcti,
+        dir.path(),
+        &[
+            "tpm2_load",
+            "-Q",
+            "-C",
+            "primary.ctx",
+            "-u",
+            "seal.pub",
+            "-r",
+            "seal.priv",
+            "-c",
+            "seal.ctx",
+        ],
+    )?;
+    tpm2(
+        tcti,
+        dir.path(),
+        &["tpm2_unseal", "-Q", "-c", "seal.ctx", "-o", "key.bin"],
+    )?;
+    let key = std::fs::read(dir.path().join("key.bin"))?;
+    key.try_into()
+        .map_err(|_| anyhow::anyhow!("TPM unseal did not return 32 bytes"))
+}
+
+fn tpm2(tcti: &str, dir: &std::path::Path, args: &[&str]) -> Result<(), anyhow::Error> {
+    // swtpm keeps transient objects after tpm2-tools exits. A later
+    // ContextLoad then fails with TPM_RC_OBJECT_MEMORY. Flush first; the
+    // context files are blobs and do not need the object to stay loaded.
+    let _ = std::process::Command::new("tpm2_flushcontext")
+        .arg("--transient")
+        .current_dir(dir)
+        .env("TPM2TOOLS_TCTI", tcti)
+        .output();
+    let out = std::process::Command::new(args[0])
+        .args(&args[1..])
+        .current_dir(dir)
+        .env("TPM2TOOLS_TCTI", tcti)
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to run {}: {e}", args[0]))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{} failed: {}",
+        args[0],
+        String::from_utf8_lossy(&out.stderr).trim()
+    )
+}
+
+fn pack_tpm2(public: &[u8], private: &[u8]) -> Result<Vec<u8>, anyhow::Error> {
+    if public.len() > u32::MAX as usize || private.len() > u32::MAX as usize {
+        anyhow::bail!("TPM seal blob is too large");
+    }
+    let mut out = TPM2_MAGIC.to_vec();
+    out.extend_from_slice(&(public.len() as u32).to_le_bytes());
+    out.extend_from_slice(public);
+    out.extend_from_slice(&(private.len() as u32).to_le_bytes());
+    out.extend_from_slice(private);
+    Ok(out)
+}
+
+fn unpack_tpm2(blob: &[u8]) -> Result<(Vec<u8>, Vec<u8>), anyhow::Error> {
+    let mut rest = blob
+        .strip_prefix(TPM2_MAGIC)
+        .ok_or_else(|| anyhow::anyhow!("not a TPM2-sealed machine key"))?;
+    let public = take_len(&mut rest)?;
+    let private = take_len(&mut rest)?;
+    if !rest.is_empty() {
+        anyhow::bail!("TPM2 seal blob has trailing bytes");
+    }
+    Ok((public, private))
+}
+
+fn take_len(rest: &mut &[u8]) -> Result<Vec<u8>, anyhow::Error> {
+    if rest.len() < 4 {
+        anyhow::bail!("truncated TPM2 seal blob");
+    }
+    let len = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+    *rest = &rest[4..];
+    if rest.len() < len {
+        anyhow::bail!("truncated TPM2 seal blob");
+    }
+    let (head, tail) = rest.split_at(len);
+    *rest = tail;
+    Ok(head.to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,5 +221,25 @@ mod tests {
         let msg = b"erebus-machine-cosign";
         let sig = foreign.sign(msg);
         assert!(key.verify(msg, &sig).is_err());
+    }
+
+    /// Two swtpm instances. `scripts/test_tpm2_swtpm.sh` sets the env and
+    /// fails the run if this test does not execute.
+    #[test]
+    fn swtpm_copied_blob_cannot_unseal() {
+        let (Some(a), Some(b)) = (
+            std::env::var("ERE_TPM_TCTI_A").ok(),
+            std::env::var("ERE_TPM_TCTI_B").ok(),
+        ) else {
+            if std::env::var("ERE_SWTPM_TEST").is_ok() {
+                panic!("ERE_SWTPM_TEST=1 but ERE_TPM_TCTI_A/B are unset");
+            }
+            return;
+        };
+        assert!(tpm2_tools_present(), "tpm2-tools not on PATH");
+        let raw = [11u8; 32];
+        let blob = seal_tpm2(&raw, &a).unwrap();
+        assert_eq!(unseal_tpm2(&blob, &a).unwrap(), raw);
+        assert!(unseal_tpm2(&blob, &b).is_err());
     }
 }

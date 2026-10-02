@@ -15,8 +15,9 @@
 The proof chain is built and re-proven on every push (`proof.yml`: demo,
 cosign, chaos). P0, P1, and buyer items R1–R5 and R7 are landed; their
 write-ups are in §10, not repeated below. What is left is §3: finish the
-internal pilot on the calendar, then two gaps still open: a real TPM2
-seal, and Windows confinement that holds on a Windows runner.
+internal pilot on the calendar, and Windows confinement. The TPM2 seal
+is in: two swtpm instances, a copied key does not unseal. The Windows
+test is in the tree and on `windows-latest`; it has not run yet.
 `COMPLIANCE.json` stays a pointer; filling an Annex IV file is the
 compliance team's job.
 Breadth stays frozen (§4). No production users.
@@ -89,13 +90,16 @@ call. Do not describe T2 as complete before that file says so.
 
 ### Code
 
-1. **TPM2, for real (remainder of R6).** `erebus enroll --tpm` XORs
-   `machine.key` under `ERE_TPM_BINDING`. That is a software secret the
-   operator exports, not a TPM, and swtpm is not in CI. Acceptance: a CI
-   job with swtpm seals the machine key to a TPM2 primary; copying
-   `machine.key` to another host cannot co-sign; software enrollments keep
-   the v1 certificate bytes
-   (`erebus-machine-cert/v1\n…`, no `key_storage` field).
+1. **TPM2.** Done 2026-10-02. `erebus enroll --tpm` seals `machine.key`
+   with `tpm2_create` (`erebus-tpm2-seal/v1`). Unseal uses
+   `TPM2TOOLS_TCTI`. A blob sealed on swtpm A unseals on A and fails on
+   swtpm B (`scripts/test_tpm2_swtpm.sh`,
+   `swtpm_copied_blob_cannot_unseal`). Software enrollments keep the v1
+   certificate bytes (`erebus-machine-cert/v1\n…`, no `key_storage`
+   field). An already-sealed XOR blob (`erebus-tpm-seal/v1`) still
+   unseals with `ERE_TPM_BINDING`. Proven here in Docker against two
+   swtpm instances. The same script is a CI job; that job has not gone
+   green on GitHub yet.
 2. **Policy in the stub.** Done 2026-10-02. `erebus build --policy FILE`
    embeds the YAML. The stub calls `enforce_embedded` before extraction
    and again after a SISR update, so `./agent.erebus` refuses on its own.
@@ -108,12 +112,16 @@ call. Do not describe T2 as complete before that file says so.
    returns each receipt with `proof_status` `verified`, `missing` or
    `failed`. Acceptance: `scripts/test_transparency_log.py` (auth required,
    one-second window, status `verified`). No region column. No HTML page.
-4. **Windows confinement that holds.** Non-detached children are placed in
-   a job with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` when the OS accepts the
-   assignment; if it refuses, the process still launches with no sandbox.
-   Acceptance: on a Windows runner, a child still running when the launcher
-   exits is killed, and a write outside the payload's directory is refused.
-   AppContainer only if the job object cannot meet that test.
+4. **Windows confinement that holds.** Not observed yet. Non-detached
+   children with a working directory start in an AppContainer that is
+   granted write on that directory only, then in a job with
+   `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. A job object cannot refuse a
+   write, so the write jail is the AppContainer. If `userenv` has no
+   AppContainer exports (Wine), the launch continues with the job only.
+   Acceptance: on `windows-latest`,
+   `sandbox_kills_child_and_blocks_outside_write` — a child still running
+   when the launcher drops it is killed, and a write outside the payload
+   directory is refused. This host is macOS and cannot run that test.
 
 ### Out of scope
 
@@ -225,8 +233,9 @@ modular open-system solutions", "software … that plugs directly into our
 open system architecture", surviving "the most extreme climates". That is
 the ICP of §6 (defense, air-gapped, edge) in the buyer's own words: AI on
 drones, sensors and vehicles that must later prove what it ran. What it
-implies for us: the trail-head seal (R1, landed) and a real TPM2 key
-(§3, not landed), plus arm64/Jetson as a first-class target. Caveat: US Army procurement in
+implies for us: the trail-head seal (R1, landed) and a TPM2 key
+(§3, sealed with tpm2-tools; a copied blob does not unseal on a second
+swtpm), plus arm64/Jetson as a first-class target. Caveat: US Army procurement in
 practice needs a US entity (ITAR/CMMC); the European route (AID/DGA, NATO
 DIANA, UK MOD) takes the same pitch.
 
@@ -283,7 +292,9 @@ short form every pitch must respect:
 - **We do not prove** the computation was faithful (L2 — TEE/zkML, roadmap
   option only if a customer asks), that the agent did the right thing (that is
   evaluation), the plaintext (digests only), or a root-compromised host
-  (software machine key; the `--tpm` seal is not a TPM — §3). Never let a slide imply otherwise.
+  (default enrollment is still a software key; `--tpm` seals to the TPM
+  named by `TPM2TOOLS_TCTI`, so a root on that same machine can still ask
+  the TPM to unseal — §3). Never let a slide imply otherwise.
 - **Why this boundary is the product**: Certificate Transparency, Sigstore, a
   flight recorder, an accounting audit trail — none prove correctness, all
   make the record undeniable, all changed their industry. Regulators ask for
@@ -408,9 +419,11 @@ companies as T3, audit firms as T4), not just a competitor list.
 
 - **2026-10-02** — R1–R5 and R7 landed (witness seal, tool-call receipts,
   stop receipts, signed approvals, SLSA sidecar, incident-window claim).
-  Sketches also landed and are **not** done: `ERE_TPM_BINDING` seal,
-  `erebus policy` outside the stub, `COMPLIANCE.json` pointer,
-  `GET /fleet` count, Windows job object. Roadmap cut down to §3.
+  Policy is enforced by the stub. Fleet returns `proof_status`.
+  `erebus enroll --tpm` seals with TPM2; two swtpm instances, the copy
+  does not unseal. `COMPLIANCE.json` stays a pointer. Windows
+  AppContainer plus kill-on-job-close is written; the runner test has
+  not executed. Roadmap cut down to §3.
 - **0.6.1 (2026-09-29)** — T2 pilot tooling (`serve --push`, `scripts/pilot/`);
   fixes: `--embed-model` payload staging, cold-start `unshare` EINVAL race,
   `erebus build` finds the stub shipped with a release install.

@@ -235,3 +235,43 @@ jobs:
         run: |
           bash scripts/macos_slice.sh \
             "$CARGO_TARGET_DIR/release/erebus" "$CARGO_TARGET_DIR/release/erebus-stub"
+
+  # ROADMAP §3: a TPM2 primary, not the XOR stand-in. Two swtpm instances —
+  # the blob sealed on A must fail to unseal on B. A skipped test is a failure
+  # because the script sets ERE_SWTPM_TEST=1.
+  tpm2-swtpm:
+    name: TPM2 swtpm
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable (2026-08-26)
+        with:
+          toolchain: stable
+
+      - name: Install swtpm and tpm2-tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y swtpm swtpm-tools tpm2-tools
+
+      - name: Copied seal does not unseal on the second TPM
+        run: bash scripts/test_tpm2_swtpm.sh
+
+  # ROADMAP §3: job kill-on-close plus an AppContainer that refuses a write
+  # outside the payload directory. Cross-compiling the PE is not this test.
+  windows-sandbox:
+    name: Windows confinement
+    runs-on: windows-latest
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}\erebus-target
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable (2026-08-26)
+        with:
+          toolchain: stable
+
+      - name: Kill-on-close and write jail
+        run: cargo test -p erebus-stub --bin erebus-stub sandbox_kills_child_and_blocks_outside_write -- --nocapture

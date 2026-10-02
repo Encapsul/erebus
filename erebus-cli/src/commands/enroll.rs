@@ -40,7 +40,8 @@ pub struct EnrollArgs {
     pub json: bool,
 
     /// Ask the registry for a `key_storage: tpm2` certificate and seal the key
-    /// file to `ERE_TPM_BINDING` (the binding is not stored in the key file).
+    /// with TPM2 (`tpm2-tools`, `TPM2TOOLS_TCTI`). The sealed blob cannot be
+    /// unsealed by another TPM.
     #[arg(long)]
     pub tpm: bool,
 }
@@ -162,16 +163,20 @@ fn report(
 }
 
 fn seal_machine_key(dir: &std::path::Path) -> Result<()> {
-    let binding = std::env::var("ERE_TPM_BINDING")
-        .context("--tpm seals the key to ERE_TPM_BINDING; that secret stays off the key file")?;
     let path = dir.join(erebus_core::machine::KEY_FILE);
     let raw = std::fs::read(&path)?;
-    if raw.starts_with(erebus_core::tpm::SEAL_MAGIC) {
+    if raw.starts_with(erebus_core::tpm::TPM2_MAGIC) {
         return Ok(());
     }
+    anyhow::ensure!(
+        erebus_core::tpm::tpm2_tools_present(),
+        "--tpm needs tpm2-tools and TPM2TOOLS_TCTI (swtpm in CI, a hardware TPM on the host)"
+    );
+    let tcti = std::env::var("TPM2TOOLS_TCTI")
+        .context("--tpm needs TPM2TOOLS_TCTI, for example swtpm:host=127.0.0.1,port=2321")?;
     let raw: [u8; 32] = raw
         .try_into()
         .map_err(|_| anyhow::anyhow!("machine key is not 32 bytes"))?;
-    std::fs::write(&path, erebus_core::tpm::seal(&raw, binding.as_bytes()))?;
+    std::fs::write(&path, erebus_core::tpm::seal_tpm2(&raw, &tcti)?)?;
     Ok(())
 }
