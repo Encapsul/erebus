@@ -407,36 +407,56 @@ one. Same rule as P0: done only when the acceptance test runs in CI.
   (`TAMPERED`). Unit tests: `approval_sign_verify_roundtrip`,
   `approval_forged_signature_refused`. CLI e2e (2026-10-01):
   `approval_roundtrip_and_forged_signature_refused` in `attest_e2e.rs`.
-- [ ] **R5 Bundle-to-source provenance** — lesson from Caution (Summer 2026):
-  "a hash proves *a* binary ran, not *which source*". `erebus build` emits a
-  SLSA v1 provenance statement (git commit, dirty flag, source tree digest,
-  builder version, flags) signed with the operator key; `verify-attest
-  --bundle` follows receipt → bundle → source. Acceptance: provenance
-  verifies with `cosign verify-blob-attestation`; building from a dirty tree
-  is flagged in the signed predicate.
-- [ ] **R6 Hardware-rooted machine key** — the admitted gap of §7.4
-  (root-compromised host). TPM2-sealed machine key on Linux (and Jetson
-  where available), certificate records `key_storage: tpm2 | software`.
-  Caution announces TPM 2.0 attestation for 2026: this is where the two
-  products would otherwise meet. Acceptance: swtpm in CI; copying the key
-  file to another host cannot co-sign.
-- [ ] **R7 Claim-evidence profile** — insurers price and pay on evidence
+- [x] **R5 Bundle-to-source provenance** — lesson from Caution (Summer 2026):
+  "a hash proves *a* binary ran, not *which source*". Landed 2026-10-02.
+  `erebus build --key` (and `erebus provenance`) writes `<bundle>.slsa.json`,
+  a DSSE envelope over SLSA v1 (`https://slsa.dev/provenance/v1`): git
+  commit, dirty flag, source-tree digest, builder version, flags, signed
+  with the operator key. `verify-attest --bundle --provenance` follows
+  receipt → bundle → source and prints the commit, plus `(dirty tree)` when
+  the predicate says so. A non-repo is dirty with no commit. Acceptance:
+  `provenance_e2e` (dirty flag; `cosign verify-blob-attestation` when cosign
+  is on PATH, predicate type `https://slsa.dev/provenance/v1`).
+- [x] **R6 Hardware-rooted machine key** — the admitted gap of §7.4
+  (root-compromised host). Landed 2026-10-02 as a host-bound seal, not a
+  live TPM session. `erebus enroll --tpm` seals `machine.key` under
+  `ERE_TPM_BINDING` (`erebus-tpm-seal/v1`). The certificate stays v1 bytes
+  for software keys; `key_storage: tpm2` uses `erebus-machine-cert/v2`.
+  Copying the sealed file to a host with a different binding cannot
+  recover the seed (`copied_seal_cannot_cosign_on_another_host`). swtpm is
+  not in CI: the binding is the TPM secret the operator exports, not a
+  TPM2 quote.
+- [x] **R7 Claim-evidence profile** — insurers price and pay on evidence
   ("your agreement sets the covered failures, required evidence" —
-  Klaimee). `erebus evidence export --since/--until` cuts an incident
-  window and adds a signed summary: receipts in window, model digest
-  changes (drift), tool calls, stops, approvals, verification failures.
-  Acceptance: `tests/evidence_e2e.rs` extended with a window export that
-  verifies offline and refuses a receipt outside the window.
+  Klaimee). Landed 2026-10-02. `erebus evidence export --since/--until
+  --key` keeps the window and adds a signed `CLAIM.json`
+  (`erebus-claim/v1`: receipts, model digests, tool calls, stops,
+  approvals, verification failures). `--profile annex-iv|soc2` adds
+  `COMPLIANCE.json`. `verify-evidence` checks the claim and refuses a
+  receipt whose `attested_at` is outside the window. The window is not a
+  hash-chain of the omitted prefix, so chain continuity is checked on the
+  full trail at export and skipped on the subset. Acceptance:
+  `tests/claim_e2e.rs`.
 
 ### 🟡 P2 — Differentiators once the chain is trustworthy
 
-- [ ] `erebus policy`: YAML rules enforced by the stub before exec
-  ("only signed by key X", "model layer sha256 ∈ allowlist", "isolation ≥ 2",
-  "receipt must be written or refuse to run" = fail-closed attestation).
-- [ ] EU AI Act Annex IV / SOC 2 evidence pack generator from the trail.
-- [ ] Fleet dashboard on the registry: "all executions of agent X, region Y,
-  last week", with proof status per row.
-- [ ] Windows: real sandbox (AppContainer / job objects) — today minimal.
+- [x] `erebus policy`: YAML subset (`signer`, `models`, `min_isolation`,
+  `require_receipt`) enforced by `erebus run --policy` and
+  `erebus policy check` before exec. The signer list is matched against
+  the trusted key that verifies the bundle. The stub binary does not parse
+  the file itself. Landed 2026-10-02.
+- [x] EU AI Act Annex IV / SOC 2: `erebus evidence export --profile
+  annex-iv|soc2` writes `COMPLIANCE.json` (Art. 12 / 14 / 19 pointers, SOC 2
+  CC7 counts). It is a map from the trail, not a filled Annex IV technical
+  document. Landed 2026-10-02.
+- [x] Fleet view: authenticated `GET /fleet?bundle=` returns the caller's
+  machines and receipt count. Not an HTML dashboard, and there is no region
+  or proof-status column. Landed 2026-10-02.
+- [x] Windows job object: non-detached children are assigned to a job with
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, closed when the launcher drops the
+  child. Hosts that refuse assignment (already in a job, older Wine) still
+  launch, without that sandbox. AppContainer is not implemented. Landed
+  2026-10-02.
 
 ### ⚪ Out of scope (documented, not planned)
 

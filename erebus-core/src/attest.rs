@@ -274,6 +274,10 @@ pub struct ExecutionCapture {
     pub egress: Option<EgressPolicy>,
     pub stop: Option<StopInfo>,
     pub approval: Option<Approval>,
+    /// Override `execution.attested_at` (tests and incident windows). `None`
+    /// means "now". Not itself a signed field name — the value lands in
+    /// `ExecutionInfo::attested_at`.
+    pub attested_at: Option<String>,
 }
 
 /// Bundle facts hashed once, reusable for many receipts.
@@ -497,7 +501,7 @@ impl AttestationTemplate {
     ) -> Result<Attestation, anyhow::Error> {
         let signing_key = signers.operator;
         let execution = ExecutionInfo {
-            attested_at: utc_now_iso8601(),
+            attested_at: capture.attested_at.clone().unwrap_or_else(utc_now_iso8601),
             machine_id_hash: machine_id_hash(),
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),

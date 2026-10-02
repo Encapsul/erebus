@@ -130,6 +130,45 @@ pub fn run(args: VerifyArgs) -> Result<()> {
     Ok(())
 }
 
+/// Public key that verifies `file`, from `dir`. Used by `erebus policy` to
+/// match a signer allowlist against the key that actually signed the bundle.
+pub(crate) fn matching_key(file: &std::path::Path, dir: &std::path::Path) -> Result<VerifyingKey> {
+    let (hash, sig) = signature_preimage(file)?;
+    let keys = load_trusted_keys(&dir.to_path_buf())?;
+    anyhow::ensure!(
+        !keys.is_empty(),
+        "no trusted keys in {} — add keys with: erebus trust <pubkey_file>",
+        dir.display()
+    );
+    keys.into_iter()
+        .find(|(_, vk)| vk.verify(&hash, &sig).is_ok())
+        .map(|(_, vk)| vk)
+        .context("policy: signature does not match a trusted key")
+}
+
+fn signature_preimage(file: &std::path::Path) -> Result<(Vec<u8>, ed25519_dalek::Signature)> {
+    let mut f =
+        std::fs::File::open(file).with_context(|| format!("failed to open {}", file.display()))?;
+    let footer = Footer::read_from(&mut f).context("failed to read erebus footer")?;
+    let has_sig = footer.format_version >= 3 && footer.sig_offset != 0 && footer.is_signed();
+    anyhow::ensure!(
+        has_sig,
+        "policy: signer allowlist set but the bundle is unsigned"
+    );
+    let sig_data = erebus_core::format::read_at(&mut f, footer.sig_offset, SIG_BLOCK_SIZE)?;
+    let sig_size = u32::from_le_bytes([sig_data[0], sig_data[1], sig_data[2], sig_data[3]]);
+    anyhow::ensure!(sig_size == SIG_LEN as u32, "unexpected signature size");
+    let payload =
+        erebus_core::format::read_at(&mut f, footer.payload_offset, footer.payload_csize as usize)?;
+    let meta = erebus_core::format::read_at(&mut f, footer.meta_offset, footer.meta_size as usize)?;
+    let mut hasher = Sha256::new();
+    hasher.update(&payload);
+    hasher.update(&meta);
+    hasher.update(&footer.pack_full());
+    let sig = ed25519_dalek::Signature::from_slice(&sig_data[4..SIG_BLOCK_SIZE])?;
+    Ok((hasher.finalize().to_vec(), sig))
+}
+
 fn load_trusted_keys(dir: &PathBuf) -> Result<Vec<(PathBuf, VerifyingKey)>> {
     let mut keys = Vec::new();
     if !dir.exists() {

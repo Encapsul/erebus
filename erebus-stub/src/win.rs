@@ -69,19 +69,30 @@ extern "system" {
     fn GetExitCodeProcess(h_process: *mut c_void, lp_exit_code: *mut u32) -> i32;
     fn CloseHandle(h_object: *mut c_void) -> i32;
     fn GetLastError() -> u32;
+    fn CreateJobObjectW(attrs: *mut c_void, name: *const u16) -> *mut c_void;
+    fn SetInformationJobObject(job: *mut c_void, class: i32, info: *const c_void, len: u32) -> i32;
+    fn AssignProcessToJobObject(job: *mut c_void, process: *mut c_void) -> i32;
 }
 
 /// A handle to a spawned child process.
 pub struct Child {
     handle: *mut c_void,
+    /// Job object. Closed on drop; `KILL_ON_JOB_CLOSE` reaps a child that
+    /// outlives the launcher.
+    job: *mut c_void,
     pub pid: u32,
 }
 
 impl Drop for Child {
     fn drop(&mut self) {
-        // SAFETY: CloseHandle(2) on a valid process handle from
-        // CreateProcessW. Closing the handle does not kill the process.
+        // SAFETY: both handles come from this module. The job is closed
+        // first so JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE reaps a child that is
+        // still running. A null job (detached, or a host that refused
+        // assignment) skips that. Closing the process handle does not.
         unsafe {
+            if !self.job.is_null() {
+                CloseHandle(self.job);
+            }
             CloseHandle(self.handle);
         }
     }
@@ -210,6 +221,14 @@ pub fn spawn(
         ));
     }
 
+    // Detached children outlive the launcher, so they stay out of the job.
+    // A host already inside a job (some CI runners, older Wine) refuses
+    // assignment: the launch continues, without the kill-on-close sandbox.
+    let job = if detached {
+        std::ptr::null_mut()
+    } else {
+        confine_in_job(pi.h_process).unwrap_or(std::ptr::null_mut())
+    };
     let pid = pi.dw_process_id;
     // SAFETY: pi.h_thread is a handle we own; close it (the process handle is
     // kept for waiting).
@@ -219,8 +238,76 @@ pub fn spawn(
 
     Ok(Child {
         handle: pi.h_process,
+        job,
         pid,
     })
+}
+
+/// Put `process` in a job that dies with this handle.
+fn confine_in_job(process: *mut c_void) -> io::Result<*mut c_void> {
+    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x2000;
+    const JOB_OBJECT_BASIC_LIMIT_INFORMATION: i32 = 2;
+    #[repr(C)]
+    struct BasicLimit {
+        per_process_user_time: i64,
+        per_job_user_time: i64,
+        limit_flags: u32,
+        min_ws: usize,
+        max_ws: usize,
+        active_process_limit: u32,
+        affinity: usize,
+        priority_class: u32,
+        scheduling_class: u32,
+    }
+    // SAFETY: CreateJobObjectW with null security/name returns a job we own.
+    let job = unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null()) };
+    if job.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("CreateJobObjectW failed: {}", last_error()),
+        ));
+    }
+    let info = BasicLimit {
+        per_process_user_time: 0,
+        per_job_user_time: 0,
+        limit_flags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        min_ws: 0,
+        max_ws: 0,
+        active_process_limit: 0,
+        affinity: 0,
+        priority_class: 0,
+        scheduling_class: 0,
+    };
+    // SAFETY: `info` is a valid BasicLimit and `job` is a job handle we own.
+    let ok = unsafe {
+        SetInformationJobObject(
+            job,
+            JOB_OBJECT_BASIC_LIMIT_INFORMATION,
+            &info as *const BasicLimit as *const c_void,
+            std::mem::size_of::<BasicLimit>() as u32,
+        )
+    };
+    if ok == 0 {
+        unsafe {
+            CloseHandle(job);
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("SetInformationJobObject failed: {}", last_error()),
+        ));
+    }
+    // SAFETY: both handles are valid; the process is assigned for its lifetime.
+    let assigned = unsafe { AssignProcessToJobObject(job, process) };
+    if assigned == 0 {
+        unsafe {
+            CloseHandle(job);
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("AssignProcessToJobObject failed: {}", last_error()),
+        ));
+    }
+    Ok(job)
 }
 
 /// Block until the child exits and return its exit code.

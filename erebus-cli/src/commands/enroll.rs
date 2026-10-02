@@ -38,6 +38,11 @@ pub struct EnrollArgs {
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
+
+    /// Ask the registry for a `key_storage: tpm2` certificate and seal the key
+    /// file to `ERE_TPM_BINDING` (the binding is not stored in the key file).
+    #[arg(long)]
+    pub tpm: bool,
 }
 
 pub fn run(args: EnrollArgs) -> Result<()> {
@@ -64,11 +69,14 @@ pub fn run(args: EnrollArgs) -> Result<()> {
         let token =
             super::attest::resolve_token(args.token.as_deref(), args.token_file.as_deref())?
                 .ok_or_else(|| anyhow::anyhow!("--registry needs --token or --token-file"))?;
-        identity.certificate = Some(request_certificate(registry, &token, &identity)?);
+        identity.certificate = Some(request_certificate(registry, &token, &identity, args.tpm)?);
     }
     identity
         .save(&dir)
         .with_context(|| format!("failed to save machine identity in {}", dir.display()))?;
+    if args.tpm {
+        seal_machine_key(&dir)?;
+    }
     report(&identity, &dir, action, args.json)
 }
 
@@ -78,6 +86,7 @@ fn request_certificate(
     registry: &str,
     token: &str,
     identity: &MachineIdentity,
+    tpm: bool,
 ) -> Result<MachineCertificate> {
     let registry = registry.trim_end_matches('/');
     let client = reqwest::blocking::Client::builder()
@@ -91,6 +100,7 @@ fn request_certificate(
             "public_key_hex": identity.public_key_hex(),
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
+            "key_storage": if tpm { "tpm2" } else { "software" },
         }))
         .send()
         .context("failed to reach registry")?
@@ -148,5 +158,20 @@ fn report(
         }
         None => eprintln!("  certified:  no — run `erebus enroll --registry <url> --token <t>`"),
     }
+    Ok(())
+}
+
+fn seal_machine_key(dir: &std::path::Path) -> Result<()> {
+    let binding = std::env::var("ERE_TPM_BINDING")
+        .context("--tpm seals the key to ERE_TPM_BINDING; that secret stays off the key file")?;
+    let path = dir.join(erebus_core::machine::KEY_FILE);
+    let raw = std::fs::read(&path)?;
+    if raw.starts_with(erebus_core::tpm::SEAL_MAGIC) {
+        return Ok(());
+    }
+    let raw: [u8; 32] = raw
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("machine key is not 32 bytes"))?;
+    std::fs::write(&path, erebus_core::tpm::seal(&raw, binding.as_bytes()))?;
     Ok(())
 }

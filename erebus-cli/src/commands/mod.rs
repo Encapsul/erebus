@@ -23,6 +23,8 @@ pub mod keygen;
 pub mod layer;
 pub mod lifecycle;
 pub mod mirror;
+pub mod policy;
+pub mod provenance;
 pub mod publish;
 pub mod pull;
 pub mod replicate;

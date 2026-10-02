@@ -32,6 +32,9 @@ pub struct MachineCertificate {
     /// Registry origin string (same as the log checkpoint origin).
     pub registry: String,
     pub issued_at: String,
+    /// `software` (omitted, cert v1) or `tpm2` (cert v2, inside the signed bytes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_storage: Option<String>,
     /// Fingerprint + raw public key of the registry key that signed.
     pub registry_key_id: String,
     pub registry_key_hex: String,
@@ -40,6 +43,13 @@ pub struct MachineCertificate {
 
 impl MachineCertificate {
     pub fn signed_bytes(&self) -> Vec<u8> {
+        if self.key_storage.as_deref() == Some("tpm2") {
+            return format!(
+                "erebus-machine-cert/v2\n{}\n{}\n{}\n{}\n{}\ntpm2\n",
+                self.machine_id, self.public_key_hex, self.owner, self.registry, self.issued_at
+            )
+            .into_bytes();
+        }
         format!(
             "{CERT_PREFIX}\n{}\n{}\n{}\n{}\n{}\n",
             self.machine_id, self.public_key_hex, self.owner, self.registry, self.issued_at
@@ -162,7 +172,8 @@ impl MachineIdentity {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => anyhow::bail!("failed to read {}: {e}", key_path.display()),
         };
-        let seed: &[u8; 32] = seed_bytes
+        let seed = unseal_key_file(&key_path, &seed_bytes)?;
+        let seed: &[u8; 32] = seed
             .as_slice()
             .try_into()
             .map_err(|_| anyhow::anyhow!("{} must be 32 bytes", key_path.display()))?;
@@ -182,6 +193,23 @@ impl MachineIdentity {
     pub fn load_default() -> Result<Option<Self>, anyhow::Error> {
         Self::load(&Self::default_dir())
     }
+}
+
+fn unseal_key_file(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<zeroize::Zeroizing<Vec<u8>>, anyhow::Error> {
+    if !bytes.starts_with(crate::tpm::SEAL_MAGIC) {
+        return Ok(zeroize::Zeroizing::new(bytes.to_vec()));
+    }
+    let binding = std::env::var("ERE_TPM_BINDING").map_err(|_| {
+        anyhow::anyhow!(
+            "{} is TPM-sealed; set ERE_TPM_BINDING to this host's TPM secret",
+            path.display()
+        )
+    })?;
+    let key = crate::tpm::unseal(bytes, binding.as_bytes())?;
+    Ok(zeroize::Zeroizing::new(key.to_vec()))
 }
 
 #[cfg(unix)]
@@ -275,6 +303,7 @@ pub fn issue_certificate(
         owner: owner.to_string(),
         registry: registry.to_string(),
         issued_at: issued_at.to_string(),
+        key_storage: None,
         registry_key_id: key_fingerprint(&registry_key.verifying_key()),
         registry_key_hex: hex::encode(registry_key.verifying_key().as_bytes()),
         signature_hex: String::new(),

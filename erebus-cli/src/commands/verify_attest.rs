@@ -108,6 +108,11 @@ pub struct VerifyAttestArgs {
     #[arg(long, requires = "witness_key")]
     pub require_witness: bool,
 
+    /// SLSA provenance envelope (`<bundle>.slsa.json`). With `--bundle`, the
+    /// subject digest must be the bundle and the signed predicate names the source.
+    #[arg(long, value_name = "FILE")]
+    pub provenance: Option<PathBuf>,
+
     /// Output verification result as JSON
     #[arg(long)]
     pub json: bool,
@@ -223,6 +228,12 @@ pub fn run(args: VerifyAttestArgs) -> Result<()> {
         if let Some(w) = witness {
             report["witness"] = w;
         }
+    }
+    if let Some(prov) = &args.provenance {
+        let bytes = bundle_bytes
+            .as_deref()
+            .context("--provenance needs --bundle")?;
+        report["provenance"] = verify_provenance(prov, &keys, bytes)?;
     }
 
     if args.json {
@@ -742,6 +753,26 @@ fn print_human(report: &serde_json::Value) {
             eprintln!("  anchored at {anchored} (after witness)");
         }
     }
+    if let Some(src) = report.get("provenance").filter(|v| v.is_object()) {
+        let dirty = src.get("dirty").and_then(|v| v.as_bool()).unwrap_or(false);
+        let commit = src.get("commit").and_then(|v| v.as_str()).unwrap_or("none");
+        eprintln!(
+            "OK: source commit {commit}{}",
+            if dirty { " (dirty tree)" } else { "" }
+        );
+    }
+}
+
+fn verify_provenance(
+    path: &Path,
+    keys: &[VerifyingKey],
+    bundle: &[u8],
+) -> Result<serde_json::Value> {
+    use sha2::{Digest, Sha256};
+    let env: erebus_core::dsse::Envelope = serde_json::from_slice(&std::fs::read(path)?)
+        .with_context(|| format!("failed to parse provenance {}", path.display()))?;
+    let sha = hex::encode(Sha256::digest(bundle));
+    erebus_core::slsa::verify(&env, keys, &sha)
 }
 
 /// Tool linkage of a verified trail (spec 2.1); silent when no tool was used.

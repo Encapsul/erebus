@@ -119,6 +119,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._log_consistency()
         if path == "/machines":
             return self._machine_list()
+        if path == "/fleet":
+            return self._fleet()
         if path == "/stats":
             return self.send_json(self.store.stats())
         if path == "/index.json":
@@ -760,9 +762,13 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(raw or b"{}")
             pub_hex = str(payload.get("public_key_hex", "")).strip().lower()
             registry = self._public_base_url()
+            storage = str(payload.get("key_storage") or "software")
+            if storage not in ("software", "tpm2"):
+                raise ValueError("key_storage must be software or tpm2")
             cert, already = self.store.log.enroll(
                 user, pub_hex, registry,
-                str(payload.get("os", ""))[:32], str(payload.get("arch", ""))[:32])
+                str(payload.get("os", ""))[:32], str(payload.get("arch", ""))[:32],
+                storage)
         except PermissionError as e:
             return self.send_json({"error": str(e)}, 409)
         except (ValueError, TypeError) as e:
@@ -776,6 +782,23 @@ class Handler(BaseHTTPRequestHandler):
         if not user:
             return self.send_json({"error": "authentication required"}, 401)
         return self.send_json({"machines": self.store.log.machines_of(user)})
+
+    def _fleet(self):
+        """Executions of one bundle for the caller: machines plus receipt count."""
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        parts = self.path.split("?", 1)
+        qs = urllib.parse.parse_qs(parts[1] if len(parts) > 1 else "")
+        bundle = (qs.get("bundle") or [""])[0]
+        filters = {"bundle": bundle} if bundle else {}
+        total, _page = self.store.query_attestations(user, filters, 1, 0)
+        return self.send_json({
+            "owner": user,
+            "bundle": bundle or None,
+            "receipts": total,
+            "machines": self.store.log.machines_of(user),
+        })
 
     def _public_base_url(self) -> str:
         # Certificates name the registry so a verifier can tell which

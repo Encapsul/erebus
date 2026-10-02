@@ -941,6 +941,18 @@ pub(crate) fn build_single_target(
         }
     }
 
+    if let Some(key_path) = &args.key {
+        let slsa_path = crate::commands::provenance::sidecar(output);
+        let flags = vec![
+            format!("isolation={isolation_num}"),
+            format!("seccomp={seccomp}"),
+        ];
+        crate::commands::provenance::emit(app_dir, output, key_path, &slsa_path, &flags)?;
+        if verbose {
+            eprintln!("  slsa: {}", slsa_path.display());
+        }
+    }
+
     // ── Store in build cache ──────────────────────────────────────────
     if args.use_cache {
         let cache = erebus_core::paths::BuildCache::new(app_dir, 50);

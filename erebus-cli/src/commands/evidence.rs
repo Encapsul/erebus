@@ -74,6 +74,22 @@ pub struct ExportArgs {
     /// Overwrite an existing output file
     #[arg(long)]
     pub force: bool,
+
+    /// Inclusive start of the incident window (`execution.attested_at`)
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Inclusive end of the incident window (`execution.attested_at`)
+    #[arg(long)]
+    pub until: Option<String>,
+
+    /// Operator key that signs the window claim (required with --since/--until)
+    #[arg(long)]
+    pub key: Option<PathBuf>,
+
+    /// Compliance profile written into the pack: `annex-iv` or `soc2`
+    #[arg(long)]
+    pub profile: Option<String>,
 }
 
 #[derive(Args)]
@@ -111,6 +127,12 @@ struct Manifest {
     chain_head: Option<String>,
     registry_keys: Vec<String>,
     files: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    since: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    until: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    profile: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -166,18 +188,32 @@ fn export(args: &ExportArgs) -> Result<()> {
         .trail
         .clone()
         .unwrap_or_else(|| default_trail(&args.bundle));
-    let receipts = collect_receipts(&trail)?;
+    let all = collect_receipts(&trail)?;
     let (keys, log_keys) = export_keys(args)?;
-    let (chain_head, tally) = verify_trail(&trail, &receipts, &keys, &sha256)
+    // The whole trail must verify; the pack may then keep only the window.
+    let (full_head, _) = verify_trail(&trail, &all, &keys, &sha256)
         .context("refusing to export evidence that does not verify")?;
-    let entries = pack_entries(&receipts, &keys.operator, &log_keys, &tally)?;
+    let receipts = filter_window(&all, args.since.as_deref(), args.until.as_deref())?;
+    let (_, tally) = verify_trail(&trail, &receipts, &keys, &sha256)?;
+    let mut entries = pack_entries(&receipts, &keys.operator, &log_keys, &tally)?;
+    if args.since.is_some() || args.until.is_some() {
+        entries.push(("CLAIM.json".into(), claim_bytes(args, &receipts)?));
+    }
+    if let Some(profile) = &args.profile {
+        entries.push(("COMPLIANCE.json".into(), compliance_bytes(profile, &tally)?));
+    }
     let bundle = BundleInfo {
         name: file_name(&args.bundle)?,
         sha256,
         size,
         included: args.include_bundle,
     };
-    let manifest = build_manifest(bundle, &receipts, chain_head, &log_keys, &entries)?;
+    let chain_head = if args.since.is_some() || args.until.is_some() {
+        window_head(args, &receipts)?
+    } else {
+        full_head
+    };
+    let manifest = build_manifest(args, bundle, &receipts, chain_head, &log_keys, &entries)?;
     let embed = args.include_bundle.then_some(args.bundle.as_path());
     write_zip(&args.output, &manifest, &entries, embed)?;
     eprintln!(
@@ -366,7 +402,140 @@ fn key_entries<'a>(dir: &str, keys: impl Iterator<Item = &'a VerifyingKey>, out:
     }
 }
 
+fn verify_claim(dir: &Path, m: &Manifest, keys: &[VerifyingKey]) -> Result<()> {
+    let claim: erebus_core::claim::Claim =
+        serde_json::from_slice(&std::fs::read(dir.join("CLAIM.json"))?)
+            .context("window pack is missing CLAIM.json")?;
+    claim.verify(keys)?;
+    anyhow::ensure!(
+        claim.receipts == m.receipts.len() as u64,
+        "TAMPERED: claim lists {} receipt(s), manifest lists {}",
+        claim.receipts,
+        m.receipts.len()
+    );
+    for row in &m.receipts {
+        let att: Attestation = serde_json::from_slice(&std::fs::read(dir.join(&row.receipt))?)?;
+        anyhow::ensure!(
+            erebus_core::claim::in_window(
+                &att.execution.attested_at,
+                m.since.as_deref(),
+                m.until.as_deref()
+            ),
+            "TAMPERED: {} is outside the claim window",
+            row.receipt
+        );
+    }
+    Ok(())
+}
+
+fn filter_window(
+    receipts: &Receipts,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<Receipts> {
+    if since.is_none() && until.is_none() {
+        return Ok(receipts.clone());
+    }
+    let mut kept = Receipts::new();
+    for (path, proof) in receipts {
+        let att: Attestation = serde_json::from_slice(&std::fs::read(path)?)?;
+        if erebus_core::claim::in_window(&att.execution.attested_at, since, until) {
+            kept.push((path.clone(), proof.clone()));
+        }
+    }
+    anyhow::ensure!(
+        !kept.is_empty(),
+        "no receipts in window {}..{}",
+        since.unwrap_or("-"),
+        until.unwrap_or("-")
+    );
+    Ok(kept)
+}
+
+fn window_head(args: &ExportArgs, receipts: &Receipts) -> Result<Option<String>> {
+    if args.since.is_none() && args.until.is_none() {
+        return Ok(None);
+    }
+    let last = receipts.last().map(|(p, _)| p).context("empty window")?;
+    Ok(Some(format!(
+        "sha256:{}",
+        sha256_hex(&std::fs::read(last)?)
+    )))
+}
+
+fn claim_bytes(args: &ExportArgs, receipts: &Receipts) -> Result<Vec<u8>> {
+    let key_path = args
+        .key
+        .as_ref()
+        .context("--since/--until need --key to sign the claim")?;
+    let seed = std::fs::read(key_path)?;
+    let seed: [u8; 32] = seed
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("--key must be 32 bytes"))?;
+    let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let (digests, tools, stops, approvals) = claim_counts(receipts)?;
+    let head = window_head(args, receipts)?.unwrap_or_default();
+    let claim = erebus_core::claim::Claim {
+        since: args.since.clone().unwrap_or_default(),
+        until: args.until.clone().unwrap_or_default(),
+        receipts: receipts.len() as u64,
+        head,
+        model_digests: digests,
+        tool_calls: tools,
+        stops,
+        approvals,
+        verification_failures: 0,
+        key_id: String::new(),
+        signature_hex: String::new(),
+    }
+    .sign(&key);
+    Ok(serde_json::to_vec_pretty(&claim)?)
+}
+
+fn claim_counts(receipts: &Receipts) -> Result<(Vec<String>, u64, u64, u64)> {
+    let mut digests = BTreeSet::new();
+    let mut tools = 0u64;
+    let mut stops = 0u64;
+    let mut approvals = 0u64;
+    for (path, _) in receipts {
+        let att: Attestation = serde_json::from_slice(&std::fs::read(path)?)?;
+        for layer in &att.provenance.layers {
+            if layer.kind == "model" && !layer.sha256.is_empty() {
+                digests.insert(layer.sha256.clone());
+            }
+        }
+        tools += att
+            .execution
+            .request
+            .as_ref()
+            .and_then(|r| r.tool_calls.as_ref())
+            .map(|c| c.len() as u64)
+            .unwrap_or(0);
+        stops += u64::from(att.execution.stop.is_some());
+        approvals += u64::from(att.execution.approval.is_some());
+    }
+    Ok((digests.into_iter().collect(), tools, stops, approvals))
+}
+
+fn compliance_bytes(profile: &str, tally: &Tally) -> Result<Vec<u8>> {
+    let body = match profile {
+        "annex-iv" => serde_json::json!({
+            "profile": "eu-ai-act-annex-iv",
+            "art_12_record_keeping": { "receipts": tally.receipts },
+            "art_14_human_oversight": "approvals are in CLAIM.json when a window is set",
+            "art_19_logs": "hash-chained receipts, not operator-editable text logs",
+        }),
+        "soc2" => serde_json::json!({
+            "profile": "soc2",
+            "cc7_monitoring": { "receipts": tally.receipts, "proofs": tally.proofs },
+        }),
+        other => anyhow::bail!("unknown --profile {other} (annex-iv or soc2)"),
+    };
+    Ok(serde_json::to_vec_pretty(&body)?)
+}
+
 fn build_manifest(
+    args: &ExportArgs,
     bundle: BundleInfo,
     receipts: &Receipts,
     chain_head: Option<String>,
@@ -403,6 +572,9 @@ fn build_manifest(
         chain_head,
         registry_keys: log_keys.iter().map(|k| hex::encode(k.as_bytes())).collect(),
         files,
+        since: args.since.clone(),
+        until: args.until.clone(),
+        profile: args.profile.clone(),
     })
 }
 
@@ -553,17 +725,21 @@ fn verify_unpacked(
     let registry = [operator.clone(), log_keys].concat();
     let keys = Keys { operator, registry };
     let bundle_checked = check_bundle_file(dir, m, args.bundle.as_deref())?;
-    let chain = va::verify_chain(&dir.join("trail"), &keys.operator, None)?;
-    anyhow::ensure!(
-        chain["count"].as_u64() == Some(m.receipts.len() as u64),
-        "TAMPERED: trail holds {} receipt(s), manifest lists {}",
-        chain["count"],
-        m.receipts.len()
-    );
-    anyhow::ensure!(
-        chain["head"].as_str() == m.chain_head.as_deref(),
-        "TAMPERED: trail HEAD differs from the manifest"
-    );
+    if m.since.is_some() || m.until.is_some() {
+        verify_claim(dir, m, &keys.operator)?;
+    } else {
+        let chain = va::verify_chain(&dir.join("trail"), &keys.operator, None)?;
+        anyhow::ensure!(
+            chain["count"].as_u64() == Some(m.receipts.len() as u64),
+            "TAMPERED: trail holds {} receipt(s), manifest lists {}",
+            chain["count"],
+            m.receipts.len()
+        );
+        anyhow::ensure!(
+            chain["head"].as_str() == m.chain_head.as_deref(),
+            "TAMPERED: trail HEAD differs from the manifest"
+        );
+    }
     let mut tally = Tally::default();
     for row in &m.receipts {
         verify_row(dir, row, &m.bundle.sha256, &keys, &mut tally)

@@ -270,12 +270,16 @@ class TransparencyLog:
     CERT_PREFIX = b"erebus-machine-cert/v1\n"
 
     def cert_bytes(self, machine_id: str, pub_hex: str, owner: str, registry: str,
-                   issued_at: str) -> bytes:
+                   issued_at: str, key_storage: str = "software") -> bytes:
+        if key_storage == "tpm2":
+            body = "\n".join(
+                [machine_id, pub_hex, owner, registry, issued_at, "tpm2"])
+            return b"erebus-machine-cert/v2\n" + body.encode() + b"\n"
         return self.CERT_PREFIX + "\n".join(
             [machine_id, pub_hex, owner, registry, issued_at]).encode() + b"\n"
 
     def enroll(self, owner: str, pub_hex: str, registry: str, os_name: str,
-               arch: str) -> tuple[dict, bool]:
+               arch: str, key_storage: str = "software") -> tuple[dict, bool]:
         """Certify a machine key. Re-enrolling the same key returns the
         existing certificate (idempotent) so a retried CLI call is harmless."""
         if len(pub_hex) != 64 or any(c not in "0123456789abcdef" for c in pub_hex):
@@ -293,14 +297,18 @@ class TransparencyLog:
                     raise PermissionError("machine key already enrolled by another user")
                 return json.loads(row[1]), True
             issued_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            storage = key_storage if key_storage == "tpm2" else "software"
             sig = _ed25519_sign(
-                self.seed, self.cert_bytes(machine_id, pub_hex, owner, registry, issued_at))
+                self.seed, self.cert_bytes(
+                    machine_id, pub_hex, owner, registry, issued_at, storage))
             cert = {
                 "machine_id": machine_id, "public_key_hex": pub_hex, "owner": owner,
                 "registry": registry, "issued_at": issued_at,
                 "registry_key_id": self.key_id, "registry_key_hex": self.public_key.hex(),
                 "signature_hex": sig.hex(),
             }
+            if storage == "tpm2":
+                cert["key_storage"] = "tpm2"
             self.conn.execute(
                 "INSERT INTO machines (machine_id, public_key_hex, owner, os, arch,"
                 " enrolled_at, certificate) VALUES (?,?,?,?,?,?,?)",

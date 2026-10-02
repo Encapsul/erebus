@@ -11,6 +11,10 @@ pub struct RunArgs {
     /// Verbose output
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Launch policy. The bundle is refused before it starts when it breaks a rule.
+    #[arg(long, value_name = "FILE")]
+    pub policy: Option<PathBuf>,
 }
 
 pub fn run(args: RunArgs) -> Result<()> {
@@ -29,6 +33,10 @@ pub fn run(args: RunArgs) -> Result<()> {
         let mut f = std::fs::File::open(&file)
             .with_context(|| format!("failed to open {}", file.display()))?;
         Footer::read_from(&mut f).context("invalid .erebus file — bad footer")?;
+    }
+
+    if let Some(policy) = &args.policy {
+        super::policy::enforce_file(&file, policy)?;
     }
 
     if args.verbose {

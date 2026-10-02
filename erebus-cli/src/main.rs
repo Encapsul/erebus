@@ -126,6 +126,15 @@ enum Commands {
     ///   erebus witness seal --trail agent.erebus.attest.d
     Witness(commands::witness::WitnessArgs),
 
+    /// SLSA v1 provenance for a source tree, signed for cosign
+    ///
+    /// `erebus build --key` writes the same sidecar. `verify-attest --bundle
+    /// --provenance` follows receipt → bundle → source.
+    Provenance(commands::provenance::ProvenanceArgs),
+
+    /// Check a bundle against a launch policy
+    Policy(commands::policy::PolicyArgs),
+
     /// Generate or verify a signed compliance audit report
     ///
     /// Aggregates attestations, SBOM, and integrity info into a single
@@ -425,6 +434,8 @@ fn main() -> ExitCode {
         Commands::AttestHistory(args) => commands::attest_history::run(args),
         Commands::Enroll(args) => commands::enroll::run(args),
         Commands::Witness(args) => commands::witness::run(args),
+        Commands::Provenance(args) => commands::provenance::run(args),
+        Commands::Policy(args) => commands::policy::run(args),
         Commands::Audit(mut args) => {
             if cli.quiet {
                 args.quiet = true;
