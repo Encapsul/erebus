@@ -409,6 +409,15 @@ fn main() {
     }
 }
 
+fn enforce_launch_policy(bundle: &std::path::Path) -> io::Result<()> {
+    erebus_core::policy::enforce_embedded(bundle).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("launch policy refused exec: {e}"),
+        )
+    })
+}
+
 fn run() -> io::Result<()> {
     let verbose = std::env::var_os("ERE_VERBOSE").is_some();
 
@@ -434,6 +443,9 @@ fn run() -> io::Result<()> {
     // extracted or executed. Checked alongside runtime validation so a
     // deny-listed artifact is refused before any extraction/update work.
     meta.lifecycle_check()?;
+    // Embedded launch policy is enforced here, before extraction, so
+    // `./agent.erebus` refuses the same way `erebus run --policy` does.
+    enforce_launch_policy(&self_exe()?)?;
 
     // Intercept erebus-reserved runtime flags (`--erebus-update`, `--erebus-version`)
     // before they could reach the host app. Handled modes are terminal: the
@@ -457,6 +469,7 @@ fn run() -> io::Result<()> {
         // the pre-update file after the rename.
         bin_path = updated;
         (exe, footer, meta_bytes, meta) = read_from(&bin_path)?;
+        enforce_launch_policy(&bin_path)?;
     }
 
     // 2. Compute cache key and check hit BEFORE reading the payload.

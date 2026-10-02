@@ -250,6 +250,7 @@ fn test_inspect_reports_encrypted_v4() {
             entrypoint_layer: None,
             artifact_state: None,
             artifact_policy: None,
+            launch_policy: None,
         },
         &BunFeatures::default(),
     )

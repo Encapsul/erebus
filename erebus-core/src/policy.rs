@@ -93,6 +93,19 @@ fn parse_bool(v: &str) -> Result<bool, anyhow::Error> {
     }
 }
 
+/// Refuse to launch when metadata carries a `launch_policy` the bundle breaks.
+/// No field means no policy: existing bundles keep launching.
+pub fn enforce_embedded(bundle: &Path) -> Result<(), anyhow::Error> {
+    let meta = bundle_meta(bundle)?;
+    let Some(text) = meta.get("launch_policy").and_then(|v| v.as_str()) else {
+        return Ok(());
+    };
+    if text.is_empty() {
+        return Ok(());
+    }
+    enforce(bundle, &Policy::parse(text)?)
+}
+
 /// Refuse to launch when the bundle breaks the policy.
 pub fn enforce(bundle: &Path, policy: &Policy) -> Result<(), anyhow::Error> {
     let meta = bundle_meta(bundle)?;
@@ -162,6 +175,50 @@ fn bundle_meta(bundle: &Path) -> Result<serde_json::Value, anyhow::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_policy_refuses_before_exec() {
+        let dir = tempfile::tempdir().unwrap();
+        let low = pack(dir.path(), 0, Some("min_isolation: 2\n"));
+        let err = enforce_embedded(&low).unwrap_err().to_string();
+        assert!(err.contains("min_isolation"), "{err}");
+        let ok = pack(dir.path(), 2, Some("min_isolation: 2\n"));
+        enforce_embedded(&ok).unwrap();
+        let bare = pack(dir.path(), 0, None);
+        enforce_embedded(&bare).unwrap();
+    }
+
+    fn pack(dir: &std::path::Path, isolation: u32, policy: Option<&str>) -> std::path::PathBuf {
+        use crate::assembly::{assemble_erebus, AssemblyInput};
+        use crate::tar::create_tar_zstd_with_level;
+        let rootfs = dir.join(format!("root-{isolation}"));
+        std::fs::create_dir_all(rootfs.join("app")).unwrap();
+        std::fs::write(rootfs.join("app/main.py"), "print(1)").unwrap();
+        let payload = create_tar_zstd_with_level(&rootfs, 3).unwrap();
+        let mut meta = serde_json::json!({
+            "name": "p", "runtime": "python", "isolation": isolation,
+            "entrypoint": ["python3", "app.py"],
+        });
+        if let Some(text) = policy {
+            meta["launch_policy"] = serde_json::json!(text);
+        }
+        let bin = dir.join(format!("p-{isolation}-{}.erebus", policy.is_some()));
+        let bytes = serde_json::to_vec(&meta).unwrap();
+        assemble_erebus(
+            &bin,
+            &AssemblyInput {
+                stub_bytes: b"STUB",
+                payload: &payload,
+                meta_bytes: &bytes,
+                encrypt: false,
+                squashfs: false,
+                target_arch: None,
+                sisr: None,
+            },
+        )
+        .unwrap();
+        bin
+    }
 
     #[test]
     fn parses_and_rejects_low_isolation() {

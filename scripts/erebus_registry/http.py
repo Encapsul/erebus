@@ -784,21 +784,31 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json({"machines": self.store.log.machines_of(user)})
 
     def _fleet(self):
-        """Executions of one bundle for the caller: machines plus receipt count."""
+        """Executions in a window, each with an inclusion-proof status."""
         user = self._authorized_user()
         if not user:
             return self.send_json({"error": "authentication required"}, 401)
-        parts = self.path.split("?", 1)
-        qs = urllib.parse.parse_qs(parts[1] if len(parts) > 1 else "")
-        bundle = (qs.get("bundle") or [""])[0]
-        filters = {"bundle": bundle} if bundle else {}
-        total, _page = self.store.query_attestations(user, filters, 1, 0)
+        filters = self._fleet_filters()
+        total, rows = self.store.log.fleet_executions(user, filters)
         return self.send_json({
             "owner": user,
-            "bundle": bundle or None,
+            "bundle": filters.get("bundle"),
+            "since": filters.get("since"),
+            "until": filters.get("until"),
             "receipts": total,
+            "executions": rows,
             "machines": self.store.log.machines_of(user),
         })
+
+    def _fleet_filters(self) -> dict:
+        parts = self.path.split("?", 1)
+        qs = urllib.parse.parse_qs(parts[1] if len(parts) > 1 else "")
+        filters = {}
+        for key in ("bundle", "since", "until"):
+            value = (qs.get(key) or [""])[0]
+            if value:
+                filters[key] = value
+        return filters
 
     def _public_base_url(self) -> str:
         # Certificates name the registry so a verifier can tell which

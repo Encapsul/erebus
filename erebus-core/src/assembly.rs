@@ -77,6 +77,9 @@ pub fn build_meta_json(
     if let Some(l) = &options.license {
         meta["license"] = serde_json::Value::String(l.clone());
     }
+    if let Some(p) = &options.launch_policy {
+        meta["launch_policy"] = serde_json::Value::String(p.clone());
+    }
     if let Some(pf) = &options.payload_format {
         meta["payload_format"] = serde_json::Value::String(pf.clone());
     }
@@ -201,6 +204,8 @@ pub struct MetaOptions {
     /// Policy governing artifact access and promotion. Defaults to
     /// `ArtifactPolicy::default()` (`allow_untrusted true`, `require_signature false`).
     pub artifact_policy: Option<crate::metadata::ArtifactPolicy>,
+    /// YAML launch policy the stub enforces before exec. `None` omits the field.
+    pub launch_policy: Option<String>,
 }
 
 /// Input to [`assemble_erebus`]:
@@ -577,6 +582,7 @@ mod tests {
             entrypoint_layer: None,
             artifact_state: None,
             artifact_policy: None,
+            launch_policy: None,
         };
         let bun_features = BunFeatures::default();
         let json = build_meta_json(

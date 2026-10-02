@@ -12,7 +12,7 @@ import urllib.request
 from datetime import datetime, timezone
 
 from .ed25519 import _ed25519_public_key, _ed25519_sign, _ed_point_decode
-from .merkle import _MerkleTree, _mt_leaf
+from .merkle import _MerkleTree, _mt_leaf, _mt_verify_inclusion
 from .tsa import tsa_build_request, tsa_parse_response
 
 
@@ -146,6 +146,35 @@ class TransparencyLog:
                 "leaf_index": r[0] - 1, "leaf_hash": "sha256:" + r[10], "attestation": att,
             })
         return total, page
+
+    def proof_status(self, leaf_hex: str) -> str:
+        """`verified` when the inclusion proof matches the current root,
+        `missing` when the leaf is not in the tree, `failed` otherwise."""
+        proof = self.inclusion(leaf_hex)
+        if proof is None:
+            return "missing"
+        leaf = bytes.fromhex(leaf_hex)
+        path = [bytes.fromhex(p) for p in proof["inclusion_proof"]]
+        root = bytes.fromhex(proof["root"].removeprefix("sha256:"))
+        ok = _mt_verify_inclusion(
+            leaf, proof["leaf_index"], proof["tree_size"], path, root)
+        return "verified" if ok else "failed"
+
+    def fleet_executions(self, owner: str, filters: dict, limit: int = 200) -> tuple[int, list[dict]]:
+        """Receipts in the window with a proof status. Bodies are not returned."""
+        total, page = self.query(owner, filters, min(limit, 200), 0)
+        rows = []
+        for rec in page:
+            leaf = rec["leaf_hash"].removeprefix("sha256:")
+            rows.append({
+                "id": rec["id"],
+                "bundle": rec["bundle"],
+                "machine": rec["machine"],
+                "attested_at": rec["attested_at"],
+                "leaf_index": rec["leaf_index"],
+                "proof_status": self.proof_status(leaf),
+            })
+        return total, rows
 
     # -- tree heads ---------------------------------------------------------
     def size(self) -> int:

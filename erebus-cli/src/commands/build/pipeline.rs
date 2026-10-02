@@ -33,6 +33,16 @@ pub(crate) fn warn_sandbox_noops(isolation_num: u32, seccomp: bool, landlock: bo
     }
 }
 
+fn read_launch_policy(path: &Option<PathBuf>) -> Result<Option<String>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read launch policy {}", path.display()))?;
+    erebus_core::policy::Policy::parse(&text)?;
+    Ok(Some(text))
+}
+
 fn stage_model(model_path: &Path, rootfs: &Path) -> Result<()> {
     let name = model_path
         .file_name()
@@ -779,6 +789,7 @@ pub(crate) fn build_single_target(
                 require_signature: false,
                 max_retries: 3,
             }),
+            launch_policy: read_launch_policy(&args.policy)?,
             layers: {
                 let mut layers = Vec::new();
 

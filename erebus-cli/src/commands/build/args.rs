@@ -305,6 +305,10 @@ pub struct BuildArgs {
     #[arg(long, default_value = "sandbox")]
     pub isolation: String,
 
+    /// Launch policy embedded in the bundle. The stub enforces it before exec.
+    #[arg(long, value_name = "FILE")]
+    pub policy: Option<PathBuf>,
+
     /// Enable seccomp BPF filter
     #[arg(long)]
     pub seccomp: bool,
@@ -884,6 +888,7 @@ mod tests {
             target: None,
             universal: false,
             isolation: "sandbox".into(),
+            policy: None,
             seccomp: false,
             gui: false,
             landlock: false,

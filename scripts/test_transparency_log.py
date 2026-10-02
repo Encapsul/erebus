@@ -283,6 +283,15 @@ def test_http(mod, root: str, tsa_url: str) -> str:
         check("attestations: query from sqlite", status == 200 and body["total"] == 3
               and body["records"][0]["leaf_index"] == 0)
 
+        status, body = req(base, "GET", "/fleet")
+        check("fleet: requires auth", status == 401)
+        status, body = req(base, "GET", "/fleet?since=2026-09-17T10:00:01Z&until=2026-09-17T10:00:01Z", token)
+        execs = body.get("executions") or []
+        check("fleet: window returns one receipt", status == 200 and body.get("receipts") == 1 and len(execs) == 1,
+              str(body))
+        check("fleet: proof status verified", execs and execs[0].get("proof_status") == "verified", str(body))
+        check("fleet: window attested_at", execs and execs[0].get("attested_at") == "2026-09-17T10:00:01Z")
+
         # Machine enrollment: certificate signed by the log key, canonical
         # bytes identical to erebus-core/src/machine.rs.
         seed = b"\x05" * 32
