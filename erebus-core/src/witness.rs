@@ -269,12 +269,26 @@ pub fn load_verifying_key(spec: &str) -> Result<VerifyingKey, anyhow::Error> {
     VerifyingKey::from_bytes(&bytes).map_err(|e| anyhow::anyhow!("--witness-key invalid: {e}"))
 }
 
-/// Lexicographic ISO-8601 compare: `witnessed_at` must not be after the log checkpoint.
+/// `YYYY-MM-DDTHH:MM:SS` so `…38.000000000Z` and `…38+00:00` are the same second.
+fn iso8601_second(ts: &str) -> &str {
+    let b = ts.as_bytes();
+    if b.len() >= 19 && b[4] == b'-' && b[10] == b'T' && b[13] == b':' && b[16] == b':' {
+        &ts[..19]
+    } else {
+        ts
+    }
+}
+
+/// Second-resolution compare: `witnessed_at` must not be after the log checkpoint.
+///
+/// Receipts use `time`'s ISO-8601 (`…38.000000000Z`); the registry checkpoint
+/// uses `isoformat(timespec="seconds")` (`…38+00:00`). A raw string compare
+/// treats `.` as after `+` and rejects a witness sealed in the same second.
 pub fn check_witness_before_anchor(
     witnessed_at: &str,
     checkpoint_time: &str,
 ) -> Result<(), anyhow::Error> {
-    if witnessed_at > checkpoint_time {
+    if iso8601_second(witnessed_at) > iso8601_second(checkpoint_time) {
         anyhow::bail!(
             "TAMPERED: witnessed_at ({witnessed_at}) is after log checkpoint ({checkpoint_time})"
         );
@@ -390,6 +404,18 @@ mod tests {
         check_witness_before_anchor("2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z").unwrap();
         let err = check_witness_before_anchor("2026-01-03T00:00:00Z", "2026-01-02T00:00:00Z")
             .unwrap_err();
+        assert!(err.to_string().contains("TAMPERED"));
+        // Same second, the two formats the witness and the registry actually emit.
+        check_witness_before_anchor(
+            "2026-10-02T13:05:38.000000000Z",
+            "2026-10-02T13:05:38+00:00",
+        )
+        .unwrap();
+        let err = check_witness_before_anchor(
+            "2026-10-02T13:05:39.000000000Z",
+            "2026-10-02T13:05:38+00:00",
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("TAMPERED"));
     }
 }
