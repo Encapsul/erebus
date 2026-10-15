@@ -353,7 +353,8 @@ fn serve_command(
     token: &str,
 ) -> Command {
     let mut cmd = serve_attest_only(bundle, port, key, trail);
-    cmd.args(["--push", "--registry", &registry.base, "--token", token]);
+    cmd.env("ERE_TOKEN", token);
+    cmd.args(["--push", "--registry", &registry.base]);
     cmd
 }
 
@@ -436,7 +437,8 @@ fn serve_attests_every_call_into_a_verifiable_chain() {
     let log_key = registry.log_key();
     let machine_dir = dir.path().join("machine");
     let enrolled = Command::new(erebus_bin())
-        .args(["enroll", "--registry", &registry.base, "--token", &token])
+        .env("ERE_TOKEN", &token)
+        .args(["enroll", "--registry", &registry.base])
         .env("ERE_MACHINE_DIR", &machine_dir)
         .status()
         .unwrap();

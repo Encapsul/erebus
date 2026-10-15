@@ -191,7 +191,8 @@ fn evidence_pack_verifies_offline_and_refuses_every_doctored_copy() {
     let log_key = registry.log_key_hex();
     let machine_dir = dir.path().join("machine");
     erebus()
-        .args(["enroll", "--registry", &registry.base, "--token", &token])
+        .env("ERE_TOKEN", &token)
+        .args(["enroll", "--registry", &registry.base])
         .env("ERE_MACHINE_DIR", &machine_dir)
         .assert()
         .success();
@@ -213,7 +214,8 @@ fn evidence_pack_verifies_offline_and_refuses_every_doctored_copy() {
                 dir.path().join("latest.attest").to_str().unwrap(),
             ])
             .args(["--log", trail.to_str().unwrap(), "--push"])
-            .args(["--registry", &registry.base, "--token", &token])
+            .args(["--registry", &registry.base])
+            .env("ERE_TOKEN", &token)
             .env("ERE_MACHINE_DIR", &machine_dir)
             .assert()
             .success();

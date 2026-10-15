@@ -24,9 +24,9 @@ pub enum ReplicateCommand {
         #[arg(long)]
         dir: PathBuf,
 
-        /// Replication token (optional)
+        /// File containing the replication token (`ERE_TOKEN` otherwise)
         #[arg(long)]
-        token: Option<String>,
+        token_file: Option<PathBuf>,
     },
 
     /// Incremental sync since the last applied sequence
@@ -39,16 +39,32 @@ pub enum ReplicateCommand {
         #[arg(long)]
         dir: PathBuf,
 
-        /// Replication token (optional)
+        /// File containing the replication token (`ERE_TOKEN` otherwise)
         #[arg(long)]
-        token: Option<String>,
+        token_file: Option<PathBuf>,
     },
 }
 
 pub fn run(args: ReplicateArgs) -> Result<()> {
     match args.command {
-        ReplicateCommand::Full { leader, dir, token } => full_sync(&leader, &dir, token),
-        ReplicateCommand::Pull { leader, dir, token } => incremental_sync(&leader, &dir, token),
+        ReplicateCommand::Full {
+            leader,
+            dir,
+            token_file,
+        } => full_sync(
+            &leader,
+            &dir,
+            super::attest::resolve_token(token_file.as_deref())?,
+        ),
+        ReplicateCommand::Pull {
+            leader,
+            dir,
+            token_file,
+        } => incremental_sync(
+            &leader,
+            &dir,
+            super::attest::resolve_token(token_file.as_deref())?,
+        ),
     }
 }
 

@@ -33,9 +33,9 @@ pub enum MirrorCommand {
         #[arg(short, long)]
         output: PathBuf,
 
-        /// Encryption password
+        /// File containing the encryption password
         #[arg(long)]
-        password: String,
+        password_file: PathBuf,
     },
     /// Import registry data from an encrypted archive
     Import {
@@ -47,9 +47,9 @@ pub enum MirrorCommand {
         #[arg(long)]
         dir: PathBuf,
 
-        /// Decryption password
+        /// File containing the decryption password
         #[arg(long)]
-        password: String,
+        password_file: PathBuf,
     },
 }
 
@@ -58,14 +58,20 @@ pub fn run(args: MirrorArgs) -> Result<()> {
         MirrorCommand::Export {
             dir,
             output,
-            password,
-        } => export(&dir, &output, &password),
+            password_file,
+        } => export(&dir, &output, &read_secret(&password_file)?),
         MirrorCommand::Import {
             input,
             dir,
-            password,
-        } => import(&input, &dir, &password),
+            password_file,
+        } => import(&input, &dir, &read_secret(&password_file)?),
     }
+}
+
+fn read_secret(path: &Path) -> Result<String> {
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(raw.trim().to_string())
 }
 
 fn derive_key(password: &str, salt: &[u8; 32]) -> Zeroizing<[u8; 32]> {

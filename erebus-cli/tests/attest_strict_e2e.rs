@@ -196,7 +196,8 @@ fn enroll_then_strict_verify_offline_and_cosign_interop() {
 
     // Enroll: key generated locally, certified by the registry.
     erebus(&machine_dir)
-        .args(["enroll", "--registry", &registry.base, "--token", &token])
+        .env("ERE_TOKEN", &token)
+        .args(["enroll", "--registry", &registry.base])
         .assert()
         .success()
         .stderr(predicate::str::contains("generated key"))
@@ -225,7 +226,8 @@ fn enroll_then_strict_verify_offline_and_cosign_interop() {
     let show: serde_json::Value = serde_json::from_slice(&show).unwrap();
     let machine_id = show["machine_id"].as_str().unwrap().to_string();
     erebus(&machine_dir)
-        .args(["enroll", "--registry", &registry.base, "--token", &token])
+        .env("ERE_TOKEN", &token)
+        .args(["enroll", "--registry", &registry.base])
         .assert()
         .success()
         .stderr(predicate::str::contains("existing key"))

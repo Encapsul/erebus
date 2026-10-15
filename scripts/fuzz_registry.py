@@ -198,7 +198,7 @@ def gen_cli_args(rng: random.Random) -> list[str]:
     cmd = rng.choice(commands)
     args = [cmd]
     flags = ["--help", "--version", "--verbose", "--quiet", "--json", "--output",
-             "/tmp/test.erebus", "--token", "test"]
+             "/tmp/test.erebus", "--token-file", "test"]
     for _ in range(rng.randint(0, 3)):
         if flags:
             args.append(rng.choice(flags))

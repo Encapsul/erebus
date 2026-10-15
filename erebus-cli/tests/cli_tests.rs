@@ -665,7 +665,7 @@ fn test_billing_status_help() {
         .assert()
         .success()
         .stdout(predicate::str::contains("--registry"))
-        .stdout(predicate::str::contains("--token"));
+        .stdout(predicate::str::contains("--token-file"));
 }
 
 #[test]
@@ -676,7 +676,7 @@ fn test_billing_checkout_help() {
         .success()
         .stdout(predicate::str::contains("--plan"))
         .stdout(predicate::str::contains("--registry"))
-        .stdout(predicate::str::contains("--token"));
+        .stdout(predicate::str::contains("--token-file"));
 }
 
 #[test]
@@ -687,7 +687,7 @@ fn test_audit_log_help() {
         .success()
         .stdout(predicate::str::contains("--registry"))
         .stdout(predicate::str::contains("--month"))
-        .stdout(predicate::str::contains("--token"));
+        .stdout(predicate::str::contains("--token-file"));
 }
 
 #[test]
@@ -852,12 +852,11 @@ fn test_attest_history_query() {
     let payload = r#"{"owner":"alice","total":2,"records":[{"id":"ec7408c48f595fed","attested_at":"2026-09-11T00:00:00Z","bundle":"sha256:aa","machine":"sha256:mm","os":"linux","arch":"x86_64","key_fp":"fp","attestation":{"spec_version":"0.5"}},{"id":"bee5","attested_at":"2026-09-10T00:00:00Z","bundle":"sha256:bb","machine":"sha256:mm","os":"linux","arch":"x86_64","key_fp":"fp","attestation":{"spec_version":"0.5"}}]}"#;
     let (port, handle) = attest_http_stub(payload);
     erebus()
+        .env("ERE_TOKEN", "s3cr3t")
         .args([
             "attest-history",
             "--registry",
             &format!("http://127.0.0.1:{port}"),
-            "--token",
-            "s3cr3t",
         ])
         .assert()
         .success()

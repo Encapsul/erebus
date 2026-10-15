@@ -15,7 +15,10 @@ use super::args::parse_target;
 /// 4. `/tmp/erebus-stub-target/...` (AGENTS.md / CI `CARGO_TARGET_DIR`)
 /// 5. `stub/target/<triple>/release/erebus-stub` (legacy layout)
 /// 6. `erebus-stub` next to the running `erebus` (release archive), host only
-/// 7. `which erebus-stub` (system install, with warning)
+/// 7. GitHub release asset, verified and cached (installed CLI only — a
+///    source checkout keeps building its own stub)
+/// 8. `which erebus-stub` (host only; a PATH stub is the wrong arch for a
+///    cross build)
 pub(crate) fn find_stub(target: &Option<String>) -> Result<PathBuf> {
     if let Ok(path) = std::env::var("ERE_STUB_PATH") {
         let p = PathBuf::from(path);
@@ -88,18 +91,63 @@ pub(crate) fn find_stub(target: &Option<String>) -> Result<PathBuf> {
         }
     }
 
-    if let Ok(p) = which::which("erebus-stub") {
-        eprintln!(
-            "[erebus] warning: found erebus-stub on PATH at {}; prefer 'make stub' for reproducible builds",
-            p.display()
-        );
-        return Ok(p);
-    }
+    fallback_stub(host, &arch_suffix, stub_name)
+}
 
-    anyhow::bail!(
-        "erebus-stub not found — reinstall erebus (the release archive ships it next to \
-         the erebus binary), set ERE_STUB_PATH, or run `make stub` in a source checkout"
-    )
+/// Release download, then a host `PATH` stub. Skipped inside a source
+/// checkout so `erebus build` there embeds the stub you just compiled,
+/// not the one published for this version number.
+fn fallback_stub(host: bool, arch_suffix: &str, stub_name: &str) -> Result<PathBuf> {
+    let download_error = if source_checkout() {
+        None
+    } else {
+        match super::release_stub::fetch_release_stub(arch_suffix, stub_name) {
+            Ok(path) => return Ok(path),
+            Err(err) => Some(err),
+        }
+    };
+    if host {
+        if let Ok(path) = which::which("erebus-stub") {
+            eprintln!(
+                "[erebus] warning: found erebus-stub on PATH at {}; prefer 'make stub' for reproducible builds",
+                path.display()
+            );
+            return Ok(path);
+        }
+    }
+    match download_error {
+        Some(err) => anyhow::bail!(
+            "erebus-stub not found locally and the release download failed: {err:#}\n\
+             reinstall erebus (the archive ships erebus-stub next to the erebus binary), \
+             set ERE_STUB_PATH, or run `make stub` in a source checkout"
+        ),
+        None => anyhow::bail!(
+            "erebus-stub not found — reinstall erebus (the release archive ships it next to \
+             the erebus binary), set ERE_STUB_PATH, or run `make stub` in a source checkout"
+        ),
+    }
+}
+
+/// True when this process is sitting in the erebus repo (or was compiled
+/// from a tree that is still on disk). Download is for an installed CLI.
+fn source_checkout() -> bool {
+    fn has_workspace(dir: &Path) -> bool {
+        dir.join("Cargo.toml").is_file() && dir.join("erebus-stub").is_dir()
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut dir = cwd;
+        loop {
+            if has_workspace(&dir) {
+                return true;
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .is_some_and(has_workspace)
 }
 
 /// Triple directory where a host stub is usually built (`make stub` → musl
@@ -162,6 +210,13 @@ pub(crate) fn read_existing_hashes(erebus_path: &Path) -> Option<(String, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_tree_does_not_download_a_published_stub() {
+        // Unit tests run inside the repo. `find_stub` must not treat a missing
+        // local stub as "fetch v{CARGO_PKG_VERSION} from GitHub".
+        assert!(source_checkout());
+    }
 
     #[test]
     fn host_stub_triple_matches_this_platform() {

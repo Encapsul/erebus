@@ -5,7 +5,8 @@ use std::path::PathBuf;
 /* Arguments for HuggingFace Hub API compat commands. */
 #[derive(Args)]
 pub struct HfArgs {
-    /// `HuggingFace` token (or set `HF_TOKEN` env var)
+    /// Hugging Face token, or `HF_TOKEN`. This command speaks the Hub CLI,
+    /// which takes the secret as `--token`. erebus registry commands do not.
     #[arg(long)]
     pub token: Option<String>,
 

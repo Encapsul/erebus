@@ -156,7 +156,8 @@ info "Registry key: ${REG_KEY:0:16}… (signs checkpoints AND machine certificat
 
 # The machine key never leaves this host; the registry only certifies it.
 export ERE_MACHINE_DIR="$WORK/machine"
-if $ERE enroll --registry "$REGISTRY" --token "$TOKEN" --json >"$WORK/enroll.json" 2>/dev/null; then
+printf '%s\n' "$TOKEN" >"$WORK/token"
+if $ERE enroll --registry "$REGISTRY" --token-file "$WORK/token" --json >"$WORK/enroll.json" 2>/dev/null; then
     pass "Machine enrolled"
     python3 -c "
 import json
@@ -354,11 +355,11 @@ print(f'  checkpoint signed by {str(cp.get(\"key_id\"))[:30]}... at {cp.get(\"ti
     # to it, then checked again OFFLINE (registry killed below).
     sleep 1.1   # distinct attested_at → distinct leaf
     $ERE attest "$WORK/agent.erebus" --key "$KEY" --output "$WORK/detached.attest" --no-log \
-        --envelope "$WORK/agent.dsse.json" --push --registry "$REGISTRY" --token "$TOKEN" 2>&1 | sed 's/^/  /'
+        --envelope "$WORK/agent.dsse.json" --push --registry "$REGISTRY" --token-file "$WORK/token" 2>&1 | sed 's/^/  /'
     test -f "$WORK/detached.attest.proof.json" && pass "Inclusion proof stored: detached.attest.proof.json" || fail "No proof file"
 
     BUNDLE=$(python3 -c "import json;print(json.load(open('$WORK/agent.attest'))['artifact']['bundle_hash'])" 2>/dev/null)
-    $ERE attest-history --registry "$REGISTRY" --token "$TOKEN" --query "bundle=$BUNDLE" --json 2>/dev/null | python3 -c "
+    $ERE attest-history --registry "$REGISTRY" --token-file "$WORK/token" --query "bundle=$BUNDLE" --json 2>/dev/null | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 recs = d.get('records', d if isinstance(d, list) else [])

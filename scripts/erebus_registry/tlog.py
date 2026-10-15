@@ -39,6 +39,11 @@ class TransparencyLog:
         self.origin = origin
         self.tsa_url = tsa_url
         self.anchor_every = anchor_every
+        # One TSA call at a time. A publish must not wait on it: FreeTSA
+        # often answers in minutes, and the client gives up at 30s.
+        self._anchor_mu = threading.Lock()
+        self._anchor_running = False
+        self._anchor_again = False
         self.conn = sqlite3.connect(db_path, check_same_thread=False, isolation_level=None)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=FULL")
@@ -97,11 +102,29 @@ class TransparencyLog:
                 raise
             index = self.tree.append(leaf)
         if self.tsa_url and self.anchor_every and (index + 1) % self.anchor_every == 0:
+            self.schedule_anchor()
+        return index, leaf_hex, False
+
+    def schedule_anchor(self) -> None:
+        """Timestamp the current head without holding the publish response."""
+        with self._anchor_mu:
+            if self._anchor_running:
+                self._anchor_again = True
+                return
+            self._anchor_running = True
+        threading.Thread(target=self._anchor_bg, name="erebus-anchor", daemon=True).start()
+
+    def _anchor_bg(self) -> None:
+        while True:
             try:
                 self.anchor()
-            except Exception as e:  # never fail a publish because the TSA is down
+            except Exception as e:  # a down TSA must not fail the publish
                 print(f"[registry] TSA anchoring failed: {e}", file=sys.stderr)
-        return index, leaf_hex, False
+            with self._anchor_mu:
+                if not self._anchor_again:
+                    self._anchor_running = False
+                    return
+                self._anchor_again = False
 
     def exists(self, att_id: str) -> bool:
         with self.lock:

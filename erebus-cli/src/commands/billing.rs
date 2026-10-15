@@ -16,9 +16,9 @@ pub enum BillingCommand {
         #[arg(long)]
         registry: String,
 
-        /// Auth bearer token
+        /// File containing the registry bearer token (`ERE_TOKEN` otherwise)
         #[arg(long)]
-        token: Option<String>,
+        token_file: Option<std::path::PathBuf>,
     },
     /// Start a Stripe Checkout session for a paid plan
     Checkout {
@@ -30,9 +30,9 @@ pub enum BillingCommand {
         #[arg(long)]
         plan: String,
 
-        /// Auth bearer token
+        /// File containing the registry bearer token (`ERE_TOKEN` otherwise)
         #[arg(long)]
-        token: Option<String>,
+        token_file: Option<std::path::PathBuf>,
 
         /// Open checkout URL in browser
         #[arg(long)]
@@ -42,13 +42,22 @@ pub enum BillingCommand {
 
 pub fn run(args: BillingArgs) -> Result<()> {
     match args.command {
-        BillingCommand::Status { registry, token } => status(&registry, token.as_deref()),
+        BillingCommand::Status {
+            registry,
+            token_file,
+        } => {
+            let token = super::attest::resolve_token(token_file.as_deref())?;
+            status(&registry, token.as_deref())
+        }
         BillingCommand::Checkout {
             registry,
             plan,
-            token,
+            token_file,
             open,
-        } => checkout(&registry, &plan, token.as_deref(), open),
+        } => {
+            let token = super::attest::resolve_token(token_file.as_deref())?;
+            checkout(&registry, &plan, token.as_deref(), open)
+        }
     }
 }
 

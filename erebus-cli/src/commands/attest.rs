@@ -40,11 +40,9 @@ pub struct AttestArgs {
     #[arg(long, env = "ERE_REGISTRY")]
     pub registry: Option<String>,
 
-    /// Bearer token sent to the registry (prefer --token-file for secrets)
-    #[arg(long, env = "ERE_TOKEN")]
-    pub token: Option<String>,
-
-    /// Path to a file containing the bearer token (preferred over --token)
+    /// File containing the registry bearer token. `ERE_TOKEN` is the other
+    /// channel. A `--token` flag would expose the secret in `ps` and in shell
+    /// history.
     #[arg(long)]
     pub token_file: Option<PathBuf>,
 
@@ -179,7 +177,7 @@ pub fn run(args: AttestArgs) -> Result<()> {
             anyhow::anyhow!("--push requires --registry (or ERE_REGISTRY env var)")
         })?;
         let registry = registry.trim_end_matches('/').to_string();
-        let token = resolve_token(args.token.as_deref(), args.token_file.as_deref())?;
+        let token = resolve_token(args.token_file.as_deref())?;
         match publish_receipt(&registry, token.as_deref(), &output_path, &json_bytes) {
             Ok(published) => {
                 if let (Some(entry), Some(proof)) = (&entry, &published.proof) {
@@ -356,16 +354,16 @@ fn load_approval(path: Option<&std::path::Path>) -> Result<Option<Approval>> {
     Ok(Some(approval))
 }
 
-pub fn resolve_token(
-    token: Option<&str>,
-    token_file: Option<&std::path::Path>,
-) -> Result<Option<String>> {
+/// Registry bearer from `--token-file`, otherwise `ERE_TOKEN`.
+///
+/// Not a flag: the value would show up in `ps` and in shell history. The
+/// environment variable stays because the harnesses already pass the token
+/// that way, outside the process arguments.
+pub fn resolve_token(token_file: Option<&std::path::Path>) -> Result<Option<String>> {
     if let Some(path) = token_file {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read token file {}", path.display()))?;
         return Ok(Some(content.trim().to_string()));
     }
-    Ok(token
-        .map(String::from)
-        .or_else(|| std::env::var("ERE_TOKEN").ok()))
+    Ok(std::env::var("ERE_TOKEN").ok())
 }

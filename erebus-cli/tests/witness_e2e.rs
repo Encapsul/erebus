@@ -225,10 +225,9 @@ fn disconnected_anchoring_witness_refuses_insertion_then_syncs() {
             "--push",
             "--registry",
             &reg.base,
-            "--token",
-            &token,
             "--quiet",
         ])
+        .env("ERE_TOKEN", &token)
         .assert()
         .success();
 

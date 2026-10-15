@@ -170,7 +170,8 @@ fn attest_push_stores_proof_and_verify_attest_checks_it_offline() {
                 key.to_str().unwrap(),
             ])
             .args(["--output", out.to_str().unwrap(), "--no-log", "--push"])
-            .args(["--registry", &registry.base, "--token", &token])
+            .args(["--registry", &registry.base])
+            .env("ERE_TOKEN", &token)
             .assert()
             .success()
             .stderr(predicate::str::contains("proof:"))

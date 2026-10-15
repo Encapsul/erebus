@@ -18,11 +18,7 @@ pub struct EnrollArgs {
     #[arg(long, env = "ERE_REGISTRY")]
     pub registry: Option<String>,
 
-    /// Bearer token for the registry (prefer --token-file for secrets)
-    #[arg(long, env = "ERE_TOKEN")]
-    pub token: Option<String>,
-
-    /// Path to a file containing the bearer token
+    /// File containing the registry bearer token (`ERE_TOKEN` otherwise)
     #[arg(long)]
     pub token_file: Option<PathBuf>,
 
@@ -67,9 +63,8 @@ pub fn run(args: EnrollArgs) -> Result<()> {
         None => (MachineIdentity::generate(), "generated"),
     };
     if let Some(registry) = &args.registry {
-        let token =
-            super::attest::resolve_token(args.token.as_deref(), args.token_file.as_deref())?
-                .ok_or_else(|| anyhow::anyhow!("--registry needs --token or --token-file"))?;
+        let token = super::attest::resolve_token(args.token_file.as_deref())?
+            .ok_or_else(|| anyhow::anyhow!("--registry needs --token-file or ERE_TOKEN"))?;
         identity.certificate = Some(request_certificate(registry, &token, &identity, args.tpm)?);
     }
     identity
@@ -157,7 +152,9 @@ fn report(
             );
             eprintln!("  registry key: {}", c.registry_key_id);
         }
-        None => eprintln!("  certified:  no — run `erebus enroll --registry <url> --token <t>`"),
+        None => {
+            eprintln!("  certified:  no — run `erebus enroll --registry <url> --token-file <file>`")
+        }
     }
     Ok(())
 }

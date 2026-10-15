@@ -84,11 +84,7 @@ pub struct ServeArgs {
     #[arg(long, env = "ERE_REGISTRY")]
     pub registry: Option<String>,
 
-    /// Bearer token for receipt publication (prefer --token-file)
-    #[arg(long, env = "ERE_TOKEN")]
-    pub token: Option<String>,
-
-    /// File containing the registry bearer token
+    /// File containing the registry bearer token (`ERE_TOKEN` otherwise)
     #[arg(long)]
     pub token_file: Option<PathBuf>,
 }
@@ -634,8 +630,7 @@ fn build_recorder(file: &Path, key_path: &Path, args: &ServeArgs) -> Result<Arc<
     eprintln!("[erebus] attesting proxy: receipts → {}", dir.display());
     let mut recorder = CallRecorder::new(template, key, log.clone());
     if args.push {
-        let token =
-            super::attest::resolve_token(args.token.as_deref(), args.token_file.as_deref())?;
+        let token = super::attest::resolve_token(args.token_file.as_deref())?;
         let registry = args
             .registry
             .as_deref()

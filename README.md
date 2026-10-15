@@ -49,7 +49,7 @@ silently rewrite:
 
 ```bash
 erebus keygen --key-dir keys                      # operator key (+ <fp>.pem for cosign)
-erebus enroll --registry $ERE_REGISTRY --token $T # once per host: machine key, certified
+erebus enroll --registry $ERE_REGISTRY --token-file token # once per host: machine key, certified
 erebus build ./agent -o agent.erebus && erebus sign agent.erebus --key keys/<fp>.key
 
 ERE_ATTEST_KEY=keys/<fp>.key ./agent.erebus --task nightly # run → agent.erebus.attest (+ trail)

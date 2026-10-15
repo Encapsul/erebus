@@ -18,9 +18,9 @@ pub struct AuditLogArgs {
     #[arg(long)]
     pub org: Option<String>,
 
-    /// Auth bearer token
+    /// File containing the registry bearer token (`ERE_TOKEN` otherwise)
     #[arg(long)]
-    pub token: Option<String>,
+    pub token_file: Option<PathBuf>,
 
     /// Output file (defaults to stdout)
     #[arg(short, long)]
@@ -37,8 +37,9 @@ pub fn run(args: AuditLogArgs) -> Result<()> {
         .user_agent(concat!("erebus-cli/", env!("CARGO_PKG_VERSION")))
         .build()?;
 
+    let token = super::attest::resolve_token(args.token_file.as_deref())?;
     let mut req = client.get(&url);
-    if let Some(token) = args.token {
+    if let Some(token) = token {
         req = req.bearer_auth(token);
     }
 

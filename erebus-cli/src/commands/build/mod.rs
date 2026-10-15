@@ -2,6 +2,7 @@ mod args;
 pub(crate) mod deps;
 pub(crate) mod payload;
 mod pipeline;
+mod release_stub;
 mod sign;
 mod sisr;
 mod stub;

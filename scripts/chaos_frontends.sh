@@ -74,7 +74,7 @@ resp = urllib.request.urlopen(req)
 print(json.loads(resp.read())['token'])
 ")
 export ERE_REGISTRY="http://127.0.0.1:$REG_PORT"
-timeout 60 "$ERE" publish --token "$TOKEN" "$WORK/tiny.erebus" >/dev/null 2>&1
+timeout 60 env ERE_TOKEN="$TOKEN" "$ERE" publish "$WORK/tiny.erebus" >/dev/null 2>&1
 check "publish with auth" 0 $?
 
 # Start all frontends
@@ -205,7 +205,7 @@ conc_cycle() {
     # Hardlink: 24 full copies of the agent binary were exhausting /tmp on GHA.
     ln -f "$WORK/tiny.erebus" "$WORK/conc_${w}_${i}.erebus" 2>/dev/null \
       || cp "$WORK/tiny.erebus" "$WORK/conc_${w}_${i}.erebus"
-    timeout 60 "$ERE" publish --token "$TOKEN" "$WORK/conc_${w}_${i}.erebus" >/dev/null 2>&1
+    timeout 60 env ERE_TOKEN="$TOKEN" "$ERE" publish "$WORK/conc_${w}_${i}.erebus" >/dev/null 2>&1
     rc=$?
     [ "$rc" = "0" ] || echo "conc_${w}_${i} publish rc=$rc" >> "$CONC_FAIL"
     code=$(curl -s -o "$WORK/got_${w}_${i}.bin" -w '%{http_code}' \
@@ -293,7 +293,7 @@ stored_ok=1
 check "on-disk blob intact after restart (sha matches)" "0" "$stored_ok"
 rm -f "$WORK/pulled2.erebus"
 pull_ok=1
-timeout 60 "$ERE" pull --registry "http://127.0.0.1:$REG_PORT" --token "$TOKEN" tiny -o "$WORK/pulled2.erebus" \
+timeout 60 env ERE_TOKEN="$TOKEN" "$ERE" pull --registry "http://127.0.0.1:$REG_PORT" tiny -o "$WORK/pulled2.erebus" \
   >/dev/null 2>&1 \
   && [ "$(sha256sum "$WORK/pulled2.erebus" 2>/dev/null | cut -d' ' -f1)" = "$SHA" ] && pull_ok=0
 check "erebus pull roundtrip via restarted registry" "0" "$pull_ok"

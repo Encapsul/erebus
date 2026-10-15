@@ -45,7 +45,7 @@ impl CliFuzzTarget {
             "8080",
             "--registry",
             "http://localhost:8080",
-            "--token",
+            "--token-file",
             "test",
         ];
         for _ in 0..flag_count {

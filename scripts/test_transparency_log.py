@@ -172,7 +172,11 @@ class FakeTsa(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    delay = 0.0
+
     def do_POST(self):
+        if FakeTsa.delay:
+            time.sleep(FakeTsa.delay)
         n = int(self.headers.get("Content-Length", "0"))
         query = self.rfile.read(n)
         FakeTsa.seen.append(query)
@@ -426,6 +430,46 @@ def test_cached_tree(mod) -> None:
           per_op_ms < 20, f"{per_op_ms:.2f} ms")
 
 
+def test_publish_does_not_wait_for_tsa(tsa_url: str) -> None:
+    """A slow TSA must not hold POST /attestations. The leaf proof returns
+    first; the RFC 3161 token shows up on the checkpoint afterwards."""
+    FakeTsa.delay = 3.0
+    port = free_port()
+    base = f"http://127.0.0.1:{port}"
+    with tempfile.TemporaryDirectory() as root:
+        proc = subprocess.Popen(
+            [sys.executable, SERVER, "--dir", root, "--port", str(port),
+             "--tsa-url", tsa_url, "--anchor-every", "1", "--log-origin", "slow-tsa"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        )
+        try:
+            wait_up(base, proc)
+            _, reg = req(base, "POST", "/auth/register",
+                         body={"username": "alice", "password": "pw12345678"})
+            t0 = time.perf_counter()
+            status, body = req(base, "POST", "/attestations", reg.get("token", ""),
+                               fake_receipt(7))
+            elapsed = time.perf_counter() - t0
+            log = body.get("log") or {}
+            check("publish returns before a slow TSA",
+                  status == 201 and elapsed < 1.5 and log.get("leaf_index") == 0,
+                  f"status={status} elapsed={elapsed:.2f}")
+            anchored = False
+            deadline = time.time() + 12
+            while time.time() < deadline:
+                status, ckpt = req(base, "GET", "/log/checkpoint")
+                anchor = (ckpt.get("anchor") or {}) if status == 200 else {}
+                if anchor.get("size") == 1:
+                    anchored = True
+                    break
+                time.sleep(0.2)
+            check("slow TSA still anchors the head", anchored)
+        finally:
+            FakeTsa.delay = 0
+            proc.kill()
+            proc.wait()
+
+
 def main() -> int:
     mod = load_module()
     test_primitives(mod)
@@ -434,6 +478,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as root:
         token = test_http(mod, root, tsa_url)
         test_crash_consistency(mod, root, tsa_url, token)
+    test_publish_does_not_wait_for_tsa(tsa_url)
     print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:
         print("FAILED: " + ", ".join(FAIL))

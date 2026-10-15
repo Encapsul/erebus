@@ -16,7 +16,7 @@ are timestamped by an independent RFC 3161 authority.
 
 ```bash
 erebus keygen --key-dir keys                            # operator key
-erebus enroll --registry $ERE_REGISTRY --token $TOKEN   # once per host
+erebus enroll --registry $ERE_REGISTRY --token-file token   # once per host
 erebus build ./my-agent -o agent.erebus && erebus sign agent.erebus --key keys/<fp>.key
 
 ERE_ATTEST_KEY=keys/<fp>.key ./agent.erebus --task nightly  # run → signed receipt

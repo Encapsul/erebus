@@ -68,11 +68,7 @@ pub struct Common {
     #[arg(long, env = "ERE_REGISTRY")]
     pub registry: Option<String>,
 
-    /// Bearer token for publication (prefer --token-file)
-    #[arg(long, env = "ERE_TOKEN")]
-    pub token: Option<String>,
-
-    /// File containing the registry bearer token
+    /// File containing the registry bearer token (`ERE_TOKEN` otherwise)
     #[arg(long)]
     pub token_file: Option<PathBuf>,
 }
@@ -134,8 +130,7 @@ fn tool_recorder(
         .with_context(|| format!("cannot open trail {}", common.attest_log.display()))?;
     let mut recorder = CallRecorder::new(template, key, log.clone()).with_mode(ProxyMode::Tool);
     if common.push {
-        let token =
-            super::attest::resolve_token(common.token.as_deref(), common.token_file.as_deref())?;
+        let token = super::attest::resolve_token(common.token_file.as_deref())?;
         let registry = common
             .registry
             .as_deref()

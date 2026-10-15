@@ -22,11 +22,7 @@ pub struct PullArgs {
     #[arg(long, env = "ERE_REGISTRY")]
     pub registry: Option<String>,
 
-    /// Bearer token sent on every request (prefer --token-file for secrets)
-    #[arg(long, env = "ERE_TOKEN")]
-    pub token: Option<String>,
-
-    /// Path to a file containing the bearer token (preferred over --token)
+    /// File containing the registry bearer token (`ERE_TOKEN` otherwise)
     #[arg(long)]
     pub token_file: Option<PathBuf>,
 
@@ -86,7 +82,7 @@ pub fn run(args: PullArgs) -> Result<()> {
         anyhow::anyhow!("registry URL is required (--registry or ERE_REGISTRY env var)")
     })?;
     let registry = registry.trim_end_matches('/').to_string();
-    let token = resolve_token(args.token.as_deref(), args.token_file.as_deref())?;
+    let token = super::attest::resolve_token(args.token_file.as_deref())?;
 
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(600))
@@ -260,22 +256,6 @@ fn fmt_size(bytes: u64) -> String {
     } else {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     }
-}
-
-/// Resolve token from `--token-file`, `--token` flag, or `ERE_TOKEN` env var.
-/// `--token-file` takes precedence (clig.dev: secrets via files, not flags).
-fn resolve_token(
-    token: Option<&str>,
-    token_file: Option<&std::path::Path>,
-) -> Result<Option<String>> {
-    if let Some(path) = token_file {
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read token file {}", path.display()))?;
-        return Ok(Some(content.trim().to_string()));
-    }
-    Ok(token
-        .map(String::from)
-        .or_else(|| std::env::var("ERE_TOKEN").ok()))
 }
 
 #[cfg(test)]

@@ -21,7 +21,7 @@ use std::process::ExitCode;
     version,
     propagate_version = true,
     about = "Signed, tamper-evident receipts of every AI agent execution",
-    long_about = "erebus is the proof layer for AI execution: it runs an agent from a single sandboxed binary and leaves a signed, hash-chained, externally anchored receipt of every run and every inference call — verifiable offline with erebus or stock cosign.\n\nSupported runtimes: Python and native binaries.\n\nExamples:\n  erebus build ./myapp -o myapp.erebus\n  erebus run myapp.erebus\n  erebus inspect myapp.erebus\n  erebus keygen\n  erebus sign myapp.erebus --key ~/.erebus/keys/*.key\n  erebus verify myapp.erebus\n  erebus attest myapp.erebus --key ~/.erebus/keys/*.key --push\n  erebus verify-attest myapp.erebus.attest --proof --strict\n  erebus evidence export myapp.erebus --log-key $REG -o evidence.zip\n  erebus verify-evidence evidence.zip --bundle myapp.erebus\n  erebus enroll --registry http://host:8080 --token $TOKEN\n  erebus audit myapp.erebus\n  erebus doctor\n  erebus scan .\n  erebus serve agent.erebus --port 8080\n  erebus chat agent.erebus\n  erebus completion bash >> ~/.bashrc\n  erebus completion zsh >> ~/.zshrc\n  erebus completion fish > ~/.config/fish/completions/erebus.fish\n\nDocumentation: https://github.com/Tednoob17/erebus\nReport bugs: https://github.com/Tednoob17/erebus/issues\n\nUninstall: rm $(which erebus) && rm -rf ~/.cache/erebus ~/.local/share/erebus"
+    long_about = "erebus is the proof layer for AI execution: it runs an agent from a single sandboxed binary and leaves a signed, hash-chained, externally anchored receipt of every run and every inference call — verifiable offline with erebus or stock cosign.\n\nSupported runtimes: Python and native binaries.\n\nExamples:\n  erebus build ./myapp -o myapp.erebus\n  erebus run myapp.erebus\n  erebus inspect myapp.erebus\n  erebus keygen\n  erebus sign myapp.erebus --key ~/.erebus/keys/*.key\n  erebus verify myapp.erebus\n  erebus attest myapp.erebus --key ~/.erebus/keys/*.key --push\n  erebus verify-attest myapp.erebus.attest --proof --strict\n  erebus evidence export myapp.erebus --log-key $REG -o evidence.zip\n  erebus verify-evidence evidence.zip --bundle myapp.erebus\n  erebus enroll --registry http://host:8080 --token-file token\n  erebus audit myapp.erebus\n  erebus doctor\n  erebus scan .\n  erebus serve agent.erebus --port 8080\n  erebus chat agent.erebus\n  erebus completion bash >> ~/.bashrc\n  erebus completion zsh >> ~/.zshrc\n  erebus completion fish > ~/.config/fish/completions/erebus.fish\n\nDocumentation: https://github.com/Tednoob17/erebus\nReport bugs: https://github.com/Tednoob17/erebus/issues\n\nUninstall: rm $(which erebus) && rm -rf ~/.cache/erebus ~/.local/share/erebus"
 )]
 struct Cli {
     /// Enable verbose output
@@ -101,7 +101,7 @@ enum Commands {
     /// Query your execution attestation trail from a registry
     ///
     /// Examples:
-    ///   erebus attest-history --registry <http://host:8080> --token "$TOKEN"
+    ///   erebus attest-history --registry <http://host:8080> --token-file token
     ///   erebus attest-history --query 'bundle=sha256:abc…,until=2026-09-30'
     AttestHistory(commands::attest_history::AttestHistoryArgs),
 
@@ -112,7 +112,7 @@ enum Commands {
     ///
     /// Examples:
     ///   erebus enroll
-    ///   erebus enroll --registry <http://host:8080> --token "$TOKEN"
+    ///   erebus enroll --registry <http://host:8080> --token-file token
     Enroll(commands::enroll::EnrollArgs),
 
     /// Local trail witness for disconnected anchoring (DDIL)
@@ -161,8 +161,8 @@ enum Commands {
     /// Manage billing: check tier or start a Stripe Checkout
     ///
     /// Examples:
-    ///   erebus billing status --registry <https://registry.erebus.io> --token <token>
-    ///   erebus billing checkout --registry <https://registry.erebus.io> --plan pro --token <token>
+    ///   erebus billing status --registry <https://registry.erebus.io> --token-file token
+    ///   erebus billing checkout --registry <https://registry.erebus.io> --plan pro --token-file token
     Billing(commands::billing::BillingArgs),
 
     /// Manage artifact lifecycle state (quarantine / promote / revoke)
@@ -180,15 +180,15 @@ enum Commands {
     /// Export or import registry data for air-gapped sync
     ///
     /// Examples:
-    ///   erebus mirror export --dir /var/lib/erebus-registry -o backup.mirror.enc --password <secret>
-    ///   erebus mirror import --input backup.mirror.enc --dir /var/lib/erebus-registry --password <secret>
+    ///   erebus mirror export --dir /var/lib/erebus-registry -o backup.mirror.enc --password-file secret
+    ///   erebus mirror import --input backup.mirror.enc --dir /var/lib/erebus-registry --password-file secret
     Mirror(commands::mirror::MirrorArgs),
 
     /// Replicate registry data from a leader (incremental or full sync)
     ///
     /// Examples:
     ///   erebus replicate full --leader `<https://registry.example.com>` --dir /var/lib/erebus-registry
-    ///   erebus replicate pull --leader `<https://registry.example.com>` --dir /var/lib/erebus-registry --token <token>
+    ///   erebus replicate pull --leader `<https://registry.example.com>` --dir /var/lib/erebus-registry --token-file token
     Replicate(commands::replicate::ReplicateArgs),
 
     /// Verify a .erebus file's signature
