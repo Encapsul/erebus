@@ -11,10 +11,12 @@ name: Release
 #   erebus_0.5.0_darwin_amd64.tar.gz    (erebus + erebus-stub + erebus-crypto)
 #   erebus_0.5.0_darwin_arm64.tar.gz    (erebus + erebus-stub + erebus-crypto)
 #   erebus_0.5.0_windows_amd64.tar.gz   (erebus + erebus-stub + erebus-crypto)
-#   erebus_0.5.0_<os>_<arch>.tar.gz.sha256   (one sidecar per archive, for `erebus upgrade`)
-#   checksums.txt
+#   checksums.txt                       (one digest file for every archive)
 #
-# Consumers of this naming: scripts/install.sh and erebus-cli/src/commands/upgrade.rs.
+# One archive per built architecture. GitHub also attaches the tag's source
+# zip and tarball; those are not packages. Consumers of this naming:
+# scripts/install.sh, erebus upgrade, and the stub download in
+# erebus-cli/src/commands/build/release_stub.rs.
 #
 # Strategy:
 #   - All targets cross-compiled from ubuntu with cargo-zigbuild (zig C
@@ -273,14 +275,13 @@ jobs:
           pattern: "*"
           merge-multiple: true
 
-      # checksums.txt for humans and install.sh; one <archive>.sha256 sidecar
-      # per archive for `erebus upgrade` (fetches the digest before the
-      # download and fails closed).
+      # One checksums.txt for every archive. install.sh, `erebus upgrade`,
+      # and the stub download all read it and fail closed before writing
+      # a package whose digest does not match.
       - name: Generate checksums
         run: |
           cd dist
           sha256sum erebus_*.tar.gz > checksums.txt
-          for f in erebus_*.tar.gz; do sha256sum "$f" > "$f.sha256"; done
           cat checksums.txt
 
       - name: List artifacts
@@ -310,13 +311,13 @@ jobs:
             gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
               --title "erebus $GITHUB_REF_NAME" --notes-file notes.md
             gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-              dist/erebus_*.tar.gz dist/erebus_*.tar.gz.sha256 dist/checksums.txt --clobber
+              dist/erebus_*.tar.gz dist/checksums.txt --clobber
           else
             gh release create "$GITHUB_REF_NAME" \
               --repo "$GITHUB_REPOSITORY" \
               --title "erebus $GITHUB_REF_NAME" \
               --notes-file notes.md \
-              dist/erebus_*.tar.gz dist/erebus_*.tar.gz.sha256 dist/checksums.txt
+              dist/erebus_*.tar.gz dist/checksums.txt
           fi
 
   # ── QEMU boot test for linux-aarch64 ─────────────────────────────────

@@ -67,8 +67,11 @@ pub fn run(args: UpgradeArgs) -> Result<()> {
 
     // Fetch the expected checksum BEFORE downloading and fail closed: a
     // release whose integrity cannot be verified is never installed.
-    let checksum_url = format!("{url}.sha256");
-    let expected = fetch_checksum(&checksum_url)
+    // The digest lives in the release's single checksums.txt, next to the
+    // archive, not in a per-file .sha256 sidecar.
+    let checksum_url =
+        format!("https://github.com/Tednoob17/erebus/releases/download/{tag}/checksums.txt");
+    let expected = fetch_asset_checksum(&checksum_url, &asset)
         .context("failed to fetch release checksum; refusing an unverified upgrade")?;
     if verbose() {
         eprintln!("[erebus] expected checksum {expected}");
@@ -276,7 +279,7 @@ fn download_file(url: &str, dest: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn fetch_checksum(url: &str) -> Result<String> {
+fn fetch_asset_checksum(url: &str, asset: &str) -> Result<String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -284,12 +287,22 @@ fn fetch_checksum(url: &str) -> Result<String> {
 
     let resp = client.get(url).send().context("failed to fetch checksum")?;
     let text = resp.text().context("failed to read checksum")?;
-    let hash = text
-        .split_whitespace()
-        .next()
-        .context("empty checksum")?
-        .to_string();
-    Ok(hash)
+    checksum_of(&text, asset)
+}
+
+/// SHA-256 for `asset` in a `sha256sum` checksums.txt. A blank line is skipped
+/// so it does not hide a later match.
+fn checksum_of(text: &str, asset: &str) -> Result<String> {
+    for line in text.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(hash) = fields.next() else {
+            continue;
+        };
+        if fields.any(|name| name.trim_start_matches('*') == asset) {
+            return Ok(hash.to_string());
+        }
+    }
+    anyhow::bail!("no checksum for {asset} in checksums.txt")
 }
 
 fn sha256_file(path: &PathBuf) -> Result<String> {
@@ -351,6 +364,17 @@ fn verbose() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checksum_of_picks_the_archive_line() {
+        let text =
+            "\nabc  erebus_0.6.1_linux_amd64.tar.gz\ndef *erebus_0.6.1_darwin_arm64.tar.gz\n";
+        assert_eq!(
+            checksum_of(text, "erebus_0.6.1_darwin_arm64.tar.gz").unwrap(),
+            "def"
+        );
+        assert!(checksum_of(text, "missing.tar.gz").is_err());
+    }
 
     #[test]
     fn test_detect_platform_matches_release_naming() {
