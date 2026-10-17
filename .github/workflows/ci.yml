@@ -131,7 +131,7 @@ jobs:
       # `fetch failed` / missing build.zig.zon after a successful install.
       - name: Install zig + cargo-zigbuild
         continue-on-error: true
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        uses: mlugg/setup-zig@dce8e20abe7bd36f8b8a5548aa5ea2490dd2b020 # node24 (parent v2.2.1)
       - name: Install cargo-zigbuild
         run: cargo install cargo-zigbuild --locked
 
@@ -171,7 +171,7 @@ jobs:
       # (seen on aarch64-apple-darwin with every artifact already verified).
       - name: Install zig + cargo-zigbuild
         continue-on-error: true
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        uses: mlugg/setup-zig@dce8e20abe7bd36f8b8a5548aa5ea2490dd2b020 # node24 (parent v2.2.1)
       - name: Install cargo-zigbuild
         run: cargo install cargo-zigbuild --locked
 
@@ -263,8 +263,6 @@ jobs:
   windows-sandbox:
     name: Windows confinement
     runs-on: windows-latest
-    env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}\erebus-target
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -273,5 +271,9 @@ jobs:
         with:
           toolchain: stable
 
+      # runner.temp is not a legal context on the job env map, and GitHub
+      # rejects the whole workflow before any job starts. The step env is.
       - name: Kill-on-close and write jail
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}\erebus-target
         run: cargo test -p erebus-stub --bin erebus-stub sandbox_kills_child_and_blocks_outside_write -- --nocapture

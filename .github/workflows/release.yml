@@ -77,7 +77,7 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install zig (musl cross C compiler)
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        uses: mlugg/setup-zig@dce8e20abe7bd36f8b8a5548aa5ea2490dd2b020 # node24 (parent v2.2.1)
       - name: Install cargo-zigbuild
         run: cargo install cargo-zigbuild --locked
 
@@ -125,7 +125,7 @@ jobs:
         with:
           toolchain: stable
           targets: x86_64-apple-darwin
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+      - uses: mlugg/setup-zig@dce8e20abe7bd36f8b8a5548aa5ea2490dd2b020 # node24 (parent v2.2.1)
       - name: Install cargo-zigbuild
         run: cargo install cargo-zigbuild --locked
       - name: Download macOS SDK
@@ -175,7 +175,7 @@ jobs:
         with:
           toolchain: stable
           targets: aarch64-apple-darwin
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+      - uses: mlugg/setup-zig@dce8e20abe7bd36f8b8a5548aa5ea2490dd2b020 # node24 (parent v2.2.1)
       - name: Install cargo-zigbuild
         run: cargo install cargo-zigbuild --locked
       - name: Download macOS SDK
@@ -230,7 +230,7 @@ jobs:
         with:
           toolchain: stable
           targets: x86_64-pc-windows-gnu
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+      - uses: mlugg/setup-zig@dce8e20abe7bd36f8b8a5548aa5ea2490dd2b020 # node24 (parent v2.2.1)
       - name: Install cargo-zigbuild
         run: cargo install cargo-zigbuild --locked
 
@@ -332,7 +332,7 @@ jobs:
           toolchain: stable
           targets: aarch64-unknown-linux-musl
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+      - uses: mlugg/setup-zig@dce8e20abe7bd36f8b8a5548aa5ea2490dd2b020 # node24 (parent v2.2.1)
       - name: Install cargo-zigbuild
         run: cargo install cargo-zigbuild --locked
       - name: Install QEMU
