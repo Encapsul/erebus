@@ -4,6 +4,18 @@ All notable changes to erebus are documented here.
 
 ## [Unreleased]
 
+## [0.6.2] — 2026-10-17
+
+### Changed
+
+- Registry bearer comes from `--token-file` or `ERE_TOKEN`. A `--token` flag
+  would show the secret in `ps` and in shell history.
+- The transparency log timestamps the checkpoint after the publish response,
+  so a slow RFC 3161 server no longer holds `POST /attestations`.
+- An installed CLI with no local `erebus-stub` downloads the matching stub
+  from the GitHub release and checks it against `checksums.txt`.
+- A release uploads one archive per built architecture plus `checksums.txt`.
+
 ### Added (registry)
 
 - `scripts/erebus_registry/`: the registry's proof core (Ed25519, Merkle,
