@@ -542,8 +542,9 @@ fn sid_string(sid: *mut c_void) -> io::Result<String> {
         }
     }
     let text = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(raw, len) });
-    // SAFETY: `raw` was allocated by ConvertSidToStringSidW.
-    unsafe { LocalFree(raw) };
+    // SAFETY: `raw` was allocated by ConvertSidToStringSidW. LocalFree takes
+    // that allocation as an untyped pointer.
+    unsafe { LocalFree(raw.cast::<c_void>()) };
     Ok(text)
 }
 

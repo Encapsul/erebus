@@ -4,7 +4,12 @@ All notable changes to erebus are documented here.
 
 ## [Unreleased]
 
-## [0.6.2] — 2026-10-17
+## [0.6.3] — 2026-10-17
+
+### Fixed
+
+- Windows release build: `LocalFree` receives the SID string pointer as an
+  untyped allocation, so `erebus-stub` compiles for `x86_64-pc-windows-gnu`.
 
 ### Changed
 
