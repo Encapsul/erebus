@@ -5,7 +5,7 @@ Package any app into a single self-extracting `.erebus` binary directly in your 
 ## Quick Start
 
 ```yaml
-- uses: Tednoob17/erebus/.github/actions/erebus-build@main
+- uses: Encapsul/erebus/.github/actions/erebus-build@main
   with:
     app-path: '.'
 
@@ -26,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: Tednoob17/erebus/.github/actions/erebus-build@main
+      - uses: Encapsul/erebus/.github/actions/erebus-build@main
         with:
           app-path: '.'
           output: 'my-python-app.erebus'
@@ -46,7 +46,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: Tednoob17/erebus/.github/actions/erebus-build@main
+      - uses: Encapsul/erebus/.github/actions/erebus-build@main
         with:
           app-path: '.'
           runtime: 'node'
@@ -76,7 +76,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: Tednoob17/erebus/.github/actions/erebus-build@main
+      - uses: Encapsul/erebus/.github/actions/erebus-build@main
         with:
           app-path: '.'
           target: ${{ matrix.target }}
@@ -91,7 +91,7 @@ jobs:
 ### With extra files
 
 ```yaml
-- uses: Tednoob17/erebus/.github/actions/erebus-build@main
+- uses: Encapsul/erebus/.github/actions/erebus-build@main
   with:
     app-path: '.'
     include: |
@@ -104,7 +104,7 @@ jobs:
 ### Specific version
 
 ```yaml
-- uses: Tednoob17/erebus/.github/actions/erebus-build@main
+- uses: Encapsul/erebus/.github/actions/erebus-build@main
   with:
     app-path: '.'
     erebus-version: 'v0.5.0'
@@ -123,7 +123,7 @@ jobs:
 | `include` | Extra files/dirs to include (newline-separated) | — |
 | `output` | Output binary path | `app.erebus` |
 | `erebus-version` | erebus version to install | `latest` |
-| `erebus-repo` | GitHub repo to download erebus from | `Tednoob17/erebus` |
+| `erebus-repo` | GitHub repo to download erebus from | `Encapsul/erebus` |
 | `build-args` | Extra arguments to pass to erebus build | — |
 
 ## Outputs

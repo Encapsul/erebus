@@ -1,6 +1,6 @@
 # Roadmap
 
-> **Source of truth:** [`ROADMAP.md`](https://github.com/Tednoob17/erebus/blob/main/ROADMAP.md)
+> **Source of truth:** [`ROADMAP.md`](https://github.com/Encapsul/erebus/blob/main/ROADMAP.md)
 > at the repository root: product state, audit findings, priorities and
 > business model. This page is a summary and may lag behind it.
 
@@ -26,7 +26,7 @@ A change to a frozen surface must name the P0/P1 item it unblocks.
 1. **T1** — the whole proof chain re-proven in CI on every commit. Done.
 2. **T2** — internal pilot: a real agent behind `serve --attest-key --push`,
    several enrolled machines, a public TSA-anchored registry, zero
-   verification failures. Running.
+   verification failures. Not done.
 3. **T3** — a design partner in the target segments (defense /
    administration, industrial edge).
 4. **T4** — a third party verifies a trail with only public keys and

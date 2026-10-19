@@ -46,6 +46,7 @@
 
 - [Changelog](./CHANGELOG.md)
 - [Roadmap](./roadmap.md)
+- [Pricing](./pricing.md)
 - [Security](./security.md)
 
 # Contributing

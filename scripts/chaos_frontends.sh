@@ -16,6 +16,8 @@ set -uo pipefail
 
 ERE="${1:-./target/release/erebus}"
 HERE=$(cd "$(dirname "$0")" && pwd)
+# shellcheck disable=SC1091
+. "$HERE/host_tools.sh"
 WORK=$(mktemp -d /tmp/erebus-chaos-frontends.XXXXXX)
 
 REG_PORT=$(python3 -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print(s.getsockname()[1]);s.close()")
@@ -168,7 +170,7 @@ code=$(http_code "http://127.0.0.1:$OCI_PORT/v2/tiny/tags/list")
 check "oci tags list" "200" "$code"
 
 SHA=$(sha256sum "$WORK/tiny.erebus" | cut -d' ' -f1)
-SIZE=$(stat -c%s "$WORK/tiny.erebus")
+SIZE=$(file_bytes "$WORK/tiny.erebus")
 printf '{"operation":"download","objects":[{"oid":"sha256:%s","size":%d}]}' "$SHA" "$SIZE" > "$WORK/lfs_req.json"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
   -H "Authorization: Bearer $TOKEN" \

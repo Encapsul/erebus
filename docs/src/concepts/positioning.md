@@ -52,5 +52,5 @@ possible on any Linux host, without a daemon or root.
 ## Business model
 
 MIT client and server, forever. Paid: the hosted, anchored proof trail,
-fleet features and air-gapped enterprise support. Details in the
-[ROADMAP](https://github.com/Tednoob17/erebus/blob/main/ROADMAP.md) §6.
+fleet features and air-gapped enterprise support. The tiers are on the
+[pricing](../pricing.md) page.

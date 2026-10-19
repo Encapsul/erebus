@@ -1,13 +1,13 @@
 # erebus
 
-[![CI](https://img.shields.io/github/actions/workflow/status/Tednoob17/erebus/ci.yml?branch=main&label=build)](https://github.com/Tednoob17/erebus/actions/workflows/ci.yml)
-[![Proof chain](https://img.shields.io/github/actions/workflow/status/Tednoob17/erebus/proof.yml?branch=main&label=proof%20chain)](https://github.com/Tednoob17/erebus/actions/workflows/proof.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/Encapsul/erebus/ci.yml?branch=main&label=build)](https://github.com/Encapsul/erebus/actions/workflows/ci.yml)
+[![Proof chain](https://img.shields.io/github/actions/workflow/status/Encapsul/erebus/proof.yml?branch=main&label=proof%20chain)](https://github.com/Encapsul/erebus/actions/workflows/proof.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.6.3-green.svg)](https://github.com/Encapsul/erebus/releases)
 [![Attestation](https://img.shields.io/badge/receipts-DSSE%20%2B%20in--toto%20%2B%20cosign-blueviolet.svg)](docs/src/spec/attestation.md)
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)]()
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Tednoob17/erebus/pulls)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Encapsul/erebus/pulls)
 
 **erebus is the launcher that emits a signed, externally anchored receipt of
 every execution, verifiable offline with `erebus` or stock `cosign`.**
@@ -17,18 +17,35 @@ trail was not rewritten. `verify-attest --response-body` checks those bytes
 and re-derived tool calls. It does not prove the model computed them or that
 the answer is right.
 
+```bash
+cosign verify-blob-attestation \
+  --key examples/verify/operator.pem \
+  --signature examples/verify/agent.dsse.json \
+  --type https://erebus.dev/attestation/execution/v2 \
+  --insecure-ignore-tlog examples/verify/agent.erebus
+#  Verified OK
+```
+
+[`examples/verify/operator.pem`](examples/verify/operator.pem) is the public
+key. [`examples/verify/agent.dsse.json`](examples/verify/agent.dsse.json) is
+the envelope for [`examples/verify/agent.erebus`](examples/verify/agent.erebus).
+`scripts/yc_demo.sh` emits the same envelope on a Linux host (stub, local
+registry, cosign). The command checks the signature over this bundle; it does
+not check that a model computed the output.
+
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Encapsul/erebus/main/scripts/install.sh | bash
+erebus doctor
+```
+
+---
+
 Signed at the launcher — the only point the operator controls — the receipt
 names the exact bundle and weights, the enrolled machine, and a Merkle
 transparency log time (RFC 3161). Open-source MIT client and server; the paid
 product is the hosted, anchored proof trail.
-
-```bash
-ERE_ATTEST_KEY=ops.key ./agent.erebus --task nightly     # runs the agent → agent.erebus.attest
-erebus verify-attest agent.erebus.attest --bundle agent.erebus --strict --proof
-#  OK: attestation verified          format: spec 2.0 (DSSE envelope)
-#  OK: machine sha256:… — enrolled by ops-team at https://registry
-#  OK: transparency log — leaf #41 of 42 … anchor: RFC 3161 token
-```
 
 ## What an auditor gets
 
@@ -106,60 +123,8 @@ What a receipt proves, layer by layer ([spec](docs/src/spec/attestation.md)):
 Every value a verifier prints is read from the **signed** statement, never from
 the human-readable copies. Legacy 1.x receipts stay verifiable.
 
-### What a receipt proves — and what it does not
-
-A receipt is a **flight recorder for AI agents**: it proves this version ran,
-on this machine, at this time, and that the trail was not rewritten.
-`verify-attest --response-body` checks those bytes and re-derived tool calls.
-It does not prove the model computed them or that the answer is right.
-
-It does **not** prove the computation was faithful (`output = f(input,
-weights)` needs a TEE or zkML — roadmap option, not a requirement anyone has),
-nor that the agent did the *right* thing (that is evaluation, before
-deployment), nor the plaintext of inputs and outputs (digests only; the
-operator keeps the data and the digest proves it was not altered). Mapping
-receipts to EU AI Act record-keeping, SOC 2 or ISO 42001 stays with your
-compliance team; erebus gives that team evidence instead of screenshots.
-
-This boundary is the product, not a shortfall: Certificate Transparency does
-not prove a certificate is legitimate, Sigstore does not prove code is
-bug-free, a flight recorder does not prevent the crash — each made the record
-undeniable, and that changed the industry. Regulators ask for exactly this
-(record-keeping and traceability), not for proofs of correctness. Full
-reasoning: [What erebus proves — and what it does not](docs/src/concepts/proof.md).
-
-## Who pays, and for what
-
-Client **and** server are MIT, forever. Anyone can run their own registry and
-verify anything offline. What you pay for is the **hosted, anchored history**:
-
-| Tier | Includes |
-|---|---|
-| Free | public packages, local receipts, self-hosted registry |
-| Pro · $29/mo | private packages, hosted transparency log, anchored checkpoints |
-| Team · $99/mo | + RBAC, audit log, evidence packs, webhooks |
-| Enterprise · $24k/yr | air-gapped mirror + offline verifier, SSO, SLA, compliance reports |
-| Enterprise+ · $50/node/yr | per-machine identity at fleet scale, fleet dashboard, full history |
-
-Who it is for: teams that must show an auditor which version ran, on which
-machine, at what time — defense and public administration (air-gapped by
-regulation), industrial edge (kiosks, factories, vehicles), AI startups
-selling into regulated buyers. The buyer is usually the compliance or security
-function; the user is the platform team that ships the agent. Not for us:
-hosting inference, paywalling the client, healthcare (for now).
-
-Why this is not a feature of your observability or agent platform: a tool the
-operator runs cannot, by construction, produce evidence the operator does not
-control. Traces in Datadog, LangSmith or an in-house store answer "what
-happened?" *to the operator*; a receipt anchored in a neutral, externally
-timestamped log answers it *to the auditor*. The launcher is simply the one
-point the operator cannot bypass to get that signature.
-
-Why this is defensible while being open source: a transparency log is worth
-its **accumulated, externally timestamped history**. A fork can copy the code;
-it cannot re-create three years of anchored checkpoints, and a customer's
-auditors already trust the log key their receipts point at. Same dynamic as
-Certificate Transparency and Sigstore's Rekor.
+The boundary is [What erebus proves — and what it does not](docs/src/concepts/proof.md).
+Pricing for the hosted trail is [in the book](docs/src/pricing.md).
 
 ## Status — what the CI proves, nothing more
 
@@ -179,9 +144,7 @@ chaos harnesses) plus the transparency-log battery and the extreme chaos
 battery (native C agent, malformed inputs, 12 concurrent agents). Green means
 every one of those checks passed *today*, not once on a laptop.
 
-**No production users yet. T2 is not complete.** Reproduce a run with the
-[`scripts/pilot`](scripts/pilot/README.md) harness. Cite only the counters
-[ROADMAP §7](ROADMAP.md#7-positioning-and-traction-plan) allows.
+**No production customers. T2 is not complete.**
 
 ---
 
@@ -399,7 +362,7 @@ registry/pull/serve).
 ## Build from source
 
 ```bash
-git clone https://github.com/Tednoob17/erebus.git && cd erebus
+git clone https://github.com/Encapsul/erebus.git && cd erebus
 cargo build --release          # CLI at target/release/erebus
 cargo test --workspace         # 650+ tests (+ scripts/test_transparency_log.py, 49 checks)
 ```

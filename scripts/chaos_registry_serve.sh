@@ -16,6 +16,8 @@ set -uo pipefail
 
 ERE="${1:-./target/release/erebus}"
 HERE=$(cd "$(dirname "$0")" && pwd)
+# shellcheck disable=SC1091
+. "$HERE/host_tools.sh"
 WORK=$(mktemp -d /tmp/erebus-chaos2.XXXXXX)
 REG_PORT=$(python3 -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print(s.getsockname()[1]);s.close()")
 STATIC_PORT=$(python3 -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print(s.getsockname()[1]);s.close()")
@@ -34,8 +36,14 @@ expect_fail() { # command must exit non-zero
 # bound forever. Works whether the shell gives each job its own process group
 # (job control on) or all jobs share the harness pgrp (job control off).
 desc_kill() {
-  local pid=$1 c
-  for c in $(ps -o pid= --ppid "$pid" 2>/dev/null); do desc_kill "$c"; done
+  local pid=$1 c kids
+  # GNU ps has --ppid. macOS ps does not; pgrep -P lists the same children.
+  # Children first: a bare kill of `timeout` or `serve` orphans the engine,
+  # which keeps the port bound.
+  if ! kids=$(ps -o pid= --ppid "$pid" 2>/dev/null); then
+    kids=$(pgrep -P "$pid" 2>/dev/null || true)
+  fi
+  for c in $kids; do desc_kill "$c"; done
   kill -9 "$pid" 2>/dev/null || true
 }
 
@@ -88,7 +96,7 @@ if cmp -s "$WORK/tiny.erebus" "$WORK/pulled.erebus"; then
   check "pull roundtrip byte-identical" 0
 else
   check "pull roundtrip byte-identical" 1
-  echo "    [sizes] $(stat -c%s "$WORK/tiny.erebus" 2>/dev/null) vs $(stat -c%s "$WORK/pulled.erebus" 2>/dev/null)"
+  echo "    [sizes] $(file_bytes "$WORK/tiny.erebus" 2>/dev/null) vs $(file_bytes "$WORK/pulled.erebus" 2>/dev/null)"
   cmp "$WORK/tiny.erebus" "$WORK/pulled.erebus" 2>&1 | head -2 | sed 's/^/      /'
   mkdir -p /tmp/chaos-artifacts && cp "$WORK/tiny.erebus" "$WORK/pulled.erebus" /tmp/chaos-artifacts/ 2>/dev/null || true
 fi
@@ -103,7 +111,7 @@ echo "── [3/6] pull integrity against a lying static index"
 mkdir -p "$WORK/static/packages"
 head -c 100000 "$WORK/tiny.erebus" > "$WORK/static/packages/tiny.erebus"   # truncated!
 TRUNC_SHA=$(sha256sum "$WORK/static/packages/tiny.erebus" | cut -d' ' -f1)
-FULL_SIZE=$(stat -c%s "$WORK/tiny.erebus")
+FULL_SIZE=$(file_bytes "$WORK/tiny.erebus")
 cat > "$WORK/static/index.json" <<EOF
 {"packages":[{"name":"tiny","file":"tiny.erebus","sha256":"$TRUNC_SHA","size":$FULL_SIZE}]}
 EOF
@@ -113,7 +121,10 @@ rm -f "$WORK/lying.erebus"
 expect_fail timeout 60 env ERE_REGISTRY="http://127.0.0.1:$STATIC_PORT" "$ERE" pull tiny -o "$WORK/lying.erebus"
 [ ! -f "$WORK/lying.erebus" ]; check "size mismatch → download rejected, no artifact left" $?
 FAKE_SHA=$(printf "a%.0s" $(seq 1 64))
-sed -i "s/\"sha256\":\"$TRUNC_SHA\"/\"sha256\":\"$FAKE_SHA\"/" "$WORK/static/index.json"
+# GNU sed takes -i; BSD sed requires an empty backup suffix.
+if ! sed -i "s/\"sha256\":\"$TRUNC_SHA\"/\"sha256\":\"$FAKE_SHA\"/" "$WORK/static/index.json" 2>/dev/null; then
+  sed -i '' "s/\"sha256\":\"$TRUNC_SHA\"/\"sha256\":\"$FAKE_SHA\"/" "$WORK/static/index.json"
+fi
 rm -f "$WORK/lying.erebus"
 expect_fail timeout 60 env ERE_REGISTRY="http://127.0.0.1:$STATIC_PORT" "$ERE" pull tiny -o "$WORK/lying.erebus"
 [ ! -f "$WORK/lying.erebus" ]; check "sha mismatch → download rejected, no artifact left" $?

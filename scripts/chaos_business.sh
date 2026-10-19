@@ -14,6 +14,8 @@
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
+# shellcheck disable=SC1091
+. "$HERE/host_tools.sh"
 ERE="${1:-./target/release/erebus}"
 PY=/usr/bin/env python3
 WORK=$(mktemp -d /tmp/erebus-biz.XXXXXX)
@@ -31,7 +33,7 @@ printf 'print("biz")\n' > "$WORK/app/app.py"
 # The bundle embeds the host's Python runtime, so its size S varies by host.
 # The quota test in [3/7] needs Q in [3.5 S, 4.5 S) (see the comment there), so
 # derive it instead of hard-coding a size seen on one machine.
-SIZE=$(stat -c%s "$WORK/tiny.erebus")
+SIZE=$(file_bytes "$WORK/tiny.erebus")
 QUOTA_GB=$(python3 -c "print($SIZE * 4 / 1e9)")
 setsid python3 "$HERE/registry_server.py" --dir "$WORK/reg" --host 127.0.0.1 \
   --port "$PORT" --quota-gb "$QUOTA_GB" > "$WORK/reg.log" 2>&1 < /dev/null &

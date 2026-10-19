@@ -143,10 +143,11 @@ done
 # ── [4/6] cache hit ───────────────────────────────────────────────────
 echo "── [4/6] cache hit: second run of the same bundle"
 echo '{"values":[1,2]}' | ERE_TRUSTED_DIR="$WORK/trusted" "$WORK/py.erebus" >/dev/null 2>&1
-T0=$(date +%s%N)
+# BSD date has no %N. Milliseconds from Python, printed only.
+T0=$(python3 -c 'import time; print(int(time.time()*1000))')
 echo '{"values":[1,2]}' | ERE_TRUSTED_DIR="$WORK/trusted" "$WORK/py.erebus" >/dev/null 2>&1
-T1=$(date +%s%N)
-echo "  warm-start latency: $(( (T1 - T0) / 1000000 )) ms"
+T1=$(python3 -c 'import time; print(int(time.time()*1000))')
+echo "  warm-start latency: $((T1 - T0)) ms"
 echo '{"values":[1,2]}' | ERE_TRUSTED_DIR="$WORK/trusted" ERE_ATTEST_KEY="$KEY" ERE_ATTEST_OUT="$WORK/cachehit.attest" "$WORK/py.erebus" >/dev/null 2>&1
 RC=$?
 python3 -c "

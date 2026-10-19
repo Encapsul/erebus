@@ -38,7 +38,7 @@ inputs:
   erebus-repo:
     description: 'GitHub repo to download erebus from'
     required: false
-    default: 'Tednoob17/erebus'
+    default: 'Encapsul/erebus'
   build-args:
     description: 'Extra arguments to pass to erebus build'
     required: false

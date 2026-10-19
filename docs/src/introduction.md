@@ -74,14 +74,18 @@ Architecture and Guides sections and are not needed for the proof chain.
 
 ## Status
 
-The P0 proof chain is complete and re-proven in CI on every commit
-(`proof.yml`). P1 evidence export has shipped. T2 is not complete. See the
-[ROADMAP](https://github.com/Tednoob17/erebus/blob/main/ROADMAP.md).
+The P0 proof chain is replayed in CI on every commit (`proof.yml`). Evidence
+export exists. T2 is not done. There are no production customers.
+
+The receipt proves this version ran, on this machine, at this time, and the
+trail was not rewritten. `verify-attest --response-body` checks those bytes
+and re-derived tool calls. It does not prove the model computed them or that
+the answer is right.
 
 ## Get started
 
 ```bash
-git clone https://github.com/Tednoob17/erebus.git && cd erebus
+git clone https://github.com/Encapsul/erebus.git && cd erebus
 cargo build --release
 ./target/release/erebus doctor
 ```
