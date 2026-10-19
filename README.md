@@ -3,23 +3,24 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/Tednoob17/erebus/ci.yml?branch=main&label=build)](https://github.com/Tednoob17/erebus/actions/workflows/ci.yml)
 [![Proof chain](https://img.shields.io/github/actions/workflow/status/Tednoob17/erebus/proof.yml?branch=main&label=proof%20chain)](https://github.com/Tednoob17/erebus/actions/workflows/proof.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.6.3-green.svg)](https://github.com/Tednoob17/erebus/releases)
+[![Version](https://img.shields.io/badge/version-0.6.3-green.svg)](https://github.com/Encapsul/erebus/releases)
 [![Attestation](https://img.shields.io/badge/receipts-DSSE%20%2B%20in--toto%20%2B%20cosign-blueviolet.svg)](docs/src/spec/attestation.md)
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)]()
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Tednoob17/erebus/pulls)
 
-**Teams that deploy AI agents on machines they don't fully control — defense,
-public sector, industrial edge — cannot prove to an auditor what those agents
-actually ran. erebus is the launcher that emits a signed, externally anchored
-receipt of every execution, verifiable offline with `erebus` or stock `cosign`.**
+**erebus is the launcher that emits a signed, externally anchored receipt of
+every execution, verifiable offline with `erebus` or stock `cosign`.**
 
-Execution provenance for AI agents, the way Sigstore / SLSA / in-toto give
-build provenance for software: what ran (exact bundle and weights), on which
-enrolled machine, when (Merkle transparency log + RFC 3161 timestamp), with
-which inputs and outputs — signed at the only point the operator controls, the
-launcher. Open-source MIT client and server; the paid product is the hosted,
-anchored proof trail.
+The receipt proves this version ran, on this machine, at this time, and the
+trail was not rewritten. `verify-attest --response-body` checks those bytes
+and re-derived tool calls. It does not prove the model computed them or that
+the answer is right.
+
+Signed at the launcher — the only point the operator controls — the receipt
+names the exact bundle and weights, the enrolled machine, and a Merkle
+transparency log time (RFC 3161). Open-source MIT client and server; the paid
+product is the hosted, anchored proof trail.
 
 ```bash
 ERE_ATTEST_KEY=ops.key ./agent.erebus --task nightly     # runs the agent → agent.erebus.attest
@@ -107,11 +108,10 @@ the human-readable copies. Legacy 1.x receipts stay verifiable.
 
 ### What a receipt proves — and what it does not
 
-A receipt is a **flight recorder for AI agents**: it establishes *what* ran
-(exact code and weights), *where* (an enrolled, certified host), *when* (a
-time nobody can backdate), *with what and producing what* (input/output
-digests, exit code, one entry per inference call), and that the *record* was
-never edited. Non-repudiation of the execution, tamper evidence for the trail.
+A receipt is a **flight recorder for AI agents**: it proves this version ran,
+on this machine, at this time, and that the trail was not rewritten.
+`verify-attest --response-body` checks those bytes and re-derived tool calls.
+It does not prove the model computed them or that the answer is right.
 
 It does **not** prove the computation was faithful (`output = f(input,
 weights)` needs a TEE or zkML — roadmap option, not a requirement anyone has),
@@ -141,12 +141,12 @@ verify anything offline. What you pay for is the **hosted, anchored history**:
 | Enterprise · $24k/yr | air-gapped mirror + offline verifier, SSO, SLA, compliance reports |
 | Enterprise+ · $50/node/yr | per-machine identity at fleet scale, fleet dashboard, full history |
 
-First customers: teams that must **prove** agent behaviour to someone who does
-not trust them — defense and public administration (air-gapped by regulation),
-industrial edge (kiosks, factories, vehicles), AI startups selling into
-regulated buyers under the EU AI Act. The buyer is usually the compliance or
-security function; the user is the platform team that ships the agent. Not for
-us: hosting inference, paywalling the client, healthcare (for now).
+Who it is for: teams that must show an auditor which version ran, on which
+machine, at what time — defense and public administration (air-gapped by
+regulation), industrial edge (kiosks, factories, vehicles), AI startups
+selling into regulated buyers. The buyer is usually the compliance or security
+function; the user is the platform team that ships the agent. Not for us:
+hosting inference, paywalling the client, healthcare (for now).
 
 Why this is not a feature of your observability or agent platform: a tool the
 operator runs cannot, by construction, produce evidence the operator does not
@@ -179,14 +179,9 @@ chaos harnesses) plus the transparency-log battery and the extreme chaos
 battery (native C agent, malformed inputs, 12 concurrent agents). Green means
 every one of those checks passed *today*, not once on a laptop.
 
-**No production users yet.** The T2 internal pilot started 2026-09-29 with
-Baguettotron Q8 on 2 enrolled machines (Linux server, macOS laptop) against a
-public TLS registry: every real inference receipt is strict-verified,
-published and RFC 3161-anchored (0 verification failures, ~14.2 kB of
-evidence per call). This is **not T2 complete**: the public
-gate remains ≥2 enrolled machines and ≥14 days. Reproduce the pilot with the
-[`scripts/pilot`](scripts/pilot/README.md) harness; plan and honest counters:
-[ROADMAP §7](ROADMAP.md#7-positioning-and-traction-plan).
+**No production users yet. T2 is not complete.** Reproduce a run with the
+[`scripts/pilot`](scripts/pilot/README.md) harness. Cite only the counters
+[ROADMAP §7](ROADMAP.md#7-positioning-and-traction-plan) allows.
 
 ---
 
@@ -200,7 +195,7 @@ binary that verifies itself before it runs.
 ### Quick start
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Tednoob17/erebus/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Encapsul/erebus/main/scripts/install.sh | bash
 erebus doctor
 
 cd your-app && erebus build . -o myapp.erebus

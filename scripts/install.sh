@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # install.sh — install or upgrade erebus
-# Usage: curl -fsSL https://raw.githubusercontent.com/Tednoob17/erebus/main/scripts/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/Encapsul/erebus/main/scripts/install.sh | bash
 set -euo pipefail
 
-REPO="Tednoob17/erebus"
+REPO="Encapsul/erebus"
 INSTALL_DIR="${EREBUS_INSTALL_DIR:-/usr/local/bin}"
 GITHUB="https://github.com/${REPO}"
 

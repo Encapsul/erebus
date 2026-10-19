@@ -2,10 +2,13 @@
 
 > **The proof layer for AI execution.**
 
-Teams that deploy AI agents on machines they don't fully control cannot
-prove to an auditor what those agents ran. **erebus** is the launcher that
-emits a signed, externally anchored receipt of every execution — verifiable
-offline with erebus or stock `cosign`.
+**erebus** is the launcher that emits a signed, externally anchored receipt
+of every execution — verifiable offline with erebus or stock `cosign`.
+
+The receipt proves this version ran, on this machine, at this time, and the
+trail was not rewritten. `verify-attest --response-body` checks those bytes
+and re-derived tool calls. It does not prove the model computed them or that
+the answer is right.
 
 Each receipt (`.erebus.attest`, [spec 2.0](./spec/attestation.md): DSSE
 envelope over an in-toto statement) states which exact code and weights ran,
@@ -72,8 +75,7 @@ Architecture and Guides sections and are not needed for the proof chain.
 ## Status
 
 The P0 proof chain is complete and re-proven in CI on every commit
-(`proof.yml`). P1: evidence export shipped; an internal multi-machine pilot
-with a public, TSA-anchored registry is running. See the
+(`proof.yml`). P1 evidence export has shipped. T2 is not complete. See the
 [ROADMAP](https://github.com/Tednoob17/erebus/blob/main/ROADMAP.md).
 
 ## Get started
