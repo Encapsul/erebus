@@ -45,6 +45,20 @@ FAILURES=0
 WORK=$(mktemp -d /tmp/yc-demo.XXXXXX)
 trap 'rm -rf "$WORK"' EXIT
 
+# GNU `timeout` is missing on stock macOS; prefer it, then Homebrew
+# `gtimeout`, else a perl alarm (coreutils-free).
+run_timeout() {
+    local secs="$1"
+    shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$secs" "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "$secs" "$@"
+    else
+        perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
+    fi
+}
+
 # ────────────────────────────────────────────────────────────
 step "1/11 BUILD — Create a real agent"
 # ────────────────────────────────────────────────────────────
@@ -182,7 +196,7 @@ show "  Input (piped to agent):"
 cat "$WORK/input.json" | sed 's/^/    /'
 
 set +e
-timeout 30 bash -c 'cat "$0" | "$1" > "$2" 2> "$3"' \
+run_timeout 30 bash -c 'cat "$0" | "$1" > "$2" 2> "$3"' \
     "$WORK/input.json" "$WORK/agent.erebus" "$WORK/output.json" "$WORK/stderr.log"
 RC=$?
 set -e
@@ -429,7 +443,7 @@ run_harness() { # run_harness <name> [<ere_bin>|iterations via ERE_BIN]
     local HPATH="$SCRIPTS/$harness"
     [ -f "$HPATH" ] || return
     printf "  %-35s" "$harness"
-    if timeout 420 bash "$HPATH" $hargs >"$WORK/harness-$harness.log" 2>&1; then
+    if run_timeout 420 bash "$HPATH" $hargs >"$WORK/harness-$harness.log" 2>&1; then
         echo -e "${GREEN}SURVIVED${NC}"
         CHAOS_PASS=$((CHAOS_PASS+1))
     else

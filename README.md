@@ -14,8 +14,9 @@ every execution, verifiable offline with `erebus` or stock `cosign`.**
 
 The receipt proves this version ran, on this machine, at this time, and the
 trail was not rewritten. `verify-attest --response-body` checks those bytes
-and re-derived tool calls. It does not prove the model computed them or that
-the answer is right.
+and re-derived tool calls; `--expected-output-hash` pins a deterministic
+tool's result digest. It does not prove the model computed them or that the
+answer is right.
 
 ```bash
 cosign verify-blob-attestation \
@@ -266,7 +267,7 @@ manifests verify fail-cold at boot.
 
 | Command | Description |
 |---------|-------------|
-| `erebus attest / verify-attest` | Spec 2.0 execution receipts (DSSE + in-toto, JCS); `--envelope` for cosign, `--push` / `--proof` for the transparency log, `--strict` for machine identity, `--chain` for trails |
+| `erebus attest / verify-attest` | Spec 2.0 execution receipts (DSSE + in-toto, JCS); `--envelope` for cosign, `--push` / `--proof` for the transparency log, `--strict` for machine identity, `--chain` for trails, `--response-body` / `--request-body` / `--expected-output-hash` for byte binding |
 | `erebus enroll` | Per-machine Ed25519 key + registry certificate; every receipt from this host is co-signed |
 | `erebus evidence export / verify-evidence` | One zip for the auditor: trail, proofs, TSA tokens, keys; verified offline |
 | `erebus attest-tool http / stdio` | Put an HTTP tool or MCP server behind a signing boundary; `verify-attest --chain … --tool-trail DIR --require-tool-execution` proves every model call was executed and its real result relayed |

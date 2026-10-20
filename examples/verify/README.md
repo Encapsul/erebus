@@ -49,3 +49,28 @@ erebus verify-attest receipt.json \
 
 Auditor zip path (full trail): `erebus evidence export …` then
 `erebus verify-evidence evidence.zip --bundle agent.erebus`.
+
+## Request / response body binding (`body.sh`)
+
+A served-call receipt plus the plaintext bodies an auditor was handed.
+`verify-attest --request-body` / `--response-body` re-hash those bytes and
+re-derive the signed tool fields. Forged bodies exit 2 (`TAMPERED`). This
+does not prove the model computed the answer — only that these bytes match
+the receipt.
+
+```bash
+./body.sh
+# fixtures: body/call.attest + request.json + response.json + operator.pub
+```
+
+## Golden output digest
+
+For a deterministic tool, pin the expected result hash:
+
+```bash
+erebus verify-attest tool.attest --expected-output-hash sha256:<hex>
+# mismatch → exit 2, TAMPERED: output_hash mismatch
+```
+
+`erebus attest-tool … --expected-output-hash` refuses to write a receipt when
+the live response differs. Same bound: bytes, not judgment.

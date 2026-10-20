@@ -7,8 +7,9 @@ of every execution — verifiable offline with erebus or stock `cosign`.
 
 The receipt proves this version ran, on this machine, at this time, and the
 trail was not rewritten. `verify-attest --response-body` checks those bytes
-and re-derived tool calls. It does not prove the model computed them or that
-the answer is right.
+and re-derived tool calls; `--expected-output-hash` pins a deterministic
+tool's result digest. It does not prove the model computed them or that the
+answer is right.
 
 Each receipt (`.erebus.attest`, [spec 2.0](./spec/attestation.md): DSSE
 envelope over an in-toto statement) states which exact code and weights ran,
@@ -79,8 +80,9 @@ export exists. T2 is not done. There are no production customers.
 
 The receipt proves this version ran, on this machine, at this time, and the
 trail was not rewritten. `verify-attest --response-body` checks those bytes
-and re-derived tool calls. It does not prove the model computed them or that
-the answer is right.
+and re-derived tool calls; `--expected-output-hash` pins a deterministic
+tool's result digest. It does not prove the model computed them or that the
+answer is right.
 
 ## Get started
 

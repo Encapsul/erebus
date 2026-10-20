@@ -4,6 +4,20 @@ All notable changes to erebus are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- `examples/verify/body.sh` (+ fixtures): offline smoke for
+  `verify-attest --request-body` / `--response-body` (honest accept, forged
+  refuse). Documents `--expected-output-hash` next to the offline pack.
+- `attest-tool http --expected-output-hash`: e2e that a wrong golden digest
+  writes no receipt; `verify-attest --expected-output-hash` mismatch is
+  exit 2.
+
+### Fixed
+
+- `scripts/yc_demo.sh` runs on stock macOS without GNU `timeout` (`gtimeout`
+  or perl alarm fallback).
+
 ## [0.6.3] — 2026-10-17
 
 ### Fixed

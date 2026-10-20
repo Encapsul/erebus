@@ -877,6 +877,17 @@ fn mcp_session(
 
 /// `attest-tool http` in front of the fake HTTP tool; one POST `body`.
 fn http_tool_session(dir: &Path, key: &Path, trail: &Path, body: &str) {
+    http_tool_session_with(dir, key, trail, body, None);
+}
+
+/// Like [`http_tool_session`], with an optional `--expected-output-hash`.
+fn http_tool_session_with(
+    dir: &Path,
+    key: &Path,
+    trail: &Path,
+    body: &str,
+    expected_output_hash: Option<&str>,
+) {
     let script = dir.join("http_tool.py");
     std::fs::write(&script, FAKE_HTTP_TOOL).unwrap();
     let (tool_port, port) = (free_port(), free_port());
@@ -896,7 +907,8 @@ fn http_tool_session(dir: &Path, key: &Path, trail: &Path, body: &str) {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    let boundary = Command::new(erebus_bin())
+    let mut boundary = Command::new(erebus_bin());
+    boundary
         .args(["attest-tool", "http", "--attest-key"])
         .arg(key)
         .arg("--attest-log")
@@ -904,9 +916,11 @@ fn http_tool_session(dir: &Path, key: &Path, trail: &Path, body: &str) {
         .args(["--listen", &format!("127.0.0.1:{port}")])
         .args(["--upstream", &format!("127.0.0.1:{tool_port}")])
         .env("ERE_MACHINE_DIR", dir.join("no-machine"))
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::inherit());
+    if let Some(digest) = expected_output_hash {
+        boundary.args(["--expected-output-hash", digest]);
+    }
+    let boundary = boundary.spawn().unwrap();
     let _boundary = Serve(boundary);
     let request = format!(
         "POST /send HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Type: application/json\r\n\
@@ -932,6 +946,66 @@ fn http_tool_session(dir: &Path, key: &Path, trail: &Path, body: &str) {
             _ => std::thread::sleep(Duration::from_millis(200)),
         }
     }
+}
+
+/// Golden digest on the tool boundary: a fixed HTTP tool returns `queued`;
+/// `--expected-output-hash` of that digest writes a receipt, a wrong digest
+/// refuses to write, and `verify-attest --expected-output-hash` mismatch is
+/// exit 2.
+#[test]
+fn attest_tool_http_expected_output_hash_refuses_mismatch() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("python3 missing, skipping");
+        return;
+    }
+    let dir = tempdir().unwrap();
+    let (key, trusted) = keygen(dir.path());
+    let want = erebus_core::attest::sha256_hex(b"queued");
+    let wrong = erebus_core::attest::sha256_hex(b"forged");
+
+    let bad_trail = dir.path().join("bad");
+    http_tool_session_with(
+        dir.path(),
+        &key,
+        &bad_trail,
+        r#"{"to":"ops@example.test"}"#,
+        Some(&wrong),
+    );
+    assert!(
+        trail_receipts(&bad_trail).is_empty(),
+        "mismatched golden digest must not write a tool receipt"
+    );
+
+    let ok_trail = dir.path().join("ok");
+    http_tool_session_with(
+        dir.path(),
+        &key,
+        &ok_trail,
+        r#"{"to":"ops@example.test"}"#,
+        Some(&want),
+    );
+    let receipts = trail_receipts(&ok_trail);
+    assert_eq!(
+        receipts.len(),
+        1,
+        "matching golden digest writes one receipt"
+    );
+
+    let out = verify_receipt(&receipts[0], &trusted, &["--expected-output-hash", &want]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("OK: output_hash matches expected"),
+        "{stderr}"
+    );
+
+    let out = verify_receipt(&receipts[0], &trusted, &["--expected-output-hash", &wrong]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("TAMPERED: output_hash mismatch"),
+        "{stderr}"
+    );
 }
 
 /// Spec 2.1 tool boundary end to end. The agent trail signs that the model

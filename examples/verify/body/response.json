@@ -1,0 +1,1 @@
+{"choices":[{"message":{"role":"assistant","content":"weather then mail done","tool_calls":[{"id":"call_w","type":"function","function":{"name":"get_weather","arguments":"{\"city\": \"Paris\"}"}},{"id":"call_e","type":"function","function":{"name":"send_email","arguments":"{\"to\": \"ops@example.test\"}"}}]}}]}

@@ -1,0 +1,191 @@
+{
+  "spec_version": "2.1",
+  "attestation_type": "erebus-execution",
+  "artifact": {
+    "bundle_hash": "sha256:378d4d57a482a99999c5ee191c0f01537a4a85a383d1b9e416b7bc2a37cec839",
+    "payload_hash": "sha256:378d4d57a482a99999c5ee191c0f01537a4a85a383d1b9e416b7bc2a37cec839",
+    "metadata_hash": "sha256:378d4d57a482a99999c5ee191c0f01537a4a85a383d1b9e416b7bc2a37cec839",
+    "format_version": 0,
+    "flags": [
+      "tool"
+    ]
+  },
+  "provenance": {
+    "builder": "erebus attest-tool 0.6.3",
+    "author": null,
+    "license": null,
+    "layers": []
+  },
+  "execution": {
+    "attested_at": "2026-10-20T11:31:39.000000000Z",
+    "machine_id_hash": "sha256:bc4d7fbb367b0c78dd34b8e7a5ab7f9d8747228f869846680d1ac6dbdb840f55",
+    "os": "macos",
+    "arch": "x86_64",
+    "input_hash": "sha256:4c0bf65a7838240913d0c9b9d2130d840fba4d3291e9b77b0c7b5d25bd99f610",
+    "output_hash": "sha256:115bdbe06de58e509c559d3772e8434cb0be5ab815440177d9564f8884580e01",
+    "exit_code": null,
+    "prev_attestation_hash": null,
+    "request": {
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "status": 200,
+      "tool_calls": [
+        {
+          "choice": 0,
+          "id": "call_w",
+          "name": "get_weather",
+          "arguments_hash": "sha256:2e7d8c497295e4f8ffbf85c5a040daebf2f6336299cb06e6aba164e74c7707d8",
+          "arguments_jcs_hash": "sha256:6e1e312d537bc71b5410b0599f5a508142149e13174c6ee0d1671658845bc67d"
+        },
+        {
+          "choice": 0,
+          "id": "call_e",
+          "name": "send_email",
+          "arguments_hash": "sha256:9e11d7742bf43754bbecf8493fd83b799336e220fa61294877ba2650f3c8be2f",
+          "arguments_jcs_hash": "sha256:8f45e169d55b2104eafdd385c569efe20392a27d6217e229e3e2d27b8c0cc8f2"
+        }
+      ],
+      "tools_offered": [
+        "get_weather",
+        "send_email"
+      ],
+      "tool_history": [
+        {
+          "choice": 0,
+          "id": "call_w",
+          "name": "get_weather",
+          "arguments_hash": "sha256:2e7d8c497295e4f8ffbf85c5a040daebf2f6336299cb06e6aba164e74c7707d8",
+          "arguments_jcs_hash": "sha256:6e1e312d537bc71b5410b0599f5a508142149e13174c6ee0d1671658845bc67d"
+        },
+        {
+          "choice": 0,
+          "id": "call_e",
+          "name": "send_email",
+          "arguments_hash": "sha256:9e11d7742bf43754bbecf8493fd83b799336e220fa61294877ba2650f3c8be2f",
+          "arguments_jcs_hash": "sha256:8f45e169d55b2104eafdd385c569efe20392a27d6217e229e3e2d27b8c0cc8f2"
+        }
+      ],
+      "tool_results": [
+        {
+          "id": "call_w",
+          "content_hash": "sha256:56dabe57ff64b1d94596d88b2750957f1920cfc74e16591d2d46226e25eb1552"
+        },
+        {
+          "id": "call_e",
+          "content_hash": "sha256:d36be6494248ee06ac18f38ea1119dfe4699fdcfcbbcc30a2e4f1ccbce68dfac"
+        }
+      ]
+    },
+    "rootfs_root": null,
+    "machine_id": null
+  },
+  "statement": {
+    "_type": "https://in-toto.io/Statement/v1",
+    "subject": [
+      {
+        "name": "bundle",
+        "digest": {
+          "sha256": "378d4d57a482a99999c5ee191c0f01537a4a85a383d1b9e416b7bc2a37cec839"
+        }
+      },
+      {
+        "name": "payload",
+        "digest": {
+          "sha256": "378d4d57a482a99999c5ee191c0f01537a4a85a383d1b9e416b7bc2a37cec839"
+        }
+      }
+    ],
+    "predicateType": "https://erebus.dev/attestation/execution/v2",
+    "predicate": {
+      "artifact": {
+        "flags": [
+          "tool"
+        ],
+        "format_version": 0,
+        "metadata_hash": "sha256:378d4d57a482a99999c5ee191c0f01537a4a85a383d1b9e416b7bc2a37cec839"
+      },
+      "author": null,
+      "builder": "erebus attest-tool 0.6.3",
+      "execution": {
+        "arch": "x86_64",
+        "attested_at": "2026-10-20T11:31:39.000000000Z",
+        "exit_code": null,
+        "input_hash": "sha256:4c0bf65a7838240913d0c9b9d2130d840fba4d3291e9b77b0c7b5d25bd99f610",
+        "machine_id": null,
+        "machine_id_hash": "sha256:bc4d7fbb367b0c78dd34b8e7a5ab7f9d8747228f869846680d1ac6dbdb840f55",
+        "os": "macos",
+        "output_hash": "sha256:115bdbe06de58e509c559d3772e8434cb0be5ab815440177d9564f8884580e01",
+        "prev_attestation_hash": null,
+        "request": {
+          "method": "POST",
+          "path": "/v1/chat/completions",
+          "status": 200,
+          "tool_calls": [
+            {
+              "arguments_hash": "sha256:2e7d8c497295e4f8ffbf85c5a040daebf2f6336299cb06e6aba164e74c7707d8",
+              "arguments_jcs_hash": "sha256:6e1e312d537bc71b5410b0599f5a508142149e13174c6ee0d1671658845bc67d",
+              "choice": 0,
+              "id": "call_w",
+              "name": "get_weather"
+            },
+            {
+              "arguments_hash": "sha256:9e11d7742bf43754bbecf8493fd83b799336e220fa61294877ba2650f3c8be2f",
+              "arguments_jcs_hash": "sha256:8f45e169d55b2104eafdd385c569efe20392a27d6217e229e3e2d27b8c0cc8f2",
+              "choice": 0,
+              "id": "call_e",
+              "name": "send_email"
+            }
+          ],
+          "tool_history": [
+            {
+              "arguments_hash": "sha256:2e7d8c497295e4f8ffbf85c5a040daebf2f6336299cb06e6aba164e74c7707d8",
+              "arguments_jcs_hash": "sha256:6e1e312d537bc71b5410b0599f5a508142149e13174c6ee0d1671658845bc67d",
+              "choice": 0,
+              "id": "call_w",
+              "name": "get_weather"
+            },
+            {
+              "arguments_hash": "sha256:9e11d7742bf43754bbecf8493fd83b799336e220fa61294877ba2650f3c8be2f",
+              "arguments_jcs_hash": "sha256:8f45e169d55b2104eafdd385c569efe20392a27d6217e229e3e2d27b8c0cc8f2",
+              "choice": 0,
+              "id": "call_e",
+              "name": "send_email"
+            }
+          ],
+          "tool_results": [
+            {
+              "content_hash": "sha256:56dabe57ff64b1d94596d88b2750957f1920cfc74e16591d2d46226e25eb1552",
+              "id": "call_w"
+            },
+            {
+              "content_hash": "sha256:d36be6494248ee06ac18f38ea1119dfe4699fdcfcbbcc30a2e4f1ccbce68dfac",
+              "id": "call_e"
+            }
+          ],
+          "tools_offered": [
+            "get_weather",
+            "send_email"
+          ]
+        },
+        "rootfs_root": null
+      },
+      "layers": [],
+      "license": null
+    }
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "key_fingerprint": "sha256:83127f95ff9804d222f0dc846378ebc4086725bc80bb775510e4954b64c0ad27",
+    "signature_hex": "15b301f77e1a2b53a6f43fabfc16b96cb5877ccd4396ed52cca45ebdb160943631a0bbb8da2291a15fca27d6b3460a935198b7b055a35dfd1b8cc2338a611301"
+  },
+  "envelope": {
+    "payloadType": "application/vnd.in-toto+json",
+    "payload": "eyJfdHlwZSI6Imh0dHBzOi8vaW4tdG90by5pby9TdGF0ZW1lbnQvdjEiLCJwcmVkaWNhdGUiOnsiYXJ0aWZhY3QiOnsiZmxhZ3MiOlsidG9vbCJdLCJmb3JtYXRfdmVyc2lvbiI6MCwibWV0YWRhdGFfaGFzaCI6InNoYTI1NjozNzhkNGQ1N2E0ODJhOTk5OTljNWVlMTkxYzBmMDE1MzdhNGE4NWEzODNkMWI5ZTQxNmI3YmMyYTM3Y2VjODM5In0sImF1dGhvciI6bnVsbCwiYnVpbGRlciI6ImVyZWJ1cyBhdHRlc3QtdG9vbCAwLjYuMyIsImV4ZWN1dGlvbiI6eyJhcmNoIjoieDg2XzY0IiwiYXR0ZXN0ZWRfYXQiOiIyMDI2LTEwLTIwVDExOjMxOjM5LjAwMDAwMDAwMFoiLCJleGl0X2NvZGUiOm51bGwsImlucHV0X2hhc2giOiJzaGEyNTY6NGMwYmY2NWE3ODM4MjQwOTEzZDBjOWI5ZDIxMzBkODQwZmJhNGQzMjkxZTliNzdiMGM3YjVkMjViZDk5ZjYxMCIsIm1hY2hpbmVfaWQiOm51bGwsIm1hY2hpbmVfaWRfaGFzaCI6InNoYTI1NjpiYzRkN2ZiYjM2N2IwYzc4ZGQzNGI4ZTdhNWFiN2Y5ZDg3NDcyMjhmODY5ODQ2NjgwZDFhYzZkYmRiODQwZjU1Iiwib3MiOiJtYWNvcyIsIm91dHB1dF9oYXNoIjoic2hhMjU2OjExNWJkYmUwNmRlNThlNTA5YzU1OWQzNzcyZTg0MzRjYjBiZTVhYjgxNTQ0MDE3N2Q5NTY0Zjg4ODQ1ODBlMDEiLCJwcmV2X2F0dGVzdGF0aW9uX2hhc2giOm51bGwsInJlcXVlc3QiOnsibWV0aG9kIjoiUE9TVCIsInBhdGgiOiIvdjEvY2hhdC9jb21wbGV0aW9ucyIsInN0YXR1cyI6MjAwLCJ0b29sX2NhbGxzIjpbeyJhcmd1bWVudHNfaGFzaCI6InNoYTI1NjoyZTdkOGM0OTcyOTVlNGY4ZmZiZjg1YzVhMDQwZGFlYmYyZjYzMzYyOTljYjA2ZTZhYmExNjRlNzRjNzcwN2Q4IiwiYXJndW1lbnRzX2pjc19oYXNoIjoic2hhMjU2OjZlMWUzMTJkNTM3YmM3MWI1NDEwYjA1OTlmNWE1MDgxNDIxNDllMTMxNzRjNmVlMGQxNjcxNjU4ODQ1YmM2N2QiLCJjaG9pY2UiOjAsImlkIjoiY2FsbF93IiwibmFtZSI6ImdldF93ZWF0aGVyIn0seyJhcmd1bWVudHNfaGFzaCI6InNoYTI1Njo5ZTExZDc3NDJiZjQzNzU0YmJlY2Y4NDkzZmQ4M2I3OTkzMzZlMjIwZmE2MTI5NDg3N2JhMjY1MGYzYzhiZTJmIiwiYXJndW1lbnRzX2pjc19oYXNoIjoic2hhMjU2OjhmNDVlMTY5ZDU1YjIxMDRlYWZkZDM4NWM1NjllZmUyMDM5MmEyN2Q2MjE3ZTIyOWUzZTJkMjdiOGMwY2M4ZjIiLCJjaG9pY2UiOjAsImlkIjoiY2FsbF9lIiwibmFtZSI6InNlbmRfZW1haWwifV0sInRvb2xfaGlzdG9yeSI6W3siYXJndW1lbnRzX2hhc2giOiJzaGEyNTY6MmU3ZDhjNDk3Mjk1ZTRmOGZmYmY4NWM1YTA0MGRhZWJmMmY2MzM2Mjk5Y2IwNmU2YWJhMTY0ZTc0Yzc3MDdkOCIsImFyZ3VtZW50c19qY3NfaGFzaCI6InNoYTI1Njo2ZTFlMzEyZDUzN2JjNzFiNTQxMGIwNTk5ZjVhNTA4MTQyMTQ5ZTEzMTc0YzZlZTBkMTY3MTY1ODg0NWJjNjdkIiwiY2hvaWNlIjowLCJpZCI6ImNhbGxfdyIsIm5hbWUiOiJnZXRfd2VhdGhlciJ9LHsiYXJndW1lbnRzX2hhc2giOiJzaGEyNTY6OWUxMWQ3NzQyYmY0Mzc1NGJiZWNmODQ5M2ZkODNiNzk5MzM2ZTIyMGZhNjEyOTQ4NzdiYTI2NTBmM2M4YmUyZiIsImFyZ3VtZW50c19qY3NfaGFzaCI6InNoYTI1Njo4ZjQ1ZTE2OWQ1NWIyMTA0ZWFmZGQzODVjNTY5ZWZlMjAzOTJhMjdkNjIxN2UyMjllM2UyZDI3YjhjMGNjOGYyIiwiY2hvaWNlIjowLCJpZCI6ImNhbGxfZSIsIm5hbWUiOiJzZW5kX2VtYWlsIn1dLCJ0b29sX3Jlc3VsdHMiOlt7ImNvbnRlbnRfaGFzaCI6InNoYTI1Njo1NmRhYmU1N2ZmNjRiMWQ5NDU5NmQ4OGIyNzUwOTU3ZjE5MjBjZmM3NGUxNjU5MWQyZDQ2MjI2ZTI1ZWIxNTUyIiwiaWQiOiJjYWxsX3cifSx7ImNvbnRlbnRfaGFzaCI6InNoYTI1NjpkMzZiZTY0OTQyNDhlZTA2YWMxOGYzOGVhMTExOWRmZTQ2OTlmZGNmY2JiY2MzMGEyZTRmMWNjYmNlNjhkZmFjIiwiaWQiOiJjYWxsX2UifV0sInRvb2xzX29mZmVyZWQiOlsiZ2V0X3dlYXRoZXIiLCJzZW5kX2VtYWlsIl19LCJyb290ZnNfcm9vdCI6bnVsbH0sImxheWVycyI6W10sImxpY2Vuc2UiOm51bGx9LCJwcmVkaWNhdGVUeXBlIjoiaHR0cHM6Ly9lcmVidXMuZGV2L2F0dGVzdGF0aW9uL2V4ZWN1dGlvbi92MiIsInN1YmplY3QiOlt7ImRpZ2VzdCI6eyJzaGEyNTYiOiIzNzhkNGQ1N2E0ODJhOTk5OTljNWVlMTkxYzBmMDE1MzdhNGE4NWEzODNkMWI5ZTQxNmI3YmMyYTM3Y2VjODM5In0sIm5hbWUiOiJidW5kbGUifSx7ImRpZ2VzdCI6eyJzaGEyNTYiOiIzNzhkNGQ1N2E0ODJhOTk5OTljNWVlMTkxYzBmMDE1MzdhNGE4NWEzODNkMWI5ZTQxNmI3YmMyYTM3Y2VjODM5In0sIm5hbWUiOiJwYXlsb2FkIn1dfQ==",
+    "signatures": [
+      {
+        "keyid": "sha256:83127f95ff9804d222f0dc846378ebc4086725bc80bb775510e4954b64c0ad27",
+        "sig": "FbMB934aK1Om9D+r/Ba5bLWHfM1Dlu1SzKRevbFglDYxoLu42iKRoV/KJ9azRgqTUZi3sFWjXf0bjMIzimETAQ=="
+      }
+    ]
+  }
+}
