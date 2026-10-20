@@ -73,7 +73,9 @@ args=(verify-attest "$RECEIPT" --trusted-dir "$trusted")
 if [[ -f "$proof" ]]; then
   args+=(--proof --proof-file "$proof")
 fi
-args+=("${EXTRA[@]}")
+if ((${#EXTRA[@]})); then
+  args+=("${EXTRA[@]}")
+fi
 
 echo "+ $EREBUS ${args[*]}"
 exec "$EREBUS" "${args[@]}"
