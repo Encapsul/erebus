@@ -66,6 +66,11 @@ pub struct VerifyAttestArgs {
     #[arg(long, value_name = "FILE", conflicts_with = "chain")]
     pub response_body: Option<PathBuf>,
 
+    /// Golden digest for deterministic tools: signed `output_hash` must equal
+    /// this (`sha256:<hex>` or bare 64-hex). Mismatch is TAMPERED.
+    #[arg(long, value_name = "DIGEST", conflicts_with = "chain")]
+    pub expected_output_hash: Option<String>,
+
     /// Request body of a served call: `METHOD path` + body must hash to the
     /// signed `input_hash` and re-derive the signed tool results and history
     #[arg(long, value_name = "FILE", conflicts_with = "chain")]
@@ -173,6 +178,13 @@ pub fn run(args: VerifyAttestArgs) -> Result<()> {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("--response-body needs a receipt path"))?;
         report["response_body"] = verify_response_body(file, body_path)?;
+    }
+    if let Some(want) = &args.expected_output_hash {
+        let file = args
+            .attest_file
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("--expected-output-hash needs a receipt path"))?;
+        report["expected_output_hash"] = verify_expected_output_hash(file, want)?;
     }
     if let Some(body_path) = &args.request_body {
         let file = args
@@ -318,6 +330,20 @@ fn verify_response_body(file: &Path, body_path: &Path) -> Result<serde_json::Val
         "file": body_path.display().to_string(),
         "verified": true,
         "tool_calls": calls.len(),
+    }))
+}
+
+/// `--expected-output-hash`: signed result digest equals the pinned golden.
+fn verify_expected_output_hash(file: &Path, expected: &str) -> Result<serde_json::Value> {
+    let data = std::fs::read_to_string(file)
+        .with_context(|| format!("failed to read {}", file.display()))?;
+    let attestation: Attestation = serde_json::from_str(&data)
+        .with_context(|| format!("failed to parse {}", file.display()))?;
+    // Propagate TAMPERED: verbatim so exit_code_for_error maps to 2.
+    erebus_core::attest::check_expected_output_hash(&attestation, expected)?;
+    Ok(serde_json::json!({
+        "expected": expected,
+        "verified": true,
     }))
 }
 
@@ -716,6 +742,12 @@ fn print_human(report: &serde_json::Value) {
             "OK: response body matches the signed digest and its {} tool call(s)",
             rb.get("tool_calls").and_then(|v| v.as_u64()).unwrap_or(0)
         );
+    }
+    if report
+        .get("expected_output_hash")
+        .is_some_and(|v| v.is_object())
+    {
+        eprintln!("OK: output_hash matches expected golden digest");
     }
     if let Some(rb) = report.get("request_body") {
         let n = |k: &str| rb.get(k).and_then(|v| v.as_u64()).unwrap_or(0);

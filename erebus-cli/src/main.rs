@@ -206,6 +206,7 @@ enum Commands {
     ///   erebus verify-attest agent.erebus.attest --proof --log-key <hex>      # transparency log
     ///   erebus verify-attest agent.erebus.attest --strict --registry-key <hex> # enrolled machine
     ///   erebus verify-attest agent.erebus.attest --approver-key <hex|file.pub>
+    ///   erebus verify-attest tool.attest --expected-output-hash sha256:<hex>
     VerifyAttest(commands::verify_attest::VerifyAttestArgs),
 
     /// Put a tool behind an attested boundary: one signed receipt per tool

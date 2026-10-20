@@ -71,6 +71,11 @@ pub struct Common {
     /// File containing the registry bearer token (`ERE_TOKEN` otherwise)
     #[arg(long)]
     pub token_file: Option<PathBuf>,
+
+    /// Golden digest for a deterministic tool: refuse to write a receipt when
+    /// the response hash differs (`sha256:<hex>` or bare 64-hex)
+    #[arg(long, value_name = "DIGEST")]
+    pub expected_output_hash: Option<String>,
 }
 
 #[derive(Args)]
@@ -128,7 +133,9 @@ fn tool_recorder(
     };
     let log = AttestationLog::open(&common.attest_log)
         .with_context(|| format!("cannot open trail {}", common.attest_log.display()))?;
-    let mut recorder = CallRecorder::new(template, key, log.clone()).with_mode(ProxyMode::Tool);
+    let mut recorder = CallRecorder::new(template, key, log.clone())
+        .with_mode(ProxyMode::Tool)
+        .with_expected_output_hash(common.expected_output_hash.clone());
     if common.push {
         let token = super::attest::resolve_token(common.token_file.as_deref())?;
         let registry = common

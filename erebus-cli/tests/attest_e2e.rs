@@ -395,3 +395,68 @@ fn approval_roundtrip_and_forged_signature_refused() {
         .code(2)
         .stderr(predicate::str::contains("TAMPERED"));
 }
+
+/// Golden digest: signed `output_hash` must match `--expected-output-hash`.
+#[test]
+fn expected_output_hash_accepts_match_and_refuses_mismatch() {
+    use ed25519_dalek::SigningKey;
+    use erebus_core::attest::{
+        receipt_bytes, sha256_hex, AttestationTemplate, ExecutionCapture, RequestInfo,
+    };
+    use sha2::{Digest, Sha256};
+
+    let dir = tempdir().unwrap();
+    let bundle = make_bundle(dir.path(), "tool", "deterministic");
+    let seed: [u8; 32] = Sha256::digest(b"expected-output-hash-e2e").into();
+    let key = SigningKey::from_bytes(&seed);
+    let trusted = dir.path().join("trusted");
+    std::fs::create_dir_all(&trusted).unwrap();
+    std::fs::write(trusted.join("op.pub"), key.verifying_key().as_bytes()).unwrap();
+
+    let body = br#"{"result":"ok","n":7}"#;
+    let want = sha256_hex(body);
+    let att = AttestationTemplate::from_bundle(&bundle)
+        .unwrap()
+        .attest(
+            &key,
+            &ExecutionCapture {
+                output_hash: Some(want.clone()),
+                request: Some(RequestInfo {
+                    method: "POST".into(),
+                    path: "/tool".into(),
+                    status: Some(200),
+                    ..RequestInfo::default()
+                }),
+                ..ExecutionCapture::default()
+            },
+        )
+        .unwrap();
+    let out = dir.path().join("tool.erebus.attest");
+    std::fs::write(&out, receipt_bytes(&att).unwrap()).unwrap();
+
+    erebus()
+        .args([
+            "verify-attest",
+            out.to_str().unwrap(),
+            "--trusted-dir",
+            trusted.to_str().unwrap(),
+            "--expected-output-hash",
+            &want,
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("OK: output_hash matches expected"));
+
+    erebus()
+        .args([
+            "verify-attest",
+            out.to_str().unwrap(),
+            "--trusted-dir",
+            trusted.to_str().unwrap(),
+            "--expected-output-hash",
+            &sha256_hex(b"forged"),
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("TAMPERED: output_hash mismatch"));
+}

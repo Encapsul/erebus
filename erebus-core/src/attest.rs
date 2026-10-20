@@ -1137,6 +1137,47 @@ pub fn check_bundle_matches(
     Ok(())
 }
 
+/// Pin a golden digest against the signed `output_hash` (deterministic tools).
+///
+/// The auditor compares the receipt's signed result digest to a known-good
+/// hash — not model correctness, only byte-binding. Accepts `sha256:<hex>` or
+/// bare 64-hex. Reads the signed statement only.
+pub fn check_expected_output_hash(
+    attestation: &Attestation,
+    expected: &str,
+) -> Result<(), anyhow::Error> {
+    let signed = attestation
+        .statement
+        .predicate
+        .get("execution")
+        .and_then(|e| e.get("output_hash"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("TAMPERED: receipt has no signed output_hash"))?;
+    assert_output_hash_eq(signed, expected)
+}
+
+/// Compare two digests; mismatch is `TAMPERED:` (also used by `attest-tool`).
+pub fn assert_output_hash_eq(actual: &str, expected: &str) -> Result<(), anyhow::Error> {
+    let a = normalize_digest(actual);
+    let e = normalize_digest(expected);
+    if a.is_empty() || e.is_empty() || a.len() != 64 || e.len() != 64 {
+        anyhow::bail!("TAMPERED: output_hash must be sha256:<64 hex> (got actual={actual:?}, expected={expected:?})");
+    }
+    if a != e {
+        anyhow::bail!(
+            "TAMPERED: output_hash mismatch (receipt signed sha256:{a}, expected sha256:{e})"
+        );
+    }
+    Ok(())
+}
+
+fn normalize_digest(s: &str) -> String {
+    s.trim()
+        .trim_start_matches("sha256:")
+        .trim()
+        .to_ascii_lowercase()
+}
+
 /// Bind a served-call receipt to the plaintext response body an auditor was
 /// handed: the body must hash to the signed `output_hash`, and re-extracting
 /// its tool calls must give exactly the signed list — or, when the receipt
@@ -1906,6 +1947,38 @@ mod tests {
         t.execution.request.as_mut().unwrap().tool_calls = Some(vec![tool_call("x")]);
         let err = verify_attestation(&t, &trusted).unwrap_err().to_string();
         assert!(err.contains("TAMPERED: execution mismatch"), "{err}");
+    }
+
+    /// Golden digest: signed `output_hash` must match the pinned expectation.
+    #[test]
+    fn expected_output_hash_binds_deterministic_tool_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bundle_path, _, _) = write_bundle(dir.path());
+        let key = test_key();
+        let template = AttestationTemplate::from_bundle(&bundle_path).unwrap();
+        let body = b"{\"ok\":true,\"n\":42}";
+        let want = sha256_hex(body);
+        let att = template
+            .attest(
+                &key,
+                &ExecutionCapture {
+                    output_hash: Some(want.clone()),
+                    request: Some(chat_request(None, false)),
+                    ..ExecutionCapture::default()
+                },
+            )
+            .unwrap();
+        check_expected_output_hash(&att, &want).unwrap();
+        check_expected_output_hash(&att, want.trim_start_matches("sha256:")).unwrap();
+        let err = check_expected_output_hash(&att, &sha256_hex(b"other"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("TAMPERED: output_hash mismatch"), "{err}");
+        let bare = template.attest(&key, &ExecutionCapture::default()).unwrap();
+        let err = check_expected_output_hash(&bare, &want)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no signed output_hash"), "{err}");
     }
 
     /// The auditor's offline check: body ↔ `output_hash`, body ↔ signed list.

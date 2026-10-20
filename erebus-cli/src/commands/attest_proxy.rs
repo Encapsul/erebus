@@ -50,6 +50,8 @@ pub struct CallRecorder {
     log: AttestationLog,
     publisher: Option<ReceiptPublisher>,
     mode: ProxyMode,
+    /// When set (deterministic tools), refuse to write if `response_hash` differs.
+    expected_output_hash: Option<String>,
     /// Appends read the trail head then advance it: serialize them.
     lock: Mutex<()>,
 }
@@ -92,6 +94,7 @@ impl CallRecorder {
             log,
             publisher: None,
             mode: ProxyMode::Engine,
+            expected_output_hash: None,
             lock: Mutex::new(()),
         }
     }
@@ -103,6 +106,11 @@ impl CallRecorder {
 
     pub fn with_mode(mut self, mode: ProxyMode) -> Self {
         self.mode = mode;
+        self
+    }
+
+    pub fn with_expected_output_hash(mut self, digest: Option<String>) -> Self {
+        self.expected_output_hash = digest;
         self
     }
 
@@ -120,6 +128,9 @@ impl CallRecorder {
             .lock
             .lock()
             .map_err(|_| anyhow::anyhow!("call recorder lock poisoned"))?;
+        if let Some(want) = &self.expected_output_hash {
+            erebus_core::attest::assert_output_hash_eq(&call.response_hash, want)?;
+        }
         let capture = ExecutionCapture {
             input_hash: Some(call.request_hash.clone()),
             output_hash: Some(call.response_hash.clone()),

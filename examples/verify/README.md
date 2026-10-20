@@ -1,10 +1,12 @@
-# Verify this receipt with cosign
+# Verify this receipt offline
 
 Public files only. This directory has no private key.
 
 `operator.pem` is the operator public key. `agent.dsse.json` is the DSSE
 envelope from `erebus attest --envelope`. `agent.erebus` is the bundle those
 bytes sign (built on macOS; cosign checks the file, it does not run it).
+
+## Cosign (operator signature only)
 
 ```bash
 cosign verify-blob-attestation \
@@ -20,3 +22,30 @@ computed an answer. `scripts/yc_demo.sh` emits the same kind of envelope on a
 Linux host, and also checks tamper refusal, the offline transparency-log
 proof, and the machine co-signature. This sample is the operator signature
 only: the host was not enrolled.
+
+## One-command pack (`offline.sh`)
+
+Point at a receipt (and optional `.proof.json` beside it), or a directory that
+holds receipt + proof + `.pub` keys:
+
+```bash
+# Receipt + sibling keys / proof
+./offline.sh /path/to/000022-….json --log-key "$REG_HEX" --strict
+
+# Or a staging directory
+mkdir -p /tmp/erebus-pack && cp receipt.json receipt.json.proof.json *.pub /tmp/erebus-pack/
+./offline.sh --pack /tmp/erebus-pack --log-key "$REG_HEX" --strict --bundle agent.erebus
+```
+
+Equivalent bare CLI (what the script wraps):
+
+```bash
+erebus verify-attest receipt.json \
+  --trusted-dir ./keys \
+  --proof --proof-file receipt.json.proof.json \
+  --log-key "$REG_HEX" \
+  --strict
+```
+
+Auditor zip path (full trail): `erebus evidence export …` then
+`erebus verify-evidence evidence.zip --bundle agent.erebus`.
