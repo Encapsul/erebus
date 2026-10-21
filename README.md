@@ -98,9 +98,14 @@ Driving any OpenAI-compatible or Anthropic HTTP API from the CLI?
 ```bash
 erebus agent run --provider openai-compat --base-url http://127.0.0.1:11434 \
   --model llama3.2 --task "Summarize the logs" --attest-key ops.key \
-  --allow-tool echo --response-body /tmp/last.json
+  --mcp-stdio '["python3","tools/server.py"]' --allow-mcp --stream \
+  --encapsulate --response-body /tmp/last.json
+# Streaming display is unsigned; the receipt hashes the assembled final body.
 # Execution proven (signed receipt). Task success is a separate layer —
 # tests, human approve, or golden checks — not the crypto claim of the receipt.
+
+# One-command local demo (fake LLM + fake MCP):
+#   bash examples/agent/demo.sh
 ```
 
 Handing it to an auditor is one file:
@@ -287,7 +292,7 @@ manifests verify fail-cold at boot.
 | `erebus build <dir>` | Package an app dir (`--universal`, `--embed-model`, `--ngl`, `--sign`, `--encrypt`, `--enable-sisr`, `--target`) |
 | `erebus run <file>` | Execute a bundle (namespace isolation, health gate) |
 | `erebus serve <file>` | OpenAI-compatible HTTP API (`--attest-key`: signed receipt per call; `--push`: registry proof per call) |
-| `erebus agent run` | Provider-agnostic HTTP agent (`openai-compat` / `anthropic`, pluggable `--base-url`); one receipt per model call; `--allow-tool`, `--expected-output-hash`, `--response-body`. Execution proven; task success is a separate layer |
+| `erebus agent run` / `agent build` | Provider-agnostic HTTP agent (`openai-compat` / `anthropic`); MCP stdio/HTTP tools (`--mcp`, `--mcp-stdio`, `--allow-mcp`); `--stream` (unsigned display, attested assembled body); `--encapsulate` / `agent build` packages the task into a `.erebus` subject. Execution proven; task success is a separate layer |
 | `erebus chat <file>` | Terminal TUI chat; `--web` serves the embedded browser UI |
 | `erebus pull / publish` | Registry download (integrity-checked, cached) / upload |
 | `erebus swap <file> <path> --from <new>` | Replace a file inside an existing bundle (hot-swap) |

@@ -1,7 +1,7 @@
-//! `erebus agent run` against a fake OpenAI-compatible HTTP LLM.
+//! `erebus agent run` against a fake OpenAI-compatible HTTP LLM (+ fake MCP).
 //!
-//! One-shot and a short tool loop (echo), receipts chained, honest limit on
-//! stderr, `--response-body` + `verify-attest` round-trip. Unix only.
+//! Covers: tool loop (echo), MCP stdio tools, SSE streaming with one receipt
+//! per assembled body, help text, honest limit. Unix only.
 
 #![cfg(unix)]
 
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use tempfile::tempdir;
 
-/// Fake OpenAI-compat LLM: first tools turn → `echo` call; then text.
+/// Fake OpenAI-compat LLM: tools → `get_weather` or echo; then text. SSE if asked.
 struct FakeLlm {
     base: String,
     child: Child,
@@ -21,39 +21,16 @@ struct FakeLlm {
 
 impl FakeLlm {
     fn start() -> Self {
-        let script = r#"
-import json, sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
-
-class H(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-    def log_message(self, *a):
-        pass
-    def do_POST(self):
-        n = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(n)
-        req = json.loads(body or b"{}")
-        msgs = req.get("messages") or []
-        answered = bool(msgs) and msgs[-1].get("role") == "tool"
-        if req.get("tools") and not answered:
-            reply = {"choices": [{"message": {"role": "assistant", "tool_calls": [
-                {"id": "call_echo", "type": "function",
-                 "function": {"name": "echo", "arguments": "{\"text\":\"pong\"}"}}
-            ]}}]}
-        else:
-            reply = {"choices": [{"message": {"role": "assistant", "content": "done-ok"}}]}
-        raw = json.dumps(reply).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
-
-httpd = HTTPServer(("127.0.0.1", 0), H)
-print(httpd.server_address[1], flush=True)
-httpd.serve_forever()
-"#;
-        let path = std::env::temp_dir().join(format!("erebus-agent-llm-{}.py", std::process::id()));
+        let script = include_str!("../../examples/agent/fake_llm.py");
+        // Unique path per start() — tests run in parallel and share one PID.
+        let path = std::env::temp_dir().join(format!(
+            "erebus-agent-llm-{}-{}.py",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::write(&path, script).unwrap();
         let mut child = Command::new("python3")
             .arg(&path)
@@ -62,13 +39,19 @@ httpd.serve_forever()
             .spawn()
             .expect("python3");
         let stdout = child.stdout.take().expect("stdout");
-        let mut lines = BufReader::new(stdout).lines();
-        let port_line = lines
-            .next()
-            .transpose()
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut lines = BufReader::new(stdout).lines();
+            let _ = tx.send(lines.next().transpose().ok().flatten());
+        });
+        let port_line = rx
+            .recv_timeout(Duration::from_secs(5))
             .ok()
             .flatten()
-            .expect("fake LLM port");
+            .unwrap_or_else(|| {
+                let _ = child.kill();
+                panic!("fake LLM port missing within 5s ({})", path.display());
+            });
         let port: u16 = port_line.trim().parse().expect("port number");
         let _ = std::fs::remove_file(&path);
         let base = format!("http://127.0.0.1:{port}");
@@ -108,6 +91,10 @@ fn erebus_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_erebus"))
 }
 
+fn examples_agent() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples/agent")
+}
+
 fn keygen(dir: &Path) -> (PathBuf, PathBuf) {
     let key_dir = dir.join("keys");
     assert!(Command::new(erebus_bin())
@@ -122,6 +109,14 @@ fn keygen(dir: &Path) -> (PathBuf, PathBuf) {
         .find(|p| p.extension().is_some_and(|e| e == "key"))
         .expect("key");
     (key, key_dir)
+}
+
+fn trail_json_count(trail: &Path) -> usize {
+    std::fs::read_dir(trail)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .count()
 }
 
 #[test]
@@ -162,7 +157,10 @@ fn agent_run_tool_loop_emits_receipts_and_honest_limit() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stdout.contains("done-ok"), "{stdout}");
+    assert!(
+        stdout.contains("weather-ok") || stdout.contains("done-ok"),
+        "{stdout}"
+    );
     assert!(
         stderr.contains("Execution proven (signed receipt)"),
         "{stderr}"
@@ -172,13 +170,17 @@ fn agent_run_tool_loop_emits_receipts_and_honest_limit() {
         "{stderr}"
     );
 
+    assert_eq!(
+        trail_json_count(&trail),
+        2,
+        "expected 2 model-call receipts"
+    );
     let mut entries: Vec<_> = std::fs::read_dir(&trail)
         .unwrap()
         .filter_map(Result::ok)
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|e| e == "json"))
         .collect();
-    assert_eq!(entries.len(), 2, "expected 2 model-call receipts");
     entries.sort();
     let last = entries.last().unwrap();
     let verify = Command::new(erebus_bin())
@@ -197,6 +199,53 @@ fn agent_run_tool_loop_emits_receipts_and_honest_limit() {
         "stderr={}",
         String::from_utf8_lossy(&verify.stderr)
     );
+}
+
+#[test]
+fn agent_run_mcp_stdio_and_stream() {
+    let dir = tempdir().unwrap();
+    let (key, _) = keygen(dir.path());
+    let llm = FakeLlm::start();
+    let trail = dir.path().join("mcp.attest.d");
+    let mcp = examples_agent().join("fake_mcp.py");
+    assert!(mcp.is_file(), "missing {}", mcp.display());
+    let spec = format!(
+        r#"["python3","{}"]"#,
+        mcp.to_str().unwrap().replace('\\', "\\\\")
+    );
+
+    let out = Command::new(erebus_bin())
+        .args([
+            "agent",
+            "run",
+            "--base-url",
+            &llm.base,
+            "--model",
+            "fake",
+            "--task",
+            "weather?",
+            "--attest-key",
+            key.to_str().unwrap(),
+            "--attest-log",
+            trail.to_str().unwrap(),
+            "--mcp-stdio",
+            &spec,
+            "--allow-mcp",
+            "--stream",
+        ])
+        .env("WEATHER", "22C")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stdout.contains("weather-ok"), "{stdout}");
+    assert!(stderr.contains("streaming display is unsigned"), "{stderr}");
+    assert_eq!(trail_json_count(&trail), 2);
 }
 
 #[test]
@@ -228,17 +277,12 @@ fn agent_run_oneshot_without_tools() {
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(String::from_utf8_lossy(&out.stdout).contains("done-ok"));
-    let n = std::fs::read_dir(&trail)
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-        .count();
-    assert_eq!(n, 1);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("weather-ok"));
+    assert_eq!(trail_json_count(&trail), 1);
 }
 
 #[test]
-fn agent_run_help_lists_providers_and_secret_file() {
+fn agent_run_help_lists_mcp_stream_encapsulate() {
     let out = Command::new(erebus_bin())
         .args(["agent", "run", "--help"])
         .output()
@@ -249,6 +293,23 @@ fn agent_run_help_lists_providers_and_secret_file() {
     assert!(text.contains("anthropic"));
     assert!(text.contains("--api-key-file"));
     assert!(text.contains("--allow-tool"));
+    assert!(text.contains("--allow-mcp"));
+    assert!(text.contains("--mcp"));
+    assert!(text.contains("--mcp-stdio"));
+    assert!(text.contains("--stream"));
+    assert!(text.contains("--encapsulate"));
     assert!(text.contains("--expected-output-hash"));
     assert!(text.contains("--response-body"));
+}
+
+#[test]
+fn agent_build_help_exists() {
+    let out = Command::new(erebus_bin())
+        .args(["agent", "build", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("--output"));
+    assert!(text.contains("--task"));
 }

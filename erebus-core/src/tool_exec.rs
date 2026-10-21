@@ -167,7 +167,7 @@ fn mcp_result_hashes(result: &Value) -> Vec<String> {
 
 /// JSON-RPC messages carried by a body: one JSON object or array, or the
 /// `data:` payloads of an SSE stream.
-fn json_rpc_messages(body: &[u8]) -> Vec<Value> {
+pub fn json_rpc_messages(body: &[u8]) -> Vec<Value> {
     if body.len() > MAX_TOOL_BODY {
         return Vec::new();
     }

@@ -1,10 +1,15 @@
 //! `erebus agent` — provider-agnostic HTTP agent runner with attested receipts.
 //!
 //! Talks OpenAI-compatible chat completions (or Anthropic Messages) over HTTP,
-//! optionally executes allowlisted tools for a short loop, and appends one
-//! signed receipt per model call via the same digests as `serve --attest-key`.
+//! optionally executes allowlisted tools (echo, HTTP POST, MCP stdio/HTTP) for
+//! a short loop, streams tokens when asked, and appends one signed receipt per
+//! model call via the same digests as `serve --attest-key`.
 //!
 //! The closing line always separates **execution proof** from **task success**.
+
+mod encapsulate;
+mod mcp;
+mod stream;
 
 use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -20,6 +25,9 @@ use serde_json::{json, Value};
 use super::attest_proxy::{CallRecorder, CallSummary, ReceiptPublisher};
 use erebus_core::attest::AttestationTemplate;
 use erebus_core::attest_log::AttestationLog;
+
+use mcp::McpClient;
+use stream::{AssembleKind, STREAM_LIMIT};
 
 /// Printed after every successful run (stderr). Not a crypto claim.
 pub const HONEST_LIMIT: &str = "Execution proven (signed receipt). Task success is a separate \
@@ -44,10 +52,11 @@ pub enum AgentCommand {
     /// Examples:
     ///   erebus agent run --provider openai-compat --base-url <http://127.0.0.1:11434> \
     ///       --model llama3.2 --task "Say hi" --attest-key ops.key
-    ///   erebus agent run --provider anthropic --base-url <https://api.anthropic.com> \
-    ///       --model claude-sonnet-4-20250514 --task "…" --attest-key ops.key \
-    ///       --api-key-file ~/.config/anthropic/key
-    Run(RunArgs),
+    ///   erebus agent run --mcp-stdio 'python3 server.py' --allow-mcp \
+    ///       --stream --task "…" --attest-key ops.key --base-url …
+    Run(Box<RunArgs>),
+    /// Package the task config into a `.erebus` (receipt subject = bundle hash)
+    Build(BuildCmdArgs),
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
@@ -57,6 +66,33 @@ pub enum Provider {
     OpenaiCompat,
     /// Anthropic Messages API (`/v1/messages`)
     Anthropic,
+}
+
+#[derive(Args)]
+pub struct BuildCmdArgs {
+    /// LLM HTTP dialect (embedded in task.json)
+    #[arg(long, value_enum, default_value_t = Provider::OpenaiCompat)]
+    pub provider: Provider,
+
+    #[arg(long, env = "ERE_AGENT_BASE_URL")]
+    pub base_url: String,
+
+    #[arg(long)]
+    pub model: String,
+
+    #[arg(long)]
+    pub task: String,
+
+    /// Output `.erebus` path
+    #[arg(short, long, default_value = "agent-task.erebus")]
+    pub output: PathBuf,
+
+    #[arg(long)]
+    pub force: bool,
+
+    /// Tool names recorded in the task descriptor (informational)
+    #[arg(long = "allow-tool", value_name = "NAME", action = clap::ArgAction::Append)]
+    pub allow_tool: Vec<String>,
 }
 
 #[derive(Args)]
@@ -89,6 +125,14 @@ pub struct RunArgs {
     #[arg(long, value_name = "FILE")]
     pub bundle: Option<PathBuf>,
 
+    /// Build a temp `.erebus` from the task config and use it as `--bundle`
+    #[arg(long)]
+    pub encapsulate: bool,
+
+    /// Output path when `--encapsulate` (default: `./agent-task.erebus`)
+    #[arg(long, value_name = "FILE")]
+    pub encapsulate_out: Option<PathBuf>,
+
     /// File holding the provider API key (preferred over env)
     #[arg(long, value_name = "FILE")]
     pub api_key_file: Option<PathBuf>,
@@ -101,9 +145,25 @@ pub struct RunArgs {
     #[arg(long = "allow-tool", value_name = "NAME", action = clap::ArgAction::Append)]
     pub allow_tool: Vec<String>,
 
+    /// Allow every tool discovered from `--mcp` / `--mcp-stdio`
+    #[arg(long)]
+    pub allow_mcp: bool,
+
     /// HTTP tool: `name=http://host:port/path` (POST arguments JSON)
     #[arg(long = "tool-http", value_name = "NAME=URL", action = clap::ArgAction::Append)]
     pub tool_http: Vec<String>,
+
+    /// MCP Streamable HTTP endpoint (repeatable)
+    #[arg(long = "mcp", value_name = "URL", action = clap::ArgAction::Append)]
+    pub mcp: Vec<String>,
+
+    /// MCP stdio server: JSON array `["cmd","arg"]` or whitespace-separated
+    #[arg(long = "mcp-stdio", value_name = "SPEC", action = clap::ArgAction::Append)]
+    pub mcp_stdio: Vec<String>,
+
+    /// Stream tokens to stderr; receipt still hashes the assembled final body
+    #[arg(long)]
+    pub stream: bool,
 
     /// Max model turns (user → assistant [→ tools → …])
     #[arg(long, default_value_t = 4)]
@@ -141,21 +201,74 @@ struct Outcome {
     calls: usize,
 }
 
+struct ToolCtx<'a> {
+    allow: &'a HashSet<String>,
+    http_tools: &'a HashMap<String, String>,
+    mcp: &'a mut [McpClient],
+    allow_mcp: bool,
+}
+
 pub fn run(args: AgentArgs) -> Result<()> {
     match args.command {
-        AgentCommand::Run(a) => run_agent(a),
+        AgentCommand::Run(a) => run_agent(*a),
+        AgentCommand::Build(a) => run_build(a),
     }
 }
 
-fn run_agent(args: RunArgs) -> Result<()> {
+fn run_build(args: BuildCmdArgs) -> Result<()> {
+    let desc = encapsulate::task_descriptor(
+        provider_name(args.provider),
+        &args.model,
+        &host_label(&args.base_url),
+        &args.task,
+        &args.allow_tool,
+    );
+    let path = encapsulate::build_task_bundle(&desc, &args.output, args.force)?;
+    println!("{}", path.display());
+    eprintln!(
+        "[erebus] agent build: task bundle → {} (receipt subject = bundle hash)",
+        path.display()
+    );
+    eprintln!("{HONEST_LIMIT}");
+    Ok(())
+}
+
+fn run_agent(mut args: RunArgs) -> Result<()> {
     if args.max_turns == 0 {
         bail!("--max-turns must be ≥ 1");
     }
+    if args.encapsulate {
+        let out = args
+            .encapsulate_out
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("agent-task.erebus"));
+        let desc = encapsulate::task_descriptor(
+            provider_name(args.provider),
+            &args.model,
+            &host_label(&args.base_url),
+            &args.task,
+            &args.allow_tool,
+        );
+        let path = encapsulate::build_task_bundle(&desc, &out, true)?;
+        eprintln!(
+            "[erebus] agent: encapsulated task → {} (receipts will name this hash)",
+            path.display()
+        );
+        args.bundle = Some(path);
+    }
+
     let api_key = resolve_api_key(args.api_key_file.as_deref(), args.provider)?;
-    let tools = load_tools(args.tools_file.as_deref(), &args.allow_tool)?;
+    let mut mcp_clients = mcp::open_servers(&args.mcp, &args.mcp_stdio)?;
+    let mcp_tools = mcp::collect_tools(&mcp_clients);
+    let mut tools = load_tools(args.tools_file.as_deref(), &args.allow_tool)?;
+    merge_tools(&mut tools, mcp_tools);
     let http_tools = parse_tool_http(&args.tool_http)?;
     let allow: HashSet<String> = args.allow_tool.iter().cloned().collect();
     let recorder = build_recorder(&args)?;
+
+    if args.stream {
+        eprintln!("{STREAM_LIMIT}");
+    }
 
     let base = normalize_base(&args.base_url);
     let (endpoint, client_records, proxy_stop) = if args.via_proxy {
@@ -173,6 +286,7 @@ fn run_agent(args: RunArgs) -> Result<()> {
             &tools,
             &allow,
             &http_tools,
+            &mut mcp_clients,
             &recorder,
             client_records,
         )?,
@@ -183,6 +297,7 @@ fn run_agent(args: RunArgs) -> Result<()> {
             &tools,
             &allow,
             &http_tools,
+            &mut mcp_clients,
             &recorder,
             client_records,
         )?,
@@ -191,7 +306,30 @@ fn run_agent(args: RunArgs) -> Result<()> {
     if let Some(stop) = proxy_stop {
         stop.store(true, Ordering::SeqCst);
     }
+    // Drop MCP children before finish so trails are idle.
+    drop(mcp_clients);
     finish_run(&args, &recorder, &outcome)
+}
+
+fn merge_tools(into: &mut Vec<Value>, extra: Vec<Value>) {
+    let mut names: HashSet<String> = into
+        .iter()
+        .filter_map(|t| {
+            t.pointer("/function/name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
+    for t in extra {
+        let name = t
+            .pointer("/function/name")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if name.is_empty() || !names.insert(name.to_string()) {
+            continue;
+        }
+        into.push(t);
+    }
 }
 
 fn finish_run(args: &RunArgs, recorder: &CallRecorder, outcome: &Outcome) -> Result<()> {
@@ -201,6 +339,9 @@ fn finish_run(args: &RunArgs, recorder: &CallRecorder, outcome: &Outcome) -> Res
     }
     if let Some(want) = &args.expected_output_hash {
         erebus_core::attest::assert_output_hash_eq(&outcome.last_response_hash, want)?;
+    }
+    if args.stream {
+        eprintln!();
     }
     println!("{}", outcome.final_text);
     eprintln!(
@@ -277,7 +418,6 @@ fn start_proxy(base: &str, recorder: Arc<CallRecorder>) -> Result<(String, Arc<A
     std::thread::spawn(move || {
         let _ = super::attest_proxy::serve_proxy(listener, upstream, recorder, flag);
     });
-    // Brief settle so accept() is ready before the first client POST.
     std::thread::sleep(Duration::from_millis(50));
     Ok((format!("http://{addr}"), stop))
 }
@@ -377,7 +517,6 @@ fn parse_tool_http(specs: &[String]) -> Result<HashMap<String, String>> {
     Ok(map)
 }
 
-// Provider loop: endpoint, auth, args, tools, allowlist, HTTP tools, recorder, record mode.
 #[allow(clippy::too_many_arguments)]
 fn loop_openai(
     base: &str,
@@ -386,6 +525,7 @@ fn loop_openai(
     tools: &[Value],
     allow: &HashSet<String>,
     http_tools: &HashMap<String, String>,
+    mcp_clients: &mut [McpClient],
     recorder: &CallRecorder,
     client_records: bool,
 ) -> Result<Outcome> {
@@ -394,12 +534,14 @@ fn loop_openai(
     let mut calls = 0usize;
 
     for _ in 0..args.max_turns {
-        let req_bytes = openai_request_bytes(&args.model, &messages, tools)?;
-        let (status, resp_bytes) = http_post(
+        let req_bytes = openai_request_bytes(&args.model, &messages, tools, args.stream)?;
+        let (status, resp_bytes, _) = stream::http_post_maybe_stream(
             &format!("{base}{path}"),
             &req_bytes,
             api_key,
             &[("Content-Type", "application/json")],
+            args.stream,
+            AssembleKind::Openai,
         )?;
         calls = calls.saturating_add(1);
         maybe_record(
@@ -419,7 +561,13 @@ fn loop_openai(
         if let Some(tcs) = msg.get("tool_calls").and_then(Value::as_array) {
             if !tcs.is_empty() {
                 messages.push(msg.clone());
-                append_openai_tool_results(&mut messages, tcs, allow, http_tools)?;
+                let mut ctx = ToolCtx {
+                    allow,
+                    http_tools,
+                    mcp: mcp_clients,
+                    allow_mcp: args.allow_mcp,
+                };
+                append_openai_tool_results(&mut messages, tcs, &mut ctx)?;
                 continue;
             }
         }
@@ -436,10 +584,18 @@ fn loop_openai(
     )
 }
 
-fn openai_request_bytes(model: &str, messages: &[Value], tools: &[Value]) -> Result<Vec<u8>> {
+fn openai_request_bytes(
+    model: &str,
+    messages: &[Value],
+    tools: &[Value],
+    stream: bool,
+) -> Result<Vec<u8>> {
     let mut body = json!({"model": model, "messages": messages});
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools.to_vec());
+    }
+    if stream {
+        body["stream"] = json!(true);
     }
     Ok(serde_json::to_vec(&body)?)
 }
@@ -447,14 +603,13 @@ fn openai_request_bytes(model: &str, messages: &[Value], tools: &[Value]) -> Res
 fn append_openai_tool_results(
     messages: &mut Vec<Value>,
     tcs: &[Value],
-    allow: &HashSet<String>,
-    http_tools: &HashMap<String, String>,
+    ctx: &mut ToolCtx<'_>,
 ) -> Result<()> {
     for tc in tcs {
         let name = tc["function"]["name"].as_str().unwrap_or("");
         let id = tc["id"].as_str().unwrap_or("call");
         let arguments = tc["function"]["arguments"].as_str().unwrap_or("{}");
-        let content = execute_tool(name, arguments, allow, http_tools)?;
+        let content = execute_tool(name, arguments, ctx)?;
         messages.push(json!({
             "role": "tool",
             "tool_call_id": id,
@@ -464,7 +619,6 @@ fn append_openai_tool_results(
     Ok(())
 }
 
-// Same shape as loop_openai for the Anthropic Messages dialect.
 #[allow(clippy::too_many_arguments)]
 fn loop_anthropic(
     base: &str,
@@ -473,6 +627,7 @@ fn loop_anthropic(
     tools: &[Value],
     allow: &HashSet<String>,
     http_tools: &HashMap<String, String>,
+    mcp_clients: &mut [McpClient],
     recorder: &CallRecorder,
     client_records: bool,
 ) -> Result<Outcome> {
@@ -483,8 +638,8 @@ fn loop_anthropic(
     let key = api_key.context("anthropic needs --api-key-file or ANTHROPIC_API_KEY")?;
 
     for _ in 0..args.max_turns {
-        let req_bytes = anthropic_request_bytes(&args.model, &messages, &anth_tools)?;
-        let (status, resp_bytes) = http_post(
+        let req_bytes = anthropic_request_bytes(&args.model, &messages, &anth_tools, args.stream)?;
+        let (status, resp_bytes, _) = stream::http_post_maybe_stream(
             &format!("{base}{path}"),
             &req_bytes,
             None,
@@ -493,6 +648,8 @@ fn loop_anthropic(
                 ("x-api-key", key),
                 ("anthropic-version", "2023-06-01"),
             ],
+            args.stream,
+            AssembleKind::Anthropic,
         )?;
         calls = calls.saturating_add(1);
         maybe_record(
@@ -522,7 +679,13 @@ fn loop_anthropic(
             });
         }
         messages.push(json!({"role": "assistant", "content": content}));
-        let results = anthropic_tool_results(&tool_uses, allow, http_tools)?;
+        let mut ctx = ToolCtx {
+            allow,
+            http_tools,
+            mcp: mcp_clients,
+            allow_mcp: args.allow_mcp,
+        };
+        let results = anthropic_tool_results(&tool_uses, &mut ctx)?;
         messages.push(json!({"role": "user", "content": results}));
     }
     bail!(
@@ -531,7 +694,12 @@ fn loop_anthropic(
     )
 }
 
-fn anthropic_request_bytes(model: &str, messages: &[Value], tools: &[Value]) -> Result<Vec<u8>> {
+fn anthropic_request_bytes(
+    model: &str,
+    messages: &[Value],
+    tools: &[Value],
+    stream: bool,
+) -> Result<Vec<u8>> {
     let mut body = json!({
         "model": model,
         "max_tokens": 1024,
@@ -539,6 +707,9 @@ fn anthropic_request_bytes(model: &str, messages: &[Value], tools: &[Value]) -> 
     });
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools.to_vec());
+    }
+    if stream {
+        body["stream"] = json!(true);
     }
     Ok(serde_json::to_vec(&body)?)
 }
@@ -555,18 +726,14 @@ fn anthropic_text(content: &[Value]) -> String {
         .join("")
 }
 
-fn anthropic_tool_results(
-    tool_uses: &[&Value],
-    allow: &HashSet<String>,
-    http_tools: &HashMap<String, String>,
-) -> Result<Vec<Value>> {
+fn anthropic_tool_results(tool_uses: &[&Value], ctx: &mut ToolCtx<'_>) -> Result<Vec<Value>> {
     let mut results = Vec::new();
     for tu in tool_uses {
         let name = tu["name"].as_str().unwrap_or("");
         let id = tu["id"].as_str().unwrap_or("toolu");
         let input = tu.get("input").cloned().unwrap_or(json!({}));
         let arguments = serde_json::to_string(&input)?;
-        let text = execute_tool(name, &arguments, allow, http_tools)?;
+        let text = execute_tool(name, &arguments, ctx)?;
         results.push(json!({
             "type": "tool_result",
             "tool_use_id": id,
@@ -590,22 +757,22 @@ fn openai_tools_to_anthropic(tools: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-fn execute_tool(
-    name: &str,
-    arguments: &str,
-    allow: &HashSet<String>,
-    http_tools: &HashMap<String, String>,
-) -> Result<String> {
-    if allow.is_empty() {
-        bail!("model called tool {name:?} but no --allow-tool was set");
+fn execute_tool(name: &str, arguments: &str, ctx: &mut ToolCtx<'_>) -> Result<String> {
+    let mcp_owned = ctx.mcp.iter().any(|c| c.names.iter().any(|n| n == name));
+    let allowed = ctx.allow.contains(name) || (ctx.allow_mcp && mcp_owned);
+    if ctx.allow.is_empty() && !ctx.allow_mcp {
+        bail!("model called tool {name:?} but no --allow-tool / --allow-mcp was set");
     }
-    if !allow.contains(name) {
-        bail!("tool {name:?} is not in the allowlist ({allow:?})");
+    if !allowed {
+        bail!("tool {name:?} is not in the allowlist ({:?})", ctx.allow);
     }
     if name == "echo" {
         return Ok(arguments.to_string());
     }
-    if let Some(url) = http_tools.get(name) {
+    if mcp_owned {
+        return mcp::call_named(ctx.mcp, name, arguments);
+    }
+    if let Some(url) = ctx.http_tools.get(name) {
         let (status, body) = http_post(
             url,
             arguments.as_bytes(),
@@ -620,7 +787,7 @@ fn execute_tool(
         }
         return Ok(String::from_utf8_lossy(&body).into_owned());
     }
-    bail!("tool {name:?} is allowlisted but has no executor (use echo or --tool-http)");
+    bail!("tool {name:?} is allowlisted but has no executor (echo, --tool-http, or --mcp)")
 }
 
 struct RecordOpts<'a> {
@@ -635,7 +802,6 @@ struct RecordOpts<'a> {
 
 fn maybe_record(recorder: &CallRecorder, opts: &RecordOpts<'_>) -> Result<()> {
     if !opts.client_records {
-        // Proxy records on its connection thread after the response flushes.
         wait_receipts(recorder, opts.expected_total)?;
         return Ok(());
     }
@@ -660,11 +826,10 @@ fn wait_receipts(recorder: &CallRecorder, min: usize) -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    // Best-effort: proxy may still be flushing; do not fail the run.
     Ok(())
 }
 
-fn http_post(
+pub(crate) fn http_post(
     url: &str,
     body: &[u8],
     bearer: Option<&str>,
