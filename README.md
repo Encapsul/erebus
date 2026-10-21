@@ -30,9 +30,10 @@ cosign verify-blob-attestation \
 [`examples/verify/operator.pem`](examples/verify/operator.pem) is the public
 key. [`examples/verify/agent.dsse.json`](examples/verify/agent.dsse.json) is
 the envelope for [`examples/verify/agent.erebus`](examples/verify/agent.erebus).
-`scripts/yc_demo.sh` emits the same envelope on a Linux host (stub, local
-registry, cosign). The command checks the signature over this bundle; it does
-not check that a model computed the output.
+See [`examples/verify/`](examples/verify/) for the checked-in envelope, or
+[`examples/agent/demo.sh`](examples/agent/demo.sh) for a local agent demo.
+The command checks the signature over this bundle; it does not check that a
+model computed the output.
 
 ## Install
 
@@ -153,12 +154,9 @@ receipt still proves into the new tree head).
 
 The **proof chain badge** above is the [`proof.yml`](.github/workflows/proof.yml)
 workflow: on every commit and every day, a fresh Linux runner builds erebus
-from source and runs the entire demo (`scripts/yc_demo.sh` — build, sign,
-enroll, execute with the sandbox on, DSSE receipt, tamper refusals,
-transparency log, offline `--strict --proof`, `cosign … Verified OK`, four
-chaos harnesses) plus the transparency-log battery and the extreme chaos
-battery (native C agent, malformed inputs, 12 concurrent agents). Green means
-every one of those checks passed *today*, not once on a laptop.
+from source and runs the transparency-log battery, egress e2e, and the extreme
+chaos battery (native C agent, malformed inputs, 12 concurrent agents). Green
+means every one of those checks passed *today*, not once on a laptop.
 
 **No production customers. T2 is not complete.**
 

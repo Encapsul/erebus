@@ -36,6 +36,9 @@ repo/
 demo/
 demo-yc/
 
+# Local-only YC pitch harness (not shipped in git)
+scripts/yc_demo.sh
+
 # Internal notes
 useful_commands.md
 session-*.md
