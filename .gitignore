@@ -36,11 +36,15 @@ repo/
 demo/
 demo-yc/
 
+# Local-only full e2e demo harness (not shipped in git)
+scripts/yc_demo.sh
+
 # Internal notes
 useful_commands.md
 session-*.md
 MATOMO.md
-# Internal strategy / pitch / competitive analysis (see research/hn-post-draft.md)
+SYNTHESE.md
+# Internal strategy / competitive analysis
 research/
 # OpenCode plugin dependencies (installed via npm)
 .opencode/node_modules/

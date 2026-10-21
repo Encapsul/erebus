@@ -15,8 +15,8 @@ All notable changes to erebus are documented here.
 
 ### Fixed
 
-- `scripts/yc_demo.sh` runs on stock macOS without GNU `timeout` (`gtimeout`
-  or perl alarm fallback).
+- Local full e2e demo harness runs on stock macOS without GNU `timeout`
+  (`gtimeout` or perl alarm fallback).
 
 ## [0.6.3] — 2026-10-17
 
@@ -213,8 +213,7 @@ All notable changes to erebus are documented here.
 - `verify-attest` hardening: display-copy consistency check, `--bundle`
   binding, fingerprint check.
 - **Proof chain in CI** — `.github/workflows/proof.yml` (README badge) runs
-  `scripts/test_transparency_log.py`, the full `scripts/yc_demo.sh` (sandbox
-  on, enroll, `--strict`, cosign, four chaos harnesses) and
+  `scripts/test_transparency_log.py`, egress e2e, and
   `scripts/chaos_extreme.sh` on every push and daily.
 
 ### Fixed

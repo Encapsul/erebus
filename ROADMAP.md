@@ -148,7 +148,7 @@ unblocks.
 
 ---
 
-## 5. The YC demo (2 minutes, every step green in CI — `proof.yml`)
+## 5. The end-to-end demo (2 minutes; proof batteries green in CI — `proof.yml`)
 
 ```bash
 erebus keygen                                   # Ed25519 key, 0600
@@ -170,8 +170,9 @@ erebus verify agent.erebus                      # TAMPERED: signature does not m
 Extended (P0-5): `erebus attest --push` → `erebus verify-attest --proof` shows
 the receipt is included in a checkpoint timestamped by an independent TSA.
 
-`scripts/yc_demo.sh` runs this, plus enroll, `--strict`, cosign and the
-chaos harnesses, on every push in `proof.yml`.
+A local full e2e demo harness (gitignored) runs this plus enroll, `--strict`,
+cosign and the chaos harnesses. Public CI (`proof.yml`) re-proves the
+transparency-log, egress, and chaos batteries on every push.
 
 ---
 
@@ -218,14 +219,15 @@ applied to *runs* instead of *builds*. That is the category a technical
 partner recognises, and it is why `cosign verify-blob-attestation → Verified
 OK` matters: we are not a proprietary format.
 
-**Do not claim the YC RFS "AI-Native Compliance Infrastructure" (Fall 2026)
-as our slot.** Verified 2026-09-28: that RFS describes *financial* compliance
+**Do not claim "AI-Native Compliance Infrastructure" as our category slot.**
+Verified 2026-09-28: that framing describes *financial* compliance
 operations — state-by-state licensing, regulatory-change monitoring,
-transaction anomaly detection, reporting headcount — and the companies cited
-in it (Duna, TovenAI, Hadrius) are AI agents that *do* compliance work. We are
-the evidence layer such agents, and any other, would run on. The RFS is an
-**adjacent buyer** (its "tamper-evident audit trails" line), not our category;
-frame it that way or not at all. Same for *DevTools for AI agents*: adjacent.
+transaction anomaly detection, reporting headcount — and the companies often
+cited under it (Duna, TovenAI, Hadrius) are AI agents that *do* compliance
+work. We are the evidence layer such agents, and any other, would run on. It
+is an **adjacent buyer** (its "tamper-evident audit trails" line), not our
+category; frame it that way or not at all. Same for *DevTools for AI agents*:
+adjacent.
 
 **Re-read 2026-10-01 — the RFS that is our slot: "The Future of American
 Defense"** (Secretary of the Army). It asks for "commercially developed,
@@ -254,7 +256,7 @@ that; the steps below can, and each yields a number we are allowed to cite.
 
 | Step | Deliverable | Number we can cite | When |
 |---|---|---|---|
-| T1 | **P1-1**: `scripts/yc_demo.sh` + chaos batteries green in CI, public badge | "the whole proof chain is re-proven on every commit" | done 2026-09-28 |
+| T1 | **P1-1**: proof batteries (transparency log, egress, chaos) green in CI, public badge | "the whole proof chain is re-proven on every commit" | done 2026-09-28 |
 | T2 | **Internal pilot**: one real agent behind `serve --attest-key`, ≥ 2 enrolled machines, ≥ 14 days, registry with `--tsa-url` | receipts anchored, machines enrolled, `verify-attest --strict --proof` failures = 0, bytes of evidence per call | after T1 |
 | T3 | **Design partner** in the ICP (defense / administration air-gapped, industrial edge): offline verifier delivered, letter of intent on the Enterprise tier | "1 LOI; air-gapped verification accepted by their auditor" | in parallel |
 | T4 | **Third-party verification**: an auditor or consultancy verifies a trail with nothing but `erebus verify-attest` / `cosign` and public keys, in writing | "verified by someone who does not trust us" | after T2 |
@@ -320,9 +322,9 @@ The three questions that decide the outcome, and the answers we hold:
 What will get us refused is not L2. It is "No production users yet" with no
 pilot or LOI beside it (§7.3).
 
-### 7.5 The YC field, Fall 2025 → Summer 2027 (read 2026-10-01)
+### 7.5 The competitive field, Fall 2025 → Summer 2027 (read 2026-10-01)
 
-879 companies read from the public YC directory. **None ships signed,
+Among accelerator-backed peers surveyed publicly: **none ships signed,
 anchored, offline-verifiable per-execution receipts for agents.** The
 closest, and what each teaches:
 

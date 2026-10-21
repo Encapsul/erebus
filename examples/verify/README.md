@@ -18,10 +18,9 @@ cosign verify-blob-attestation \
 ```
 
 That line means the operator key signed this bundle. It does not mean a model
-computed an answer. `scripts/yc_demo.sh` emits the same kind of envelope on a
-Linux host, and also checks tamper refusal, the offline transparency-log
-proof, and the machine co-signature. This sample is the operator signature
-only: the host was not enrolled.
+computed an answer. See [`examples/agent/demo.sh`](../agent/demo.sh) for a
+local agent demo that produces receipts. This sample is the operator
+signature only: the host was not enrolled.
 
 ## One-command pack (`offline.sh`)
 

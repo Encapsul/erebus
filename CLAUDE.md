@@ -117,8 +117,7 @@ Use `context: fork` for isolated subagent contexts when running parallel tasks.
   stub + CLI, `cargo test --workspace`, smoke test), clippy-fmt, cargo-audit,
   arm-qemu, cross-platform
 - `.github/workflows/proof.yml` ("Proof chain" badge) runs on push/PR and
-  daily: `scripts/test_transparency_log.py`, the full `scripts/yc_demo.sh`
-  (sandbox on, enroll, `--strict`, cosign, 4 chaos harnesses),
+  daily: `scripts/test_transparency_log.py`, egress e2e, and
   `scripts/chaos_extreme.sh`. Harness logs uploaded on failure.
 - PRs that fail either workflow cannot be merged
 

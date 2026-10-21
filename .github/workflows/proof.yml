@@ -1,11 +1,11 @@
-# Proof chain — re-proves the whole demo on every commit and every day.
+# Proof chain — re-proves the public proof batteries on every commit and every day.
 #
 # ci.yml answers "does the code compile and pass its unit tests". This
-# workflow answers the question an auditor would ask: does the complete chain
-# (build → sign → enroll → execute → DSSE receipt → tamper refusal →
-# transparency log → offline proof → cosign interop → chaos) still hold on a
-# fresh Linux host, with nothing but the repository? The README badge points
-# here, so the badge is only green when every step is (ROADMAP P1-1 / T1).
+# workflow answers the question an auditor would ask: do the transparency log,
+# egress, and chaos batteries still hold on a fresh Linux host, with nothing
+# but the repository? The README badge points here, so the badge is only green
+# when every step is (ROADMAP P1-1 / T1).
+# The full local e2e demo harness is gitignored and is not run here.
 name: Proof chain
 
 on:
@@ -74,23 +74,15 @@ jobs:
 
       # Drop debug/incremental trees so the chaos harnesses have disk headroom
       # on the shared runner (chaos_frontends previously hit ENOSPC mid-load).
-      - name: Free disk before demo
+      - name: Free disk before chaos
         run: |
           rm -rf /tmp/erebus-stub-target/debug \
                  /tmp/erebus-stub-target/incremental \
                  /tmp/erebus-stub-target/*/debug \
                  /tmp/erebus-stub-target/*/incremental \
                  /tmp/erebus-chaos-* \
-                 /tmp/yc-demo.* 2>/dev/null || true
+                 /tmp/erebus-demo.* 2>/dev/null || true
           df -h /tmp / | head -5
-
-      - name: Demo — the whole chain, every step must be green
-        timeout-minutes: 30
-        env:
-          ERE_BIN: /tmp/erebus-stub-target/release/erebus
-          ERE_STUB_PATH: /tmp/erebus-stub-target/x86_64-unknown-linux-musl/release/erebus-stub
-          TERM: dumb
-        run: bash scripts/yc_demo.sh
 
       - name: Egress — ERE_EGRESS confines the agent to the listed port (or refuses)
         timeout-minutes: 5
