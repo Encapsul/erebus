@@ -302,6 +302,12 @@ impl Accumulator {
                 self.choice(pos, choice);
             }
         }
+        // Anthropic Messages API: top-level `content[]` with `tool_use` blocks.
+        if v.get("choices").is_none() {
+            if let Some(content) = v.get("content").and_then(Value::as_array) {
+                self.anthropic_content(content);
+            }
+        }
         match v.get("type").and_then(Value::as_str) {
             Some("response.output_item.done") => {
                 if let Some(index) = self.index_of(v.get("output_index"), 0) {
@@ -313,6 +319,23 @@ impl Accumulator {
         }
         if v.get("object").and_then(Value::as_str) == Some("response") {
             self.response_output(Some(v));
+        }
+    }
+
+    /// Anthropic `content[]`: record each `tool_use` (name + `input` object).
+    fn anthropic_content(&mut self, content: &[Value]) {
+        let mut index = 0u32;
+        for block in content {
+            if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+                continue;
+            }
+            let piece = Piece {
+                id: block.get("id").and_then(Value::as_str),
+                name: block.get("name").and_then(Value::as_str),
+                arguments: block.get("input"),
+            };
+            self.add((0, index), piece, false);
+            index = index.saturating_add(1);
         }
     }
 
@@ -668,6 +691,23 @@ mod tests {
         let r = extract(sse.as_bytes());
         assert!(!r.incomplete);
         assert_eq!(r.calls, vec![call(0, Some("c"), "f", "")]);
+    }
+
+    #[test]
+    fn anthropic_tool_use_blocks_are_extracted() {
+        let body = r#"{"id":"msg_1","type":"message","role":"assistant","content":[
+            {"type":"text","text":"checking"},
+            {"type":"tool_use","id":"toolu_1","name":"echo","input":{"text":"pong"}}
+        ],"stop_reason":"tool_use"}"#;
+        let r = extract(body.as_bytes());
+        assert!(!r.incomplete);
+        assert_eq!(r.calls.len(), 1);
+        assert_eq!(r.calls[0].id.as_deref(), Some("toolu_1"));
+        assert_eq!(r.calls[0].name, "echo");
+        assert_eq!(
+            r.calls[0].arguments_jcs_hash,
+            canonical_arguments_digest(Some(&serde_json::json!({"text": "pong"})))
+        );
     }
 
     #[test]

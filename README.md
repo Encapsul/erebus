@@ -93,6 +93,16 @@ exposes an OpenAI-compatible API and writes **one receipt per inference call**
 proof beside it. Missing proofs are retried at the next start;
 `erebus verify-attest --chain` audits the whole local trail.
 
+Driving any OpenAI-compatible or Anthropic HTTP API from the CLI?
+
+```bash
+erebus agent run --provider openai-compat --base-url http://127.0.0.1:11434 \
+  --model llama3.2 --task "Summarize the logs" --attest-key ops.key \
+  --allow-tool echo --response-body /tmp/last.json
+# Execution proven (signed receipt). Task success is a separate layer —
+# tests, human approve, or golden checks — not the crypto claim of the receipt.
+```
+
 Handing it to an auditor is one file:
 
 ```bash
@@ -277,6 +287,7 @@ manifests verify fail-cold at boot.
 | `erebus build <dir>` | Package an app dir (`--universal`, `--embed-model`, `--ngl`, `--sign`, `--encrypt`, `--enable-sisr`, `--target`) |
 | `erebus run <file>` | Execute a bundle (namespace isolation, health gate) |
 | `erebus serve <file>` | OpenAI-compatible HTTP API (`--attest-key`: signed receipt per call; `--push`: registry proof per call) |
+| `erebus agent run` | Provider-agnostic HTTP agent (`openai-compat` / `anthropic`, pluggable `--base-url`); one receipt per model call; `--allow-tool`, `--expected-output-hash`, `--response-body`. Execution proven; task success is a separate layer |
 | `erebus chat <file>` | Terminal TUI chat; `--web` serves the embedded browser UI |
 | `erebus pull / publish` | Registry download (integrity-checked, cached) / upload |
 | `erebus swap <file> <path> --from <new>` | Replace a file inside an existing bundle (hot-swap) |

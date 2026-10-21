@@ -122,6 +122,32 @@ impl CallRecorder {
         self.log.dir()
     }
 
+    /// Summarize a completed engine POST the caller already performed
+    /// (same digests and tool extraction as the reverse-proxy path).
+    pub fn summarize_engine_call(
+        method: &str,
+        path: &str,
+        status: Option<u16>,
+        request_body: &[u8],
+        response_body: &[u8],
+    ) -> CallSummary {
+        let mut req_hasher = Sha256::new();
+        req_hasher.update(format!("{method} {path}\n").as_bytes());
+        req_hasher.update(request_body);
+        let mut resp_hasher = Sha256::new();
+        resp_hasher.update(response_body);
+        CallSummary {
+            method: method.to_string(),
+            path: path.to_string(),
+            status,
+            request_hash: hex_digest(req_hasher),
+            response_hash: hex_digest(resp_hasher),
+            tool_calls: erebus_core::tool_calls::extract(response_body),
+            request_tools: extract_request_encoded(request_body, None),
+            tool_invocation: None,
+        }
+    }
+
     /// Append a chained receipt for `call`; returns the receipt file path.
     pub fn record(&self, call: &CallSummary) -> Result<PathBuf> {
         let _guard = self

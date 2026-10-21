@@ -451,8 +451,23 @@ impl AttestationTemplate {
         descriptor: &serde_json::Value,
         program: Option<&[u8]>,
     ) -> Result<Self, anyhow::Error> {
+        Self::from_descriptor(descriptor, program, "tool", "erebus attest-tool")
+    }
+
+    /// Template for `erebus agent run` when no `.erebus` bundle is the subject:
+    /// the run descriptor (provider, model, base URL host) is hashed as JCS.
+    pub fn for_agent(descriptor: &serde_json::Value) -> Result<Self, anyhow::Error> {
+        Self::from_descriptor(descriptor, None, "agent", "erebus agent")
+    }
+
+    fn from_descriptor(
+        descriptor: &serde_json::Value,
+        program: Option<&[u8]>,
+        flag: &str,
+        builder_prefix: &str,
+    ) -> Result<Self, anyhow::Error> {
         let meta = crate::jcs::canonicalize(descriptor)
-            .map_err(|e| anyhow::anyhow!("tool descriptor is not canonicalizable: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("descriptor is not canonicalizable: {e}"))?;
         let subject = sha256_hex(program.unwrap_or(&meta));
         Ok(Self {
             artifact: ArtifactInfo {
@@ -460,10 +475,10 @@ impl AttestationTemplate {
                 payload_hash: subject,
                 metadata_hash: sha256_hex(&meta),
                 format_version: 0,
-                flags: vec!["tool".to_string()],
+                flags: vec![flag.to_string()],
             },
             provenance: ProvenanceInfo {
-                builder: format!("erebus attest-tool {}", env!("CARGO_PKG_VERSION")),
+                builder: format!("{builder_prefix} {}", env!("CARGO_PKG_VERSION")),
                 author: None,
                 license: None,
                 layers: Vec::new(),

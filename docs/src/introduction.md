@@ -25,6 +25,9 @@ erebus build ./my-agent -o agent.erebus && erebus sign agent.erebus --key keys/<
 
 ERE_ATTEST_KEY=keys/<fp>.key ./agent.erebus --task nightly  # run → signed receipt
 erebus serve agent.erebus --attest-key keys/<fp>.key --push # or: one receipt per inference call
+erebus agent run --provider openai-compat --base-url http://127.0.0.1:11434 \
+  --model llama3.2 --task "…" --attest-key keys/<fp>.key   # HTTP agent → receipts
+# Execution proven; task success = tests / human approve / golden checks — not the receipt.
 
 erebus verify-attest agent.erebus.attest --bundle agent.erebus --strict --proof --log-key $REG
 erebus evidence export agent.erebus --log-key $REG -o evidence.zip   # hand it to the auditor
@@ -65,6 +68,10 @@ a launcher:
 - **Model serving** — `erebus serve` exposes an OpenAI-compatible API in
   front of the bundled engine (GGUF via llama.cpp) and writes one receipt per
   call, streaming relayed unchanged.
+- **HTTP agent** — `erebus agent run` talks OpenAI-compatible or Anthropic
+  HTTP (`--base-url` for Ollama, Azure, llama-server, …), optional tool
+  allowlist, and signs one receipt per model call. The receipt proves
+  execution; task success stays a separate layer.
 - **Chaos-tested** — the full proof chain and adversarial harnesses
   (SIGKILL, tampering, registry faults, cold-start storms) run in CI on every
   commit.

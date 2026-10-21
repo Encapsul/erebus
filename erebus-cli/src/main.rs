@@ -21,7 +21,7 @@ use std::process::ExitCode;
     version,
     propagate_version = true,
     about = "Signed, tamper-evident receipts of every AI agent execution",
-    long_about = "erebus is the proof layer for AI execution: it runs an agent from a single sandboxed binary and leaves a signed, hash-chained, externally anchored receipt of every run and every inference call — verifiable offline with erebus or stock cosign.\n\nSupported runtimes: Python and native binaries.\n\nExamples:\n  erebus build ./myapp -o myapp.erebus\n  erebus run myapp.erebus\n  erebus inspect myapp.erebus\n  erebus keygen\n  erebus sign myapp.erebus --key ~/.erebus/keys/*.key\n  erebus verify myapp.erebus\n  erebus attest myapp.erebus --key ~/.erebus/keys/*.key --push\n  erebus verify-attest myapp.erebus.attest --proof --strict\n  erebus evidence export myapp.erebus --log-key $REG -o evidence.zip\n  erebus verify-evidence evidence.zip --bundle myapp.erebus\n  erebus enroll --registry http://host:8080 --token-file token\n  erebus audit myapp.erebus\n  erebus doctor\n  erebus scan .\n  erebus serve agent.erebus --port 8080\n  erebus chat agent.erebus\n  erebus completion bash >> ~/.bashrc\n  erebus completion zsh >> ~/.zshrc\n  erebus completion fish > ~/.config/fish/completions/erebus.fish\n\nDocumentation: https://github.com/Tednoob17/erebus\nReport bugs: https://github.com/Tednoob17/erebus/issues\n\nUninstall: rm $(which erebus) && rm -rf ~/.cache/erebus ~/.local/share/erebus"
+    long_about = "erebus is the proof layer for AI execution: it runs an agent from a single sandboxed binary and leaves a signed, hash-chained, externally anchored receipt of every run and every inference call — verifiable offline with erebus or stock cosign.\n\nSupported runtimes: Python and native binaries.\n\nExamples:\n  erebus build ./myapp -o myapp.erebus\n  erebus run myapp.erebus\n  erebus inspect myapp.erebus\n  erebus keygen\n  erebus sign myapp.erebus --key ~/.erebus/keys/*.key\n  erebus verify myapp.erebus\n  erebus attest myapp.erebus --key ~/.erebus/keys/*.key --push\n  erebus verify-attest myapp.erebus.attest --proof --strict\n  erebus evidence export myapp.erebus --log-key $REG -o evidence.zip\n  erebus verify-evidence evidence.zip --bundle myapp.erebus\n  erebus enroll --registry http://host:8080 --token-file token\n  erebus audit myapp.erebus\n  erebus doctor\n  erebus scan .\n  erebus serve agent.erebus --port 8080\n  erebus agent run --provider openai-compat --base-url http://127.0.0.1:11434 --model llama3.2 --task \"…\" --attest-key ops.key\n  erebus chat agent.erebus\n  erebus completion bash >> ~/.bashrc\n  erebus completion zsh >> ~/.zshrc\n  erebus completion fish > ~/.config/fish/completions/erebus.fish\n\nDocumentation: https://github.com/Tednoob17/erebus\nReport bugs: https://github.com/Tednoob17/erebus/issues\n\nUninstall: rm $(which erebus) && rm -rf ~/.cache/erebus ~/.local/share/erebus"
 )]
 struct Cli {
     /// Enable verbose output
@@ -248,6 +248,18 @@ enum Commands {
     /// Interactive TUI dashboard showing SISR benchmark & cache status
     Dashboard(commands::dashboard::DashboardArgs),
 
+    /// Run a provider-agnostic HTTP agent and emit signed receipts
+    ///
+    /// OpenAI-compatible (`--provider openai-compat`, pluggable `--base-url`:
+    /// Ollama, Azure, llama-server, vLLM, …) or Anthropic Messages. One receipt
+    /// per model call; optional `--allow-tool`, `--expected-output-hash`,
+    /// `--response-body`. Execution is proven; task success is a separate layer.
+    ///
+    /// Examples:
+    ///   erebus agent run --provider openai-compat --base-url <http://127.0.0.1:11434> \
+    ///       --model llama3.2 --task "Say hi" --attest-key ops.key
+    Agent(commands::agent::AgentArgs),
+
     /// Interactive chat with a bundled model (TUI, or browser with --web)
     ///
     /// Examples:
@@ -388,6 +400,7 @@ fn main() -> ExitCode {
         eprintln!("  sign             Sign a .erebus binary; `verify` checks it");
         eprintln!("  run              Execute a .erebus file");
         eprintln!("  serve            OpenAI-compatible API, one receipt per inference call");
+        eprintln!("  agent            HTTP agent loop (openai-compat / anthropic) → receipts");
         eprintln!("  inspect          Inspect a .erebus file's metadata");
         eprintln!();
         eprintln!("Use 'erebus --help' for the full listing of commands and options.");
@@ -504,6 +517,7 @@ fn main() -> ExitCode {
             commands::pull::run(args)
         }
         Commands::Hf(args) => commands::hf::run(args),
+        Commands::Agent(args) => commands::agent::run(args),
         Commands::Chat(args) => commands::chat::run(args),
         Commands::Serve(args) => commands::serve::run(args),
         Commands::Swap(args) => commands::swap::run(args),

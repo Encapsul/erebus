@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod approve;
 pub mod attest;
 pub mod attest_history;
