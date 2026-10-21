@@ -175,6 +175,12 @@ fn agent_run_tool_loop_emits_receipts_and_honest_limit() {
         2,
         "expected 2 model-call receipts"
     );
+    let tool_trail = dir.path().join("run.tools.attest.d");
+    assert_eq!(
+        trail_json_count(&tool_trail),
+        1,
+        "expected 1 in-process tool receipt"
+    );
     let mut entries: Vec<_> = std::fs::read_dir(&trail)
         .unwrap()
         .filter_map(Result::ok)
@@ -198,6 +204,106 @@ fn agent_run_tool_loop_emits_receipts_and_honest_limit() {
         verify.status.success(),
         "stderr={}",
         String::from_utf8_lossy(&verify.stderr)
+    );
+    let chain = Command::new(erebus_bin())
+        .args([
+            "verify-attest",
+            "--chain",
+            trail.to_str().unwrap(),
+            "--trusted-dir",
+            trusted.to_str().unwrap(),
+            "--tool-trail",
+            tool_trail.to_str().unwrap(),
+            "--require-tool-execution",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        chain.status.success(),
+        "tool-trail chain failed: {}",
+        String::from_utf8_lossy(&chain.stderr)
+    );
+}
+
+#[test]
+fn agent_run_tool_trail_required_fails_when_forged_or_missing() {
+    let dir = tempdir().unwrap();
+    let (key, trusted) = keygen(dir.path());
+    let llm = FakeLlm::start();
+    let trail = dir.path().join("run.attest.d");
+    let tool_trail = dir.path().join("tools.attest.d");
+
+    let out = Command::new(erebus_bin())
+        .args([
+            "agent",
+            "run",
+            "--base-url",
+            &llm.base,
+            "--model",
+            "fake",
+            "--task",
+            "ping",
+            "--attest-key",
+            key.to_str().unwrap(),
+            "--attest-log",
+            trail.to_str().unwrap(),
+            "--tool-trail",
+            tool_trail.to_str().unwrap(),
+            "--allow-tool",
+            "echo",
+            "--require-tool-execution",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(trail_json_count(&tool_trail), 1);
+
+    // Missing trail directory: verify refuses (not "nothing executed").
+    let missing = Command::new(erebus_bin())
+        .args([
+            "verify-attest",
+            "--chain",
+            trail.to_str().unwrap(),
+            "--trusted-dir",
+            trusted.to_str().unwrap(),
+            "--tool-trail",
+            dir.path().join("no-such-trail").to_str().unwrap(),
+            "--require-tool-execution",
+        ])
+        .output()
+        .unwrap();
+    assert!(!missing.status.success(), "missing tool trail should fail");
+
+    // Empty forged trail: call executed in agent trail but no tool receipt.
+    let empty = dir.path().join("empty.tools.attest.d");
+    std::fs::create_dir_all(&empty).unwrap();
+    let forged = Command::new(erebus_bin())
+        .args([
+            "verify-attest",
+            "--chain",
+            trail.to_str().unwrap(),
+            "--trusted-dir",
+            trusted.to_str().unwrap(),
+            "--tool-trail",
+            empty.to_str().unwrap(),
+            "--require-tool-execution",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        forged.status.code(),
+        Some(2),
+        "stderr={}",
+        String::from_utf8_lossy(&forged.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&forged.stderr);
+    assert!(
+        stderr.contains("no attested tool executed") || stderr.contains("result_without_execution"),
+        "{stderr}"
     );
 }
 
@@ -246,6 +352,12 @@ fn agent_run_mcp_stdio_and_stream() {
     assert!(stdout.contains("weather-ok"), "{stdout}");
     assert!(stderr.contains("streaming display is unsigned"), "{stderr}");
     assert_eq!(trail_json_count(&trail), 2);
+    let tool_trail = dir.path().join("mcp.tools.attest.d");
+    assert_eq!(trail_json_count(&tool_trail), 1, "MCP tool receipt");
+    assert!(
+        stderr.contains("tool trail"),
+        "stderr should mention tool trail: {stderr}"
+    );
 }
 
 #[test]
@@ -300,6 +412,10 @@ fn agent_run_help_lists_mcp_stream_encapsulate() {
     assert!(text.contains("--encapsulate"));
     assert!(text.contains("--expected-output-hash"));
     assert!(text.contains("--response-body"));
+    assert!(text.contains("--tool-trail"));
+    assert!(text.contains("--tool-attest-key"));
+    assert!(text.contains("--require-tool-execution"));
+    assert!(text.contains("--no-tool-attest"));
 }
 
 #[test]

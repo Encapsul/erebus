@@ -5,11 +5,17 @@
 //! a short loop, streams tokens when asked, and appends one signed receipt per
 //! model call via the same digests as `serve --attest-key`.
 //!
+//! Each tool execution also appends an in-process **tool-trail** receipt
+//! (`CallRecorder` in tool mode — same digests as `erebus attest-tool`, no
+//! subprocess per call) so `verify-attest --chain … --tool-trail` can match
+//! model `tool_calls` to executions.
+//!
 //! The closing line always separates **execution proof** from **task success**.
 
 mod encapsulate;
 mod mcp;
 mod stream;
+mod tool_attest;
 
 use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -28,6 +34,7 @@ use erebus_core::attest_log::AttestationLog;
 
 use mcp::McpClient;
 use stream::{AssembleKind, STREAM_LIMIT};
+use tool_attest::ToolAttestor;
 
 /// Printed after every successful run (stderr). Not a crypto claim.
 pub const HONEST_LIMIT: &str = "Execution proven (signed receipt). Task success is a separate \
@@ -121,6 +128,24 @@ pub struct RunArgs {
     #[arg(long, env = "ERE_ATTEST_LOG", value_name = "DIR")]
     pub attest_log: Option<PathBuf>,
 
+    /// Tool-trail directory (default: beside `--attest-log`,
+    /// e.g. `agent.run.tools.attest.d`). One receipt per tool execution.
+    #[arg(long, value_name = "DIR")]
+    pub tool_trail: Option<PathBuf>,
+
+    /// Ed25519 key for tool-trail receipts (default: reuse `--attest-key`)
+    #[arg(long, value_name = "KEY")]
+    pub tool_attest_key: Option<PathBuf>,
+
+    /// Skip in-process tool-trail receipts (tools still execute)
+    #[arg(long)]
+    pub no_tool_attest: bool,
+
+    /// After the run, verify `--chain` + `--tool-trail` with
+    /// `--require-tool-execution` (exit 2 on mismatch)
+    #[arg(long)]
+    pub require_tool_execution: bool,
+
     /// Subject bundle for receipts (`from_bundle`); else a descriptor hash
     #[arg(long, value_name = "FILE")]
     pub bundle: Option<PathBuf>,
@@ -206,6 +231,7 @@ struct ToolCtx<'a> {
     http_tools: &'a HashMap<String, String>,
     mcp: &'a mut [McpClient],
     allow_mcp: bool,
+    tools: Option<&'a ToolAttestor>,
 }
 
 pub fn run(args: AgentArgs) -> Result<()> {
@@ -265,6 +291,7 @@ fn run_agent(mut args: RunArgs) -> Result<()> {
     let http_tools = parse_tool_http(&args.tool_http)?;
     let allow: HashSet<String> = args.allow_tool.iter().cloned().collect();
     let recorder = build_recorder(&args)?;
+    let tool_attestor = open_tool_attestor(&args, tools_may_run(&args, &tools))?;
 
     if args.stream {
         eprintln!("{STREAM_LIMIT}");
@@ -288,6 +315,7 @@ fn run_agent(mut args: RunArgs) -> Result<()> {
             &http_tools,
             &mut mcp_clients,
             &recorder,
+            tool_attestor.as_ref(),
             client_records,
         )?,
         Provider::Anthropic => loop_anthropic(
@@ -299,6 +327,7 @@ fn run_agent(mut args: RunArgs) -> Result<()> {
             &http_tools,
             &mut mcp_clients,
             &recorder,
+            tool_attestor.as_ref(),
             client_records,
         )?,
     };
@@ -308,7 +337,35 @@ fn run_agent(mut args: RunArgs) -> Result<()> {
     }
     // Drop MCP children before finish so trails are idle.
     drop(mcp_clients);
-    finish_run(&args, &recorder, &outcome)
+    finish_run(&args, &recorder, tool_attestor.as_ref(), &outcome)
+}
+
+fn tools_may_run(args: &RunArgs, tools: &[Value]) -> bool {
+    !tools.is_empty() || !args.allow_tool.is_empty() || args.allow_mcp || !args.tool_http.is_empty()
+}
+
+fn open_tool_attestor(args: &RunArgs, may_run: bool) -> Result<Option<ToolAttestor>> {
+    if args.no_tool_attest || !may_run {
+        return Ok(None);
+    }
+    let agent_log = args
+        .attest_log
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("agent.run.attest.d"));
+    let trail = args
+        .tool_trail
+        .clone()
+        .unwrap_or_else(|| tool_attest::default_tool_trail(&agent_log));
+    let key = args
+        .tool_attest_key
+        .as_deref()
+        .unwrap_or(args.attest_key.as_path());
+    let attestor = ToolAttestor::open(key, &trail)?;
+    eprintln!(
+        "[erebus] agent: tool trail → {} (in-process; same digests as attest-tool)",
+        attestor.log_dir().display()
+    );
+    Ok(Some(attestor))
 }
 
 fn merge_tools(into: &mut Vec<Value>, extra: Vec<Value>) {
@@ -332,7 +389,12 @@ fn merge_tools(into: &mut Vec<Value>, extra: Vec<Value>) {
     }
 }
 
-fn finish_run(args: &RunArgs, recorder: &CallRecorder, outcome: &Outcome) -> Result<()> {
+fn finish_run(
+    args: &RunArgs,
+    recorder: &CallRecorder,
+    tools: Option<&ToolAttestor>,
+    outcome: &Outcome,
+) -> Result<()> {
     if let Some(path) = &args.response_body {
         std::fs::write(path, &outcome.last_body)
             .with_context(|| format!("cannot write {}", path.display()))?;
@@ -349,8 +411,56 @@ fn finish_run(args: &RunArgs, recorder: &CallRecorder, outcome: &Outcome) -> Res
         outcome.calls,
         recorder.log_dir().display()
     );
+    if let Some(t) = tools {
+        let verify = format!(
+            "erebus verify-attest --chain {} --tool-trail {} --require-tool-execution",
+            recorder.log_dir().display(),
+            t.log_dir().display()
+        );
+        eprintln!(
+            "[erebus] agent: tool receipts → {}; verify: {verify}",
+            t.log_dir().display()
+        );
+        if args.require_tool_execution {
+            post_run_verify(recorder.log_dir(), t.log_dir(), &args.attest_key)?;
+        }
+    }
     eprintln!("{HONEST_LIMIT}");
     Ok(())
+}
+
+/// In-process `verify-attest --chain … --tool-trail … --require-tool-execution`.
+fn post_run_verify(agent_trail: &Path, tool_trail: &Path, key: &Path) -> Result<()> {
+    let trusted = key
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let args = super::verify_attest::VerifyAttestArgs {
+        attest_file: None,
+        chain: Some(agent_trail.to_path_buf()),
+        bundle: None,
+        trusted_dir: Some(trusted),
+        proof: false,
+        proof_file: None,
+        log_key: None,
+        strict: false,
+        response_body: None,
+        expected_output_hash: None,
+        request_body: None,
+        require_tool_linkage: false,
+        tool_trail: vec![tool_trail.display().to_string()],
+        require_tool_execution: true,
+        tool_trusted_dir: None,
+        approver_key: None,
+        witness_key: None,
+        require_witness: false,
+        provenance: None,
+        json: false,
+        output: None,
+    };
+    eprintln!("[erebus] agent: running verify-attest --require-tool-execution …");
+    super::verify_attest::run(args)
 }
 
 fn build_recorder(args: &RunArgs) -> Result<Arc<CallRecorder>> {
@@ -527,6 +637,7 @@ fn loop_openai(
     http_tools: &HashMap<String, String>,
     mcp_clients: &mut [McpClient],
     recorder: &CallRecorder,
+    tool_attestor: Option<&ToolAttestor>,
     client_records: bool,
 ) -> Result<Outcome> {
     let path = "/v1/chat/completions";
@@ -566,6 +677,7 @@ fn loop_openai(
                     http_tools,
                     mcp: mcp_clients,
                     allow_mcp: args.allow_mcp,
+                    tools: tool_attestor,
                 };
                 append_openai_tool_results(&mut messages, tcs, &mut ctx)?;
                 continue;
@@ -609,7 +721,7 @@ fn append_openai_tool_results(
         let name = tc["function"]["name"].as_str().unwrap_or("");
         let id = tc["id"].as_str().unwrap_or("call");
         let arguments = tc["function"]["arguments"].as_str().unwrap_or("{}");
-        let content = execute_tool(name, arguments, ctx)?;
+        let content = execute_tool(name, arguments, Some(id), ctx)?;
         messages.push(json!({
             "role": "tool",
             "tool_call_id": id,
@@ -629,6 +741,7 @@ fn loop_anthropic(
     http_tools: &HashMap<String, String>,
     mcp_clients: &mut [McpClient],
     recorder: &CallRecorder,
+    tool_attestor: Option<&ToolAttestor>,
     client_records: bool,
 ) -> Result<Outcome> {
     let path = "/v1/messages";
@@ -684,6 +797,7 @@ fn loop_anthropic(
             http_tools,
             mcp: mcp_clients,
             allow_mcp: args.allow_mcp,
+            tools: tool_attestor,
         };
         let results = anthropic_tool_results(&tool_uses, &mut ctx)?;
         messages.push(json!({"role": "user", "content": results}));
@@ -733,7 +847,7 @@ fn anthropic_tool_results(tool_uses: &[&Value], ctx: &mut ToolCtx<'_>) -> Result
         let id = tu["id"].as_str().unwrap_or("toolu");
         let input = tu.get("input").cloned().unwrap_or(json!({}));
         let arguments = serde_json::to_string(&input)?;
-        let text = execute_tool(name, &arguments, ctx)?;
+        let text = execute_tool(name, &arguments, Some(id), ctx)?;
         results.push(json!({
             "type": "tool_result",
             "tool_use_id": id,
@@ -757,7 +871,12 @@ fn openai_tools_to_anthropic(tools: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-fn execute_tool(name: &str, arguments: &str, ctx: &mut ToolCtx<'_>) -> Result<String> {
+fn execute_tool(
+    name: &str,
+    arguments: &str,
+    call_id: Option<&str>,
+    ctx: &mut ToolCtx<'_>,
+) -> Result<String> {
     let mcp_owned = ctx.mcp.iter().any(|c| c.names.iter().any(|n| n == name));
     let allowed = ctx.allow.contains(name) || (ctx.allow_mcp && mcp_owned);
     if ctx.allow.is_empty() && !ctx.allow_mcp {
@@ -766,26 +885,35 @@ fn execute_tool(name: &str, arguments: &str, ctx: &mut ToolCtx<'_>) -> Result<St
     if !allowed {
         bail!("tool {name:?} is not in the allowlist ({:?})", ctx.allow);
     }
+    let (content, mcp_result) = run_tool_body(name, arguments, call_id, mcp_owned, ctx)?;
+    if let Some(attestor) = ctx.tools {
+        attestor.record(name, call_id, arguments, &content, mcp_result.as_ref())?;
+    }
+    Ok(content)
+}
+
+fn run_tool_body(
+    name: &str,
+    arguments: &str,
+    call_id: Option<&str>,
+    mcp_owned: bool,
+    ctx: &mut ToolCtx<'_>,
+) -> Result<(String, Option<Value>)> {
     if name == "echo" {
-        return Ok(arguments.to_string());
+        return Ok((arguments.to_string(), None));
     }
     if mcp_owned {
-        return mcp::call_named(ctx.mcp, name, arguments);
+        let (text, result) = mcp::call_named(ctx.mcp, name, arguments, call_id)?;
+        return Ok((text, Some(result)));
     }
     if let Some(url) = ctx.http_tools.get(name) {
-        let (status, body) = http_post(
-            url,
-            arguments.as_bytes(),
-            None,
-            &[("Content-Type", "application/json")],
-        )?;
-        if !(200..300).contains(&status) {
-            bail!(
-                "tool {name} HTTP {status}: {}",
-                String::from_utf8_lossy(&body)
-            );
+        let id_hdr = call_id.filter(|s| !s.is_empty()).map(str::to_string);
+        let mut headers = vec![("Content-Type", "application/json")];
+        if let Some(ref id) = id_hdr {
+            headers.push((erebus_core::tool_exec::CALL_ID_HEADER, id.as_str()));
         }
-        return Ok(String::from_utf8_lossy(&body).into_owned());
+        let (_, body) = http_post(url, arguments.as_bytes(), None, &headers)?;
+        return Ok((String::from_utf8_lossy(&body).into_owned(), None));
     }
     bail!("tool {name:?} is allowlisted but has no executor (echo, --tool-http, or --mcp)")
 }

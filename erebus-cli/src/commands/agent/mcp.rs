@@ -1,8 +1,9 @@
 //! Minimal MCP client for `erebus agent run`: stdio and Streamable HTTP.
 //!
-//! Discovers tools via `tools/list` and executes `tools/call`. Prefer this over
-//! inventing a parallel tool system; pair with `erebus attest-tool` for a
-//! signed tool boundary when you need chain verification.
+//! Discovers tools via `tools/list` and executes `tools/call`. Tool-trail
+//! receipts are signed in-process by the agent (`tool_attest`); a standalone
+//! `erebus attest-tool` boundary remains available when the tool is a
+//! separate process you do not control.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -117,13 +118,23 @@ impl McpClient {
         Ok(())
     }
 
-    /// Call an MCP tool; return text for the model (joined content blocks).
-    pub fn call_tool(&mut self, name: &str, arguments: &Value) -> Result<String> {
-        let result = self.request("tools/call", json!({"name": name, "arguments": arguments}))?;
+    /// Call an MCP tool; return (text for the model, raw MCP `result` object).
+    /// When `call_id` is set it is sent in `params._meta` for tool boundaries.
+    pub fn call_tool(
+        &mut self,
+        name: &str,
+        arguments: &Value,
+        call_id: Option<&str>,
+    ) -> Result<(String, Value)> {
+        let mut params = json!({"name": name, "arguments": arguments});
+        if let Some(id) = call_id.filter(|s| !s.is_empty()) {
+            params["_meta"] = json!({ erebus_core::tool_exec::CALL_ID_META: id });
+        }
+        let result = self.request("tools/call", params)?;
         if result.get("isError").and_then(Value::as_bool) == Some(true) {
             bail!("MCP tool {name:?} reported isError: {result}");
         }
-        Ok(mcp_result_text(&result))
+        Ok((mcp_result_text(&result), result))
     }
 
     fn next_id(&self) -> u64 {
@@ -316,11 +327,16 @@ fn register_names(
 }
 
 /// Route `name` to the owning client and call it.
-pub fn call_named(clients: &mut [McpClient], name: &str, arguments_json: &str) -> Result<String> {
+pub fn call_named(
+    clients: &mut [McpClient],
+    name: &str,
+    arguments_json: &str,
+    call_id: Option<&str>,
+) -> Result<(String, Value)> {
     let args: Value = serde_json::from_str(arguments_json).unwrap_or(json!({}));
     for c in clients.iter_mut() {
         if c.names.iter().any(|n| n == name) {
-            return c.call_tool(name, &args);
+            return c.call_tool(name, &args, call_id);
         }
     }
     bail!("no MCP server owns tool {name:?}")

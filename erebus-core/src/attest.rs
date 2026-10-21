@@ -454,6 +454,13 @@ impl AttestationTemplate {
         Self::from_descriptor(descriptor, program, "tool", "erebus attest-tool")
     }
 
+    /// Tool receipts written in-process by `erebus agent run` (same `tool`
+    /// flag as [`Self::for_tool`], builder names the agent so trails are
+    /// distinguishable from a standalone `attest-tool` boundary).
+    pub fn for_agent_tool(descriptor: &serde_json::Value) -> Result<Self, anyhow::Error> {
+        Self::from_descriptor(descriptor, None, "tool", "erebus agent")
+    }
+
     /// Template for `erebus agent run` when no `.erebus` bundle is the subject:
     /// the run descriptor (provider, model, base URL host) is hashed as JCS.
     pub fn for_agent(descriptor: &serde_json::Value) -> Result<Self, anyhow::Error> {

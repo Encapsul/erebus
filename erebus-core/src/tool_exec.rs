@@ -67,6 +67,51 @@ fn raw_digest(bytes: &[u8]) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
 }
 
+/// Digests of a result as relayed to the model: raw bytes, plus JCS when JSON.
+pub fn relayed_result_hashes(content: &[u8]) -> Vec<String> {
+    let mut hashes = vec![raw_digest(content)];
+    if let Ok(v) = serde_json::from_slice::<Value>(content) {
+        if let Some(h) = jcs_digest(&v) {
+            hashes.push(h);
+        }
+    }
+    hashes.dedup();
+    hashes
+}
+
+/// In-process tool execution for `erebus agent run`: same `tool_invocation`
+/// digests as [`from_http_exchange`] / MCP attach, without a proxy boundary.
+/// Prefer this over spawning `erebus attest-tool` per call.
+pub fn from_agent_execution(
+    protocol: &str,
+    name: &str,
+    arguments: Option<&Value>,
+    content: &[u8],
+    call_id: Option<&str>,
+    mcp_result: Option<&Value>,
+) -> ToolInvocation {
+    let arguments_jcs_hash = canonical_arguments_digest(arguments);
+    let incomplete = arguments_jcs_hash.is_none();
+    let mut result_hashes = match mcp_result {
+        Some(result) => mcp_result_hashes(result),
+        None => relayed_result_hashes(content),
+    };
+    // Always cover the exact bytes the agent feeds back (text join for MCP).
+    let relayed = raw_digest(content);
+    if !result_hashes.contains(&relayed) {
+        result_hashes.push(relayed);
+    }
+    ToolInvocation {
+        protocol: protocol.to_string(),
+        name: Some(name.to_string()).filter(|n| !n.is_empty() && n.len() <= MAX_LABEL),
+        arguments_jcs_hash,
+        result_hashes,
+        is_error: false,
+        incomplete,
+        call_id: call_id_label(call_id),
+    }
+}
+
 fn parse_object(bytes: &[u8]) -> Option<Value> {
     let first = bytes.iter().find(|b| !b.is_ascii_whitespace())?;
     if *first != b'{' || bytes.len() > MAX_TOOL_BODY {
@@ -378,6 +423,21 @@ mod tests {
                 .unwrap()
                 .incomplete
         );
+    }
+
+    #[test]
+    fn agent_execution_covers_relayed_bytes_and_call_id() {
+        let args = serde_json::json!({"text": "pong"});
+        let content = br#"{"text":"pong"}"#;
+        let inv = from_agent_execution("http", "echo", Some(&args), content, Some("call_1"), None);
+        assert_eq!(inv.protocol, "http");
+        assert_eq!(inv.name.as_deref(), Some("echo"));
+        assert_eq!(inv.call_id.as_deref(), Some("call_1"));
+        assert_eq!(
+            inv.arguments_jcs_hash,
+            canonical_arguments_digest(Some(&args))
+        );
+        assert!(inv.result_hashes.contains(&h(r#"{"text":"pong"}"#)));
     }
 
     #[test]

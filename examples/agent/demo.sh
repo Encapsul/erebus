@@ -35,7 +35,8 @@ BASE="http://127.0.0.1:${PORT}"
 KEY="$(find "$DIR/keys" -name '*.key' | head -1)"
 MCP_SPEC="[\"python3\",\"$ROOT/examples/agent/fake_mcp.py\"]"
 
-echo "[demo] LLM at $BASE; MCP stdio fake_mcp.py; trail → $DIR/run.attest.d" >&2
+echo "[demo] LLM at $BASE; MCP stdio fake_mcp.py" >&2
+echo "[demo] agent trail → $DIR/run.attest.d ; tool trail → $DIR/run.tools.attest.d" >&2
 echo "[demo] Receipt proves execution/bytes/tools — NOT task success." >&2
 
 "$EREBUS" agent run \
@@ -45,12 +46,19 @@ echo "[demo] Receipt proves execution/bytes/tools — NOT task success." >&2
   --task "What is the weather in Paris?" \
   --attest-key "$KEY" \
   --attest-log "$DIR/run.attest.d" \
+  --tool-trail "$DIR/run.tools.attest.d" \
   --mcp-stdio "$MCP_SPEC" \
   --allow-mcp \
   --stream \
-  --response-body "$DIR/last.json"
+  --response-body "$DIR/last.json" \
+  --require-tool-execution
 
-echo "[demo] verify last receipt:" >&2
+echo "[demo] verify last receipt + tool trail:" >&2
 LAST="$(ls "$DIR/run.attest.d"/*.json | sort | tail -1)"
 "$EREBUS" verify-attest "$LAST" --trusted-dir "$DIR/keys" --response-body "$DIR/last.json"
+"$EREBUS" verify-attest \
+  --chain "$DIR/run.attest.d" \
+  --trusted-dir "$DIR/keys" \
+  --tool-trail "$DIR/run.tools.attest.d" \
+  --require-tool-execution
 echo "[demo] OK" >&2
