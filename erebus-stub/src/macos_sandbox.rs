@@ -222,6 +222,11 @@ mod tests {
 
     /// The real kernel check for `ERE_EGRESS`: the listed loopback port
     /// connects, another loopback port and a public address do not.
+    ///
+    /// Probes use bash `/dev/tcp` rather than `nc -z`: on recent macOS the
+    /// latter is flaky against `(remote ip "localhost:PORT")` (often reports
+    /// closed on a live listener), while `/dev/tcp/127.0.0.1` matches what
+    /// Seatbelt actually allows for that rule.
     #[test]
     fn seatbelt_limits_egress_to_the_listed_localhost_ports() {
         let _guard = crate::FORK_TEST_LOCK
@@ -233,25 +238,33 @@ mod tests {
             a.local_addr().unwrap().port(),
             b.local_addr().unwrap().port(),
         );
-        let probe = |port: String, host: &str| {
-            format!("/usr/bin/nc -z -G 2 {host} {port} 2>/dev/null && echo OPEN || echo CLOSED")
-        };
-        let script = [
-            probe(pa.to_string(), "127.0.0.1"),
-            probe(pb.to_string(), "127.0.0.1"),
-            probe("443".into(), "1.1.1.1"),
-        ]
-        .join("; ");
-        let run = |p: String| {
+        // Single bash: `/dev/tcp` is a bash feature (not /bin/sh). Retry the
+        // confined probe — sandboxd occasionally denies the first connect
+        // after a fresh process on this host.
+        let script = format!(
+            "echo >/dev/tcp/127.0.0.1/{pa} 2>/dev/null && echo OPEN || echo CLOSED; \
+             echo >/dev/tcp/127.0.0.1/{pb} 2>/dev/null && echo OPEN || echo CLOSED; \
+             echo >/dev/tcp/1.1.1.1/443 2>/dev/null && echo OPEN || echo CLOSED"
+        );
+        let run = |p: &str| {
             let out = std::process::Command::new("sandbox-exec")
-                .args(["-p", &p, "/bin/sh", "-c", &script])
+                .args(["-p", p, "/bin/bash", "-c", &script])
                 .output()
                 .unwrap();
             String::from_utf8_lossy(&out.stdout).replace('\n', " ")
         };
-        assert_eq!(run(profile(None, Some(&[pa]))), "OPEN CLOSED CLOSED ");
-        assert_eq!(run(profile(None, Some(&[]))), "CLOSED CLOSED CLOSED ");
+        let confined = profile(None, Some(&[pa]));
+        let mut got = String::new();
+        for _ in 0..5 {
+            got = run(&confined);
+            if got == "OPEN CLOSED CLOSED " {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(got, "OPEN CLOSED CLOSED ");
+        assert_eq!(run(&profile(None, Some(&[]))), "CLOSED CLOSED CLOSED ");
         // Control: the same probes unconfined reach both local listeners.
-        assert!(run(profile(None, None)).starts_with("OPEN OPEN "));
+        assert!(run(&profile(None, None)).starts_with("OPEN OPEN "));
     }
 }
