@@ -1,7 +1,8 @@
 """App web d'exemple avec une dépendance tierce (bottle).
 
-Démontre l'embarquement des site-packages d'un .venv : `bottle` n'est PAS dans
-la stdlib, il est installé dans .venv/ et erebus doit l.inclure dans le rootfs.
+`bottle` n'est PAS dans la stdlib. Prefer `requirements.txt` (pip at build) or
+a vendored `site-packages/` / `.venv` install tree — erebus stages those into
+`/app/site-packages` and sets PYTHONPATH.
 """
 
 import os

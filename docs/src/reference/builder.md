@@ -120,9 +120,13 @@ the host. See [Isolation](./isolation.md).
 ## pip install at build time
 
 If the app has a `requirements.txt` with content (non-empty), the builder
-automatically creates a temporary venv, pip-installs dependencies, and
-embeds them as an additional site-packages entry in `PYTHONPATH`:
+pip-installs dependencies into the rootfs Python site-packages layout.
 
 ```
-[erebus] pip install: ./my_app/requirements.txt → /app/site-packages
+[erebus] pip install: ./my_app/requirements.txt → …/site-packages
 ```
+
+Separately, a vendored `site-packages/` directory and/or the install tree from
+`.venv` / `venv` are merged into `/app/site-packages`, with
+`PYTHONPATH=${ROOTFS}/app/site-packages` recorded in metadata (the stub also
+injects that path when the directory exists). See [Python](../guides/python.md).

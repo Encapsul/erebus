@@ -1,17 +1,20 @@
 # Packaging a Native Binary
 
-`erebus` can package a pre-compiled ELF binary into a self-extracting executable.
-No runtime embedding is needed — just the binary and its shared libraries.
+`erebus` can package a pre-compiled native binary into a self-extracting
+executable. No runtime embedding is needed — just the binary and its shared
+libraries (when dynamic).
 
 ## Detection
 
-The builder detects a native binary when a single ELF executable is found in the
-app directory and no Python runtime is detected.
+The builder detects a native binary when **exactly one** ELF, PE (`.exe`), or
+Mach-O (thin or universal) executable is found at the app root and no Python
+runtime is detected. Two or more native binaries (for example PE + ELF) is an
+error: keep a single entry binary or add a Python entrypoint.
 
 ```
 my-binary/
-  my-app          ← ELF executable (auto-detected)
-  libfoo.so       ← optional shared library
+  my-app          ← ELF / PE / Mach-O (auto-detected)
+  libfoo.so       ← optional shared library (ELF builds)
 ```
 
 ## Build
@@ -22,8 +25,8 @@ erebus build ./my-binary -o my-binary.erebus
 
 The builder:
 
-1. detects the ELF binary via the `\x7fELF` magic bytes;
-2. resolves its shared library dependencies via the ELF analyzer;
+1. detects the binary via magic bytes (`\x7fELF`, `MZ`, Mach-O);
+2. resolves shared library dependencies via the ELF analyzer (Linux ELF);
 3. packages the binary + libraries into the app layer;
 4. compresses and assembles the `.erebus`.
 
@@ -32,7 +35,7 @@ The builder:
 No runtime interpreter is embedded. The launcher:
 
 1. extracts the binary and its `.so` dependencies to the cache;
-2. sets `LD_LIBRARY_PATH` to include the extracted library directories;
+2. sets `LD_LIBRARY_PATH` to include the extracted library directories (Unix);
 3. `execvp`s the binary directly.
 
 ## Shared library resolution
@@ -56,8 +59,18 @@ the target arch.
 
 ## Known limitations
 
-- Only ELF binaries are supported (no PE/Windows, no Mach-O/macOS).
-- Statically linked binaries (no `.so` dependencies) work perfectly — the
-  smallest possible `.erebus`.
+- **Stub vs payload ABI**: the Linux launcher stub is a **musl static-pie**.
+  A stale **glibc**-linked stub (or mixing a glibc payload interpreter with the
+  wrong stub) fails at launch — rebuild with `make stub` /
+  `--target $(uname -m)-unknown-linux-musl`. See `AGENTS.md`.
+- Windows packaging of PE is build-host detection only; the production launcher
+  path targeted in CI is Linux. Do not assume PE redistributables are supported
+  end-to-end.
+- Mach-O is detected for macOS agent binaries; sandbox/isolation differs from
+  Linux `pivot_root`.
+- Statically linked binaries (no `.so` dependencies) work — the smallest
+  possible `.erebus`.
 - Binaries with unusual loader paths (`/lib/ld-linux.so.2`) may need the
   loader embedded in the rootfs.
+- **PyInstaller onefile** and **`.pyz` zipapps** are refused at detect time —
+  package the Python sources (or a plain native binary) instead.

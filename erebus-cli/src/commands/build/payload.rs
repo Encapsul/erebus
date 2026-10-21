@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use erebus_core::detect;
 use std::path::{Path, PathBuf};
 
 use super::deps::is_command_available;
@@ -91,6 +92,33 @@ pub(crate) fn copy_dir_recursive_with(
     Ok(())
 }
 
+/// Copy `.venv`/`venv` site-packages into `rootfs/app/site-packages`.
+///
+/// The venv tree itself stays excluded from the payload walk (secrets, large
+/// binaries). Only the install tree is merged on top of any vendored
+/// `site-packages/` already copied with the app.
+pub(crate) fn stage_venv_site_packages(
+    app_dir: &Path,
+    rootfs: &Path,
+    verbose: bool,
+) -> Result<bool> {
+    let Some(src) = detect::find_venv_site_packages(app_dir) else {
+        return Ok(false);
+    };
+    let dest = rootfs.join("app").join("site-packages");
+    std::fs::create_dir_all(&dest)?;
+    copy_dir_recursive_with(&src, &dest, true)
+        .with_context(|| format!("failed to copy venv site-packages from {}", src.display()))?;
+    eprintln!(
+        "[erebus] embedded venv site-packages: {} → /app/site-packages",
+        src.display()
+    );
+    if verbose {
+        eprintln!("  site-packages files: {}", count_files(&dest));
+    }
+    Ok(true)
+}
+
 /// Whether any `--include` path resolves to `app_dir/.env`.
 ///
 /// Canonicalization mirrors `copy_include_paths` so relative paths and `..`
@@ -162,6 +190,18 @@ pub(crate) fn create_squashfs_payload(rootfs: &Path, verbose: bool) -> Result<Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stage_venv_site_packages_copies_install_tree() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let app = dir.path().join("app");
+        let rootfs = dir.path().join("rootfs");
+        let sp = app.join(".venv/lib/python3.12/site-packages");
+        std::fs::create_dir_all(&sp).unwrap();
+        std::fs::write(sp.join("greet.py"), "x=1\n").unwrap();
+        assert!(stage_venv_site_packages(&app, &rootfs, false).unwrap());
+        assert!(rootfs.join("app/site-packages/greet.py").is_file());
+    }
 
     #[test]
     fn include_points_to_env_matches_only_explicit_env() {

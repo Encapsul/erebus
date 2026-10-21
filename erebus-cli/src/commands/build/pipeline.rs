@@ -12,7 +12,10 @@ use std::process::Command;
 
 use super::args::{config_fingerprint, parse_target, BuildArgs, BuildPlan};
 use super::deps::is_command_available;
-use super::payload::{copy_dir_recursive_with, create_squashfs_payload, include_points_to_env};
+use super::payload::{
+    copy_dir_recursive_with, create_squashfs_payload, include_points_to_env,
+    stage_venv_site_packages,
+};
 use super::sign::sign_macos_binary;
 use super::sisr::{build_sisr_config, report_sisr_bandwidth};
 use super::stub::{find_stub, read_existing_hashes};
@@ -313,10 +316,17 @@ pub(crate) fn build_single_target(
     // Clean up downloaded build tools from cache (deferred: nothing downloads
     // tools today, but the cleanup stays for parity with the cache layout).
 
-    // Copy app files
+    // Copy app files (.venv / venv directories are skipped — see stage below)
     let include_node_modules = true;
     copy_dir_recursive_with(app_dir, &rootfs.join("app"), include_node_modules)
         .context("failed to copy app files")?;
+
+    // Embed site-packages from .venv/venv into /app/site-packages (docs promise).
+    // Vendored app/site-packages/ is already present from the copy above.
+    if runtime_name == "python" {
+        stage_venv_site_packages(app_dir, &rootfs, verbose)
+            .context("failed to stage venv site-packages")?;
+    }
 
     // ── Include extra files ───────────────────────────────────────────
     if !args.include.is_empty() {
@@ -574,6 +584,15 @@ pub(crate) fn build_single_target(
     let mut env_map = serde_json::Map::new();
     env_map.insert("ERE_RUNTIME".into(), runtime_name.clone().into());
     env_map.insert("ERE_APP_NAME".into(), app_name.clone().into());
+
+    // Vendored or venv-copied site-packages: declare PYTHONPATH with the
+    // ${ROOTFS} token so the launcher resolves the cache path at exec time.
+    // The stub also injects this when /app/site-packages exists (belt+suspenders).
+    if runtime_name == "python" && rootfs.join("app/site-packages").is_dir() {
+        env_map.insert("PYTHONPATH".into(), "${ROOTFS}/app/site-packages".into());
+        env_map.insert("PYTHONUNBUFFERED".into(), "1".into());
+        env_map.insert("PYTHONDONTWRITEBYTECODE".into(), "1".into());
+    }
 
     // Load env-file (KEY=VALUE per line, # comments, blank lines)
     if let Some(ref ef) = env_file {

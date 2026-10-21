@@ -128,6 +128,10 @@ pub fn setup_env(
         if !env.contains_key("PYTHONUNBUFFERED") {
             env.insert("PYTHONUNBUFFERED".into(), "1".into());
         }
+        if !env.contains_key("PYTHONDONTWRITEBYTECODE") {
+            env.insert("PYTHONDONTWRITEBYTECODE".into(), "1".into());
+        }
+        inject_pythonpath(&mut env, rootfs, use_pivot);
         if !env.contains_key("DJANGO_SETTINGS_MODULE") {
             if let Some(settings) = detect_django_settings(rootfs) {
                 env.insert("DJANGO_SETTINGS_MODULE".into(), settings);
@@ -198,6 +202,33 @@ pub fn setup_env(
     crate::gpu::apply(&mut env, meta);
 
     Ok(env)
+}
+
+/// Prepend `/app/site-packages` (pivot) or `{rootfs}/app/site-packages` when
+/// the vendored/venv install tree is present. Matches the builder's
+/// `PYTHONPATH=${ROOTFS}/app/site-packages` contract.
+fn inject_pythonpath(env: &mut BTreeMap<String, String>, rootfs: &Path, use_pivot: bool) {
+    let site = if use_pivot {
+        PathBuf::from("/app/site-packages")
+    } else {
+        rootfs.join("app/site-packages")
+    };
+    if !site.is_dir() {
+        return;
+    }
+    let site_str = site.to_string_lossy().into_owned();
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    match env.get("PYTHONPATH") {
+        Some(existing) if !existing.is_empty() => {
+            if existing.split(sep).any(|p| p == site_str) {
+                return;
+            }
+            env.insert("PYTHONPATH".into(), format!("{site_str}{sep}{existing}"));
+        }
+        _ => {
+            env.insert("PYTHONPATH".into(), site_str);
+        }
+    }
 }
 
 /// Detect Django settings module from manage.py or settings.py layout.
@@ -2179,6 +2210,49 @@ mod tests {
         );
         // .env still fills gaps.
         assert_eq!(env.get("NODE_ENV").map(String::as_str), Some("staging"));
+    }
+
+    #[test]
+    fn setup_env_injects_pythonpath_for_site_packages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path();
+        std::fs::create_dir_all(rootfs.join("app/site-packages")).unwrap();
+        std::fs::write(rootfs.join("app/site-packages/greet.py"), "x = 1\n").unwrap();
+
+        let meta = Metadata {
+            name: "test".into(),
+            version: None,
+            runtime: "python".into(),
+            entrypoint: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: None,
+            isolation: 0,
+            seccomp: false,
+            gui: false,
+            landlock: false,
+            services: Vec::new(),
+            crypto: None,
+            payload_format: String::new(),
+            health_check: None,
+            update_url: None,
+            entrypoint_layer: None,
+            artifact_state: None,
+            artifact_policy: None,
+            layers: Vec::new(),
+        };
+        let env = setup_env(&meta, rootfs, false, None, &AppConfig::default()).unwrap();
+        let expected = rootfs
+            .join("app/site-packages")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            env.get("PYTHONPATH").map(String::as_str),
+            Some(expected.as_str())
+        );
+        assert_eq!(
+            env.get("PYTHONDONTWRITEBYTECODE").map(String::as_str),
+            Some("1")
+        );
     }
 
     #[test]

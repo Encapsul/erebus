@@ -46,9 +46,8 @@ pub fn run(args: BuildArgs, verbose: bool) -> Result<()> {
     let isolation_num = args::parse_isolation(&isolation)
         .with_context(|| format!("invalid --isolation value: '{isolation}'"))?;
 
-    // Detect runtime
-    let runtime = detect::detect_runtime(&app_dir)
-        .context("could not detect runtime — supported: python, binary")?;
+    // Detect runtime (structured failures: ambiguous PE+ELF, PyInstaller, …)
+    let runtime = detect::detect_runtime(&app_dir).map_err(|e| anyhow::anyhow!("{e}"))?;
     let runtime_name = runtime.name().to_string();
 
     eprintln!("Detected runtime: {runtime_name}");

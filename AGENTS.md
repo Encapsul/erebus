@@ -9,6 +9,7 @@ erebus packages any app into a single self-extracting ELF binary and emits a sig
 - **vfat filesystem**: repo lives on vfat (no exec bit). Cargo target dir is `/tmp/erebus-stub-target` (set in `.cargo/config.toml`). Build artifacts cannot live in the repo tree.
 - **PATH**: tools installed in `~/.local/bin`. Prefix with `export PATH="$HOME/.local/bin:$PATH"` when running pip-installed tools.
 - **musl target**: stub builds with `--target $(uname -m)-unknown-linux-musl` for static linking. Requires `rustup target add` and a C compiler (musl-tools on Ubuntu).
+- **Stale glibc stub pitfall**: the Linux launcher must be the **musl static-pie** from `make stub`. A leftover glibc-linked stub (wrong target, old artifact under `/tmp/erebus-stub-target`, or copying a host `target/release` binary) produces launch failures that look like “interpreter / loader not found”. Fix: `make stub` (or rebuild `--target $(uname -m)-unknown-linux-musl`) and point `ERE_STUB_PATH` at that artifact. Do not mix a musl stub with a hand-built glibc stub from the same tree.
 - **CI runs clippy per-crate**, not workspace-wide: `cargo clippy -p erebus-core --all-targets -- -D warnings`, then same for `erebus-stub`, then `erebus-cli`.
 
 ## Commands
