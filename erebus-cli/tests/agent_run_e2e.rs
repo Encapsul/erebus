@@ -9,9 +9,15 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use tempfile::tempdir;
+
+/// Bound on fake-LLM startup. macOS CI can be slow to exec python3; the
+/// server must still fail the test if it never prints a port.
+const LLM_START_BUDGET: Duration = Duration::from_secs(30);
 
 /// Fake OpenAI-compat LLM: tools → `get_weather` or echo; then text. SSE if asked.
 struct FakeLlm {
@@ -21,43 +27,76 @@ struct FakeLlm {
 
 impl FakeLlm {
     fn start() -> Self {
-        let script = include_str!("../../examples/agent/fake_llm.py");
-        // Unique path per start() — tests run in parallel and share one PID.
-        let path = std::env::temp_dir().join(format!(
-            "erebus-agent-llm-{}-{}.py",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::write(&path, script).unwrap();
-        let mut child = Command::new("python3")
-            .arg(&path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("python3");
-        let stdout = child.stdout.take().expect("stdout");
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let mut lines = BufReader::new(stdout).lines();
-            let _ = tx.send(lines.next().transpose().ok().flatten());
-        });
-        let port_line = rx
-            .recv_timeout(Duration::from_secs(5))
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| {
-                let _ = child.kill();
-                panic!("fake LLM port missing within 5s ({})", path.display());
-            });
-        let port: u16 = port_line.trim().parse().expect("port number");
+        let path = write_fake_llm_script();
+        let mut child = spawn_fake_llm(&path);
+        let stderr = drain_stderr(&mut child);
+        let port_line = wait_port_line(&mut child, &stderr);
         let _ = std::fs::remove_file(&path);
+        let port: u16 = port_line.trim().parse().unwrap_or_else(|_| {
+            let _ = child.kill();
+            panic!("fake LLM port unparseable: {port_line:?}");
+        });
         let base = format!("http://127.0.0.1:{port}");
-        wait_ready(&base, Duration::from_secs(5));
+        wait_ready(&base, LLM_START_BUDGET);
         Self { base, child }
     }
+}
+
+/// One script file per start. Parallel tests share a pid, so a clock-based
+/// name can collide and one test deletes the file the others are still opening.
+fn write_fake_llm_script() -> PathBuf {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("erebus-agent-llm-{}-{n}.py", std::process::id()));
+    std::fs::write(&path, include_str!("../../examples/agent/fake_llm.py")).unwrap();
+    path
+}
+
+fn spawn_fake_llm(path: &Path) -> Child {
+    Command::new("python3")
+        .arg(path)
+        .env("PYTHONUNBUFFERED", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("python3")
+}
+
+fn drain_stderr(child: &mut Child) -> Receiver<Vec<u8>> {
+    let mut err = child.stderr.take().expect("stderr");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = err.read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    });
+    rx
+}
+
+fn wait_port_line(child: &mut Child, stderr: &Receiver<Vec<u8>>) -> String {
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut lines = BufReader::new(stdout).lines();
+        let _ = tx.send(lines.next().transpose().ok().flatten());
+    });
+    match rx.recv_timeout(LLM_START_BUDGET) {
+        Ok(Some(line)) if !line.trim().is_empty() => line,
+        _ => llm_failed(child, stderr),
+    }
+}
+
+fn llm_failed(child: &mut Child, stderr: &Receiver<Vec<u8>>) -> ! {
+    let _ = child.kill();
+    let _ = child.wait();
+    let err = stderr
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_default();
+    panic!(
+        "fake LLM port missing within {}s; stderr={}",
+        LLM_START_BUDGET.as_secs(),
+        String::from_utf8_lossy(&err)
+    );
 }
 
 impl Drop for FakeLlm {

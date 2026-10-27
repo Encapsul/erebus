@@ -132,7 +132,7 @@ fn rewrite_pack(
     let opts = zip::write::SimpleFileOptions::default();
     for i in 0..zin.len() {
         let mut e = zin.by_index(i).unwrap();
-        let name = e.name().to_string();
+        let name = e.name().expect("zip entry name").into_owned();
         let mut bytes = Vec::new();
         e.read_to_end(&mut bytes).unwrap();
         if let Some(b) = edit(&name, bytes) {

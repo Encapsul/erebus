@@ -18,7 +18,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Compression
-ruzstd = "0.7"          # zstd decompression (pure Rust, for reading)
+ruzstd = "0.9.1"       # zstd decompression (pure Rust, for reading); >=0.9.1: RUSTSEC-2026-0344
 zstd = { version = "0.13", features = ["zstdmt"] }  # zstd compression (multithreaded)
 
 # Tar archive creation

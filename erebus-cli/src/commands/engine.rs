@@ -141,7 +141,7 @@ fn unzip_release(dir: &Path, bytes: &[u8]) -> Result<()> {
         .context("downloaded llama.cpp runtime is not a valid zip")?;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).context("failed to read zip entry")?;
-        let out = dir.join(entry.mangled_name());
+        let out = dir.join(entry.mangled_name().context("zip entry path")?);
         if entry.is_dir() {
             std::fs::create_dir_all(&out)?;
             continue;

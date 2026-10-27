@@ -769,7 +769,7 @@ extern "system" fn ProcessPrng(pb_data: *mut u8, cb_data: usize) -> i32 {
 mod tests {
     use super::{spawn, CloseHandle, GetExitCodeProcess, STILL_ACTIVE};
     use std::collections::BTreeMap;
-    use std::ffi::OsString;
+    use std::ffi::{c_void, OsString};
     use std::path::Path;
     use std::time::Duration;
 

@@ -2106,6 +2106,7 @@ mod tests {
         assert!(!check_executable("/nonexistent/binary"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn entrypoint_executable_falls_back_to_rootfs_interpreter() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2120,6 +2121,7 @@ mod tests {
         assert!(entrypoint_is_executable(b"python3", "python3", rootfs));
     }
 
+    #[cfg(unix)]
     #[test]
     fn entrypoint_executable_rejects_absolute_missing_path() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2255,6 +2257,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn wait_for_children_ignores_spurious_and_waits_for_tracked() {
         // Serialized: waitpid(-1, ...) reaps ANY child of the process, so
@@ -2288,6 +2291,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn wait_for_children_ok_when_tracked_exits_zero() {
         // Serialized: see wait_for_children_ignores_spurious_and_waits_for_tracked.

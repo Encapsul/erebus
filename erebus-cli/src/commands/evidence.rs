@@ -676,17 +676,13 @@ fn unpack(pack: &Path, dest: &Path) -> Result<BTreeSet<String>> {
         if entry.is_dir() {
             continue;
         }
+        let name = entry.name().with_context(|| format!("zip entry {i}"))?;
         let rel = entry
             .enclosed_name()
-            .ok_or_else(|| anyhow::anyhow!("unsafe path in pack: {}", entry.name()))?;
-        anyhow::ensure!(!entry.is_symlink(), "link in pack: {}", entry.name());
-        anyhow::ensure!(
-            entry.size() <= MAX_ENTRY_BYTES,
-            "oversized entry: {}",
-            entry.name()
-        );
-        let name = entry.name().to_string();
-        anyhow::ensure!(names.insert(name.clone()), "duplicate entry: {name}");
+            .ok_or_else(|| anyhow::anyhow!("unsafe path in pack: {name}"))?;
+        anyhow::ensure!(!entry.is_symlink(), "link in pack: {name}");
+        anyhow::ensure!(entry.size() <= MAX_ENTRY_BYTES, "oversized entry: {name}");
+        anyhow::ensure!(names.insert(name.to_string()), "duplicate entry: {name}");
         let out = dest.join(&rel);
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent)?;

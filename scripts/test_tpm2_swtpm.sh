@@ -33,11 +33,48 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The distro CA statedir (/var/lib/swtpm-localca) is not writable by the CI
+# runner. Point swtpm-localca at a directory under the temp root instead.
+prepare_local_ca() {
+  local ca=$1 tool=""
+  mkdir -p "$ca"
+  if [[ -f /etc/swtpm_setup.conf ]]; then
+    tool=$(sed -n 's/^create_certs_tool[[:space:]]*=[[:space:]]*//p' /etc/swtpm_setup.conf | head -1)
+  fi
+  if [[ -z "$tool" ]]; then
+    tool=$(command -v swtpm_localca || true)
+  fi
+  if [[ -z "$tool" && -x /usr/share/swtpm/swtpm-localca ]]; then
+    tool=/usr/share/swtpm/swtpm-localca
+  fi
+  if [[ -z "$tool" ]]; then
+    echo "swtpm_localca not found" >&2
+    exit 1
+  fi
+  if [[ -f /etc/swtpm-localca.options ]]; then
+    cp /etc/swtpm-localca.options "$ca/swtpm-localca.options"
+  else
+    printf '%s\n' "--platform-manufacturer Fedora" "--platform-version 2.1" \
+      "--platform-model QEMU" > "$ca/swtpm-localca.options"
+  fi
+  cat > "$ca/swtpm-localca.conf" <<EOF
+statedir = ${ca}
+signingkey = ${ca}/signkey.pem
+issuercert = ${ca}/issuercert.pem
+certserial = ${ca}/certserial
+EOF
+  cat > "$ca/swtpm_setup.conf" <<EOF
+create_certs_tool = ${tool}
+create_certs_tool_config = ${ca}/swtpm-localca.conf
+create_certs_tool_options = ${ca}/swtpm-localca.options
+EOF
+}
+
 start_tpm() {
   local dir=$1 port=$2 ctrl=$3
   mkdir -p "$dir"
   swtpm_setup --tpm2 --tpmstate "$dir" --create-ek-cert --create-platform-cert \
-    --overwrite --pcr-banks sha256
+    --overwrite --pcr-banks sha256 --config "$root/localca/swtpm_setup.conf"
   swtpm socket --tpm2 \
     --server "type=tcp,port=${port},bindaddr=127.0.0.1" \
     --ctrl "type=tcp,port=${ctrl},bindaddr=127.0.0.1" \
@@ -47,6 +84,7 @@ start_tpm() {
     --daemon
 }
 
+prepare_local_ca "$root/localca"
 start_tpm "$root/a" 2321 2322
 start_tpm "$root/b" 2331 2332
 sleep 0.5

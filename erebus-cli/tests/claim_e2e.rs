@@ -153,7 +153,8 @@ fn rewrite_outside(src: &Path, dst: &Path) {
         let mut entry = archive.by_index(i).unwrap();
         let mut buf = Vec::new();
         entry.read_to_end(&mut buf).unwrap();
-        files.push((entry.name().to_string(), buf));
+        let name = entry.name().expect("zip entry name").into_owned();
+        files.push((name, buf));
     }
     let idx = files
         .iter()

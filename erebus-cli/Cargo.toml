@@ -33,7 +33,7 @@ clap_complete = "4"
 clap_mangen = "0.2"
 tar = "0.4"
 xz2 = "0.1"
-zip = "2"
+zip = "9" # >=9.0.0: RUSTSEC-2026-0367/0368/0369
 base64 = "0.22"
 flate2 = "1"
 zstd = "0.13"

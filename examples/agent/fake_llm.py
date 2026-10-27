@@ -7,6 +7,7 @@ Supports non-stream JSON and `stream: true` SSE.
 from __future__ import annotations
 
 import json
+import socketserver
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -134,8 +135,18 @@ class H(BaseHTTPRequestHandler):
             pass
 
 
+class BoundHTTPServer(HTTPServer):
+    def server_bind(self) -> None:
+        # HTTPServer.server_bind calls socket.getfqdn. A reverse lookup of
+        # 127.0.0.1 stalls on macOS CI (mDNS) before the port line is printed,
+        # and four parallel tests pile onto the same resolver.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = "127.0.0.1"
+        self.server_port = self.server_address[1]
+
+
 def main() -> int:
-    httpd = HTTPServer(("127.0.0.1", 0), H)
+    httpd = BoundHTTPServer(("127.0.0.1", 0), H)
     print(httpd.server_address[1], flush=True)
     httpd.serve_forever()
     return 0

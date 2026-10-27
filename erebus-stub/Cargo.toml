@@ -47,11 +47,11 @@ hex = "0.4"
 sha2 = "0.10"
 ed25519-dalek = { version = "2.1", default-features = false, features = ["alloc", "std", "rand_core"] }  # >= 2.1.0: CVE-2023-48022
 
-# zstd-sys 2.0.x compiles an x86_64-only assembly file unconditionally
-# (zstd-sys build.rs:144). Disable it on every other arch so cross-builds
-# (aarch64, arm, riscv64, ppc64le, …) can link. Scalar decompression path only.
+# zstd-sys 2.0.x compiled an x86_64 assembly file on every arch. 2.1 still
+# ships that asm; no_asm keeps cross builds on the scalar path.
+# >=2.1.2: RUSTSEC-2026-0410.
 [target.'cfg(not(target_arch = "x86_64"))'.dependencies]
-zstd-sys = { version = "2.0.16", features = ["no_asm"] }
+zstd-sys = { version = "2.1.2", features = ["no_asm"] }
 
 [lints.clippy]
 # Allow style lints that are too noisy for a binary crate
