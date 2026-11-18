@@ -500,11 +500,16 @@ Optional oversight evidence (EU AI Act Art. 14). `erebus approve` signs:
 erebus-approval/v1\n{decision}\n{subject_digest}\n{decided_at}\n
 ```
 
-with an Ed25519 approver key (`decision` is `allow` or `deny`). The
-resulting JSON is attached with `erebus attest --approval FILE` into
-`execution.approval`. `verify-attest --approver-key <hex|.pub>` checks the
-signature and prints the approver fingerprint; a forged signature is
-`TAMPERED` (exit 2). Spec version is `2.1` when present.
+with an Ed25519 approver key (`decision` is `allow` or `deny`). Use
+`--subject-file bundle.erebus` (or `--subject sha256:<hex>` with the bundle or
+payload digest) so the signed subject matches a subject digest in the
+receipt's signed statement. The resulting JSON is attached with
+`erebus attest --approval FILE` into `execution.approval`.
+`verify-attest --approver-key <hex|.pub>` requires `decision == allow`, an
+exact match between `subject_digest` and one of the signed artifact digests,
+and `decided_at` within 24 h before the signed `attested_at` (5 min clock-skew
+tolerance). A forged signature, an approval for another artifact, a `deny` or
+a stale decision is `TAMPERED` (exit 2). Spec version is `2.1` when present.
 
 ### 3.7 Local witness checkpoint (R1 / DDIL)
 

@@ -40,6 +40,11 @@ pub const ATTESTATION_SPEC_VERSION_TOOL_CALLS: &str = "2.1";
 /// Canonical prefix of a human-approval message (`sign_approval`).
 pub const APPROVAL_PREFIX: &str = "erebus-approval/v1";
 
+/// An approval older than this relative to the run it authorizes is refused.
+pub const APPROVAL_MAX_AGE_SECS: i64 = 24 * 60 * 60;
+/// Tolerance for approver/attester clock skew (the two may be different hosts).
+const APPROVAL_SKEW_SECS: i64 = 5 * 60;
+
 /// Marker string identifying this as an erebus execution attestation.
 pub const ATTESTATION_TYPE: &str = "erebus-execution";
 
@@ -959,10 +964,43 @@ pub fn verify_approval(approval: &Approval, key: &VerifyingKey) -> Result<(), an
     Ok(())
 }
 
+/// Signed artifact digests an approval may cover. Both are known before the
+/// run, so an approver can sign one without seeing the finished receipt.
+fn approval_subjects(attestation: &Attestation) -> Vec<String> {
+    attestation
+        .statement
+        .subject
+        .iter()
+        .filter(|s| s.name == "bundle" || s.name == "payload")
+        .filter_map(|s| s.digest.get("sha256"))
+        .map(|hex| format!("sha256:{hex}"))
+        .collect()
+}
+
+fn iso8601_unix(ts: &str) -> Result<i64, anyhow::Error> {
+    OffsetDateTime::parse(ts, &Iso8601::DEFAULT)
+        .map(|t| t.unix_timestamp())
+        .map_err(|e| anyhow::anyhow!("invalid ISO-8601 timestamp {ts:?}: {e}"))
+}
+
+/// Decision must predate the run (with skew) and not be stale.
+fn check_approval_time(approval: &Approval, attested_at: &str) -> Result<(), anyhow::Error> {
+    let decided = iso8601_unix(&approval.decided_at)?;
+    let attested = iso8601_unix(attested_at)?;
+    if decided > attested.saturating_add(APPROVAL_SKEW_SECS) {
+        anyhow::bail!("TAMPERED: approval was decided after the run it authorizes");
+    }
+    if attested.saturating_sub(decided) > APPROVAL_MAX_AGE_SECS {
+        anyhow::bail!("TAMPERED: approval is too old for this run");
+    }
+    Ok(())
+}
+
 /// Verify `attestation.execution.approval` against any of `approver_keys`.
 ///
-/// Returns the matching verifying key. Missing approval or no matching key →
-/// `TAMPERED:`.
+/// The approval must be an `allow` over a signed artifact digest of *this*
+/// receipt, signed no earlier than [`APPROVAL_MAX_AGE_SECS`] before the run.
+/// Returns the matching verifying key; any failure is `TAMPERED:`.
 pub fn check_approval(
     attestation: &Attestation,
     approver_keys: &[VerifyingKey],
@@ -972,6 +1010,7 @@ pub fn check_approval(
         .approval
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("TAMPERED: receipt has no approval to verify"))?;
+    check_consistency(attestation)?;
     // Prefer the signed predicate copy when present (display can drift).
     let signed = attestation
         .statement
@@ -986,6 +1025,23 @@ pub fn check_approval(
             anyhow::bail!("TAMPERED: approval display differs from signed statement");
         }
     }
+    if approval.decision != "allow" {
+        anyhow::bail!(
+            "TAMPERED: approval decision is {:?}, not allow",
+            approval.decision
+        );
+    }
+    if !approval_subjects(attestation).contains(&approval.subject_digest) {
+        anyhow::bail!("TAMPERED: approval subject is not a signed artifact digest of this receipt");
+    }
+    let attested_at = attestation
+        .statement
+        .predicate
+        .get("execution")
+        .and_then(|e| e.get("attested_at"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("TAMPERED: receipt has no signed attested_at"))?;
+    check_approval_time(approval, attested_at)?;
     for key in approver_keys {
         if verify_approval(approval, key).is_ok() {
             return Ok(*key);
@@ -2296,17 +2352,18 @@ mod tests {
     #[test]
     fn approval_sign_verify_roundtrip() {
         let key = test_key();
-        let approval = sign_approval(&key, "allow", "sha256:deadbeef");
+        let dir = tempfile::tempdir().unwrap();
+        let (bundle_path, bundle_bytes, _) = write_bundle(dir.path());
+        let subject = sha256_hex(&bundle_bytes);
+        let approval = sign_approval(&key, "allow", &subject);
         assert_eq!(approval.decision, "allow");
-        assert_eq!(approval.subject_digest, "sha256:deadbeef");
+        assert_eq!(approval.subject_digest, subject);
         assert_eq!(
             approval.key_fingerprint,
             key_fingerprint(&key.verifying_key())
         );
         verify_approval(&approval, &key.verifying_key()).unwrap();
 
-        let dir = tempfile::tempdir().unwrap();
-        let (bundle_path, _, _) = write_bundle(dir.path());
         let template = AttestationTemplate::from_bundle(&bundle_path).unwrap();
         let capture = ExecutionCapture {
             approval: Some(approval.clone()),
@@ -2317,6 +2374,60 @@ mod tests {
         verify_attestation(&att, &[key.verifying_key()]).unwrap();
         let vk = check_approval(&att, &[key.verifying_key()]).unwrap();
         assert_eq!(key_fingerprint(&vk), approval.key_fingerprint);
+    }
+
+    #[test]
+    fn approval_must_bind_allow_artifact_and_time() {
+        let key = test_key();
+        let dir = tempfile::tempdir().unwrap();
+        let (bundle_path, bundle_bytes, _) = write_bundle(dir.path());
+        let subject = sha256_hex(&bundle_bytes);
+        let trusted = [key.verifying_key()];
+
+        let receipt_with = |approval: Approval| {
+            let template = AttestationTemplate::from_bundle(&bundle_path).unwrap();
+            template
+                .attest(
+                    &key,
+                    &ExecutionCapture {
+                        approval: Some(approval),
+                        ..ExecutionCapture::default()
+                    },
+                )
+                .unwrap()
+        };
+
+        let err = check_approval(
+            &receipt_with(sign_approval(&key, "deny", &subject)),
+            &trusted,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("not allow"), "{err}");
+
+        let err = check_approval(
+            &receipt_with(sign_approval(&key, "allow", "sha256:ab")),
+            &trusted,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("not a signed artifact digest"), "{err}");
+
+        // Signature is valid, but the decision was made long before the run.
+        let mut stale = sign_approval(&key, "allow", &subject);
+        stale.decided_at = "2020-01-01T00:00:00Z".into();
+        stale.signature_hex = hex::encode(
+            key.sign(&approval_message_bytes(
+                &stale.decision,
+                &stale.subject_digest,
+                &stale.decided_at,
+            ))
+            .to_bytes(),
+        );
+        let err = check_approval(&receipt_with(stale), &trusted)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("too old"), "{err}");
     }
 
     #[test]

@@ -57,7 +57,7 @@ toml = "0.8"
 regex = "1"
 
 # Timestamp formatting
-time = { version = "0.3", features = ["formatting"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
 
 # Hostname for attestation machine identity
 hostname = "0.4"

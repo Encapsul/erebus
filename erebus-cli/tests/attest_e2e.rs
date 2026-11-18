@@ -319,15 +319,14 @@ fn verify_attest_requires_receipt_or_chain() {
         .stderr(predicate::str::contains("required"));
 }
 
-/// ROADMAP R4: approve → attest --approval → verify-attest --approver-key;
-/// forged `approval.signature_hex` → exit 2 TAMPERED.
+/// ROADMAP R4: approve the bundle → attest --approval → verify-attest
+/// --approver-key; forged `approval.signature_hex` → exit 2 TAMPERED.
 #[test]
 fn approval_roundtrip_and_forged_signature_refused() {
     let dir = tempdir().unwrap();
     let bundle = make_bundle(dir.path(), "agent", "hello");
     let (operator, trusted) = keygen(dir.path());
     let (approver, _) = keygen(&dir.path().join("approver-keys"));
-    let subject = format!("sha256:{}", "ab".repeat(32));
     let approval = dir.path().join("approval.json");
 
     erebus()
@@ -337,8 +336,8 @@ fn approval_roundtrip_and_forged_signature_refused() {
             approver.to_str().unwrap(),
             "--decision",
             "allow",
-            "--subject",
-            &subject,
+            "--subject-file",
+            bundle.to_str().unwrap(),
             "-o",
             approval.to_str().unwrap(),
         ])
@@ -394,6 +393,65 @@ fn approval_roundtrip_and_forged_signature_refused() {
         .assert()
         .code(2)
         .stderr(predicate::str::contains("TAMPERED"));
+}
+
+/// An approval only counts when it is an `allow` over this receipt's signed
+/// bundle digest; a valid signature over another digest or a `deny` is refused.
+#[test]
+fn approval_must_be_allow_over_this_artifact() {
+    let dir = tempdir().unwrap();
+    let bundle = make_bundle(dir.path(), "agent", "hello");
+    let (operator, trusted) = keygen(dir.path());
+    let (approver, _) = keygen(&dir.path().join("approver-keys"));
+    let approver_pub = approver.with_extension("pub");
+    let other_subject = dir.path().join("other.bin");
+    std::fs::write(&other_subject, b"not this bundle").unwrap();
+
+    for (label, decision, subject_file, expected) in [
+        ("deny", "deny", bundle.as_path(), "not allow"),
+        (
+            "other",
+            "allow",
+            other_subject.as_path(),
+            "not a signed artifact digest",
+        ),
+    ] {
+        let ap = dir.path().join(format!("{label}.json"));
+        erebus()
+            .args([
+                "approve",
+                "--key",
+                approver.to_str().unwrap(),
+                "--decision",
+                decision,
+                "--subject-file",
+                subject_file.to_str().unwrap(),
+                "-o",
+                ap.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+        let out = dir.path().join(format!("{label}.attest"));
+        attest(
+            &bundle,
+            &operator,
+            &out,
+            &["--no-log", "--approval", ap.to_str().unwrap()],
+        );
+        erebus()
+            .args([
+                "verify-attest",
+                out.to_str().unwrap(),
+                "--trusted-dir",
+                trusted.to_str().unwrap(),
+                "--approver-key",
+                approver_pub.to_str().unwrap(),
+            ])
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains("TAMPERED"))
+            .stderr(predicate::str::contains(expected));
+    }
 }
 
 /// Golden digest: signed `output_hash` must match `--expected-output-hash`.
