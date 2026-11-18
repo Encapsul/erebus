@@ -420,8 +420,48 @@ fn verify_claim(dir: &Path, m: &Manifest, keys: &[VerifyingKey]) -> Result<()> {
         claim.receipts,
         m.receipts.len()
     );
-    for row in &m.receipts {
-        let att: Attestation = serde_json::from_slice(&std::fs::read(dir.join(&row.receipt))?)?;
+    anyhow::ensure!(
+        claim.since == m.since.clone().unwrap_or_default()
+            && claim.until == m.until.clone().unwrap_or_default(),
+        "TAMPERED: claim window differs from the manifest"
+    );
+    anyhow::ensure!(
+        claim.verification_failures == 0,
+        "TAMPERED: claim reports failures"
+    );
+
+    // MANIFEST.json is unsigned: only the signed claim and the already
+    // signature-checked receipts can establish what the window contains.
+    // Rebuild the chain and every tally from the receipts themselves.
+    let mut names = BTreeSet::new();
+    let mut hashes = BTreeSet::new();
+    let mut prev: Option<String> = None;
+    let mut receipts = Receipts::new();
+    for (i, row) in m.receipts.iter().enumerate() {
+        anyhow::ensure!(
+            names.insert(row.receipt.clone()),
+            "TAMPERED: duplicate receipt {} in window",
+            row.receipt
+        );
+        let bytes = std::fs::read(dir.join(&row.receipt))?;
+        let hash = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
+        anyhow::ensure!(
+            hashes.insert(hash.clone()),
+            "TAMPERED: duplicate receipt bytes at {}",
+            row.receipt
+        );
+        let att: Attestation = serde_json::from_slice(&bytes)?;
+        // The first receipt's link points outside the window and is not
+        // packed; every later link must match the preceding receipt's hash.
+        if i > 0 {
+            anyhow::ensure!(
+                att.execution.prev_attestation_hash == prev,
+                "TAMPERED: chain broken at {} (expected prev {:?}, receipt says {:?})",
+                row.receipt,
+                prev,
+                att.execution.prev_attestation_hash
+            );
+        }
         anyhow::ensure!(
             erebus_core::claim::in_window(
                 &att.execution.attested_at,
@@ -431,7 +471,30 @@ fn verify_claim(dir: &Path, m: &Manifest, keys: &[VerifyingKey]) -> Result<()> {
             "TAMPERED: {} is outside the claim window",
             row.receipt
         );
+        prev = Some(hash);
+        receipts.push((
+            dir.join(&row.receipt),
+            row.proof.as_ref().map(|p| dir.join(p)),
+        ));
     }
+    let head = prev.context("TAMPERED: window claim lists no receipts")?;
+    anyhow::ensure!(
+        claim.head == head,
+        "TAMPERED: claim head {} differs from hash of last receipt {head}",
+        claim.head
+    );
+    anyhow::ensure!(
+        m.chain_head.as_deref() == Some(head.as_str()),
+        "TAMPERED: manifest chain head differs from the last receipt"
+    );
+    let (digests, tools, stops, approvals) = claim_counts(&receipts)?;
+    anyhow::ensure!(
+        claim.model_digests == digests
+            && claim.tool_calls == tools
+            && claim.stops == stops
+            && claim.approvals == approvals,
+        "TAMPERED: claim tallies differ from the packed receipts"
+    );
     Ok(())
 }
 
@@ -730,6 +793,12 @@ fn verify_unpacked(
         registry: log_keys,
     };
     let bundle_checked = check_bundle_file(dir, m, args.bundle.as_deref())?;
+    // Signature-check each receipt before trusting its signed chain link.
+    let mut tally = Tally::default();
+    for row in &m.receipts {
+        verify_row(dir, row, &m.bundle.sha256, &keys, &mut tally)
+            .with_context(|| row.receipt.clone())?;
+    }
     if m.since.is_some() || m.until.is_some() {
         verify_claim(dir, m, &keys.operator)?;
     } else {
@@ -744,11 +813,6 @@ fn verify_unpacked(
             chain["head"].as_str() == m.chain_head.as_deref(),
             "TAMPERED: trail HEAD differs from the manifest"
         );
-    }
-    let mut tally = Tally::default();
-    for row in &m.receipts {
-        verify_row(dir, row, &m.bundle.sha256, &keys, &mut tally)
-            .with_context(|| row.receipt.clone())?;
     }
     let mut report = report_json(m, &tally, bundle_checked);
     report["keys"] = key_ids;
