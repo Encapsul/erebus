@@ -245,7 +245,7 @@ mod linux {
 
     #[derive(Clone, Copy)]
     enum Label {
-        SocketType,
+        InetSocket,
         FlagsArg2,
         FlagsArg3,
     }
@@ -272,10 +272,11 @@ mod linux {
     type Insn = (u16, To, To, u32);
 
     /// Refuses (EACCES) what Landlock's TCP rules do not cover: non-stream
-    /// IPv4/IPv6 and packet sockets, TCP Fast Open (it connects from
-    /// `sendto`/`sendmsg`, which Landlock does not check), and every path
-    /// around this filter: a foreign syscall ABI, x32, `socketcall` (i386)
-    /// and `io_uring` (which creates sockets and sends without syscalls).
+    /// IPv4/IPv6 sockets, protocols other than TCP (MPTCP, SMC and friends
+    /// bypass Landlock's port checks), packet sockets, TCP Fast Open (it
+    /// connects from `sendto`/`sendmsg`), and every path around this filter:
+    /// a foreign syscall ABI, x32, `socketcall` (i386) and `io_uring` (which
+    /// creates sockets and sends without syscalls).
     fn socket_filter() -> Vec<libc::sock_filter> {
         let mut p: Vec<Insn> = vec![
             (LD_ABS, To::Next, To::Next, OFF_ARCH),
@@ -300,13 +301,21 @@ mod linux {
             (JEQ, To::Next, To::Allow, libc::SYS_socket as u32),
             (LD_ABS, To::Next, To::Next, OFF_ARG0),
             (JEQ, To::Deny, To::Next, libc::AF_PACKET as u32),
+            // AF_UNIX is local IPC only: Landlock network rules do not apply
+            // and it cannot reach a remote host, so it needs no protocol gate.
+            (JEQ, To::Allow, To::Next, libc::AF_UNIX as u32),
             (
                 JEQ,
-                To::L(Label::SocketType),
+                To::L(Label::InetSocket),
                 To::Next,
                 libc::AF_INET as u32,
             ),
-            (JEQ, To::Next, To::Allow, libc::AF_INET6 as u32),
+            (
+                JEQ,
+                To::L(Label::InetSocket),
+                To::Deny,
+                libc::AF_INET6 as u32,
+            ),
         ]);
         let fast_open = |off| -> [Insn; 2] {
             [
@@ -315,11 +324,14 @@ mod linux {
             ]
         };
         let mut labels = [0usize; 3];
-        labels[Label::SocketType as usize] = p.len();
+        labels[Label::InetSocket as usize] = p.len();
         p.extend([
             (LD_ABS, To::Next, To::Next, OFF_ARG1),
             (AND, To::Next, To::Next, SOCK_TYPE_MASK),
-            (JEQ, To::Allow, To::Deny, libc::SOCK_STREAM as u32),
+            (JEQ, To::Next, To::Deny, libc::SOCK_STREAM as u32),
+            (LD_ABS, To::Next, To::Next, OFF_ARG2),
+            (JEQ, To::Allow, To::Next, 0u32),
+            (JEQ, To::Allow, To::Deny, libc::IPPROTO_TCP as u32),
         ]);
         labels[Label::FlagsArg2 as usize] = p.len();
         p.extend(fast_open(OFF_ARG2));
@@ -407,11 +419,29 @@ mod tests {
                 .and_then(|mut s| std::io::Write::write_all(&mut s, b"ping")),
         );
         println!(
-            "ALLOWED={} SEND={send} BLOCKED={} UDP={udp} TFO={}",
+            "ALLOWED={} SEND={send} BLOCKED={} UDP={udp} TFO={} MPTCP={}",
             tcp(allowed),
             tcp(blocked),
-            fast_open(blocked)
+            fast_open(blocked),
+            mptcp(),
         );
+    }
+
+    /// MPTCP escapes Landlock's TCP port rules, so seccomp must refuse it at
+    /// `socket()` — before the kernel ever establishes a connection.
+    #[cfg(target_os = "linux")]
+    fn mptcp() -> i32 {
+        // SAFETY: a plain socket() call with a constant protocol and no
+        // borrowed memory; a successful fd is closed immediately.
+        unsafe {
+            let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, libc::IPPROTO_MPTCP);
+            if fd < 0 {
+                io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+            } else {
+                libc::close(fd);
+                0
+            }
+        }
     }
 
     /// TCP Fast Open connects from `sendto`, not `connect`.
@@ -447,9 +477,9 @@ mod tests {
         }
     }
 
-    /// The real kernel check: only the listed port is reachable, UDP and
-    /// Fast Open are refused. On kernels without Landlock ABI 4 the launch
-    /// must be refused instead.
+    /// The real kernel check: only the listed port is reachable; UDP, Fast
+    /// Open and MPTCP are refused. On kernels without Landlock ABI 4 the
+    /// launch must be refused instead.
     #[cfg(target_os = "linux")]
     #[test]
     fn egress_confines_tcp_to_the_listed_ports_or_refuses_to_run() {
@@ -484,7 +514,8 @@ mod tests {
             return;
         }
         let eacces = libc::EACCES;
-        let want = format!("ALLOWED=0 SEND=0 BLOCKED={eacces} UDP={eacces} TFO={eacces}");
+        let want =
+            format!("ALLOWED=0 SEND=0 BLOCKED={eacces} UDP={eacces} TFO={eacces} MPTCP={eacces}");
         assert!(stdout.contains(&want), "want {want}: {stdout}");
     }
 }
