@@ -540,11 +540,18 @@ erebus verify-attest --chain DIR --witness-key <hex|.pub> [--require-witness]
 erebus verify-attest receipt.attest --proof --witness-key …
 ```
 
-`--require-witness` refuses a trail that grew past the sealed `size` /
-`root` (insertion during an outage). Without it, a historical seal still
-verifies and prints `witnessed at T1`; with `--proof`, also `anchored at T2`,
-requiring `witnessed_at ≤ checkpoint.timestamp`. A failed `--push` leaves
-the receipt in the trail and seals the head (store-and-forward).
+Verification always compares the signed `origin` with the canonical path of
+the supplied trail: a copied trail plus copied sidecar is `TAMPERED`.
+`--require-witness` additionally refuses a trail that grew past the sealed
+`size` / `root` and a seal older than the last one recorded by this verifier.
+That high-water mark lives under `$ERE_WITNESS_STATE_DIR` (default
+`~/.local/share/erebus/witness-state/`), outside the trail, so restoring an
+old `HEAD`, sidecar and truncated trail is detected once a newer seal has been
+seen. Keep that directory writable only by the verifier, not by the trail
+owner. Without `--require-witness`, a historical seal still verifies and
+prints `witnessed at T1`; with `--proof`, also `anchored at T2`, requiring
+`witnessed_at ≤ checkpoint.timestamp`. A failed `--push` leaves the receipt in
+the trail and seals the head (store-and-forward).
 
 ## 4. Display copies and consistency
 

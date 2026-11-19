@@ -14,7 +14,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::attest::{key_fingerprint, utc_now_iso8601};
+use crate::attest::{key_fingerprint, sha256_hex, utc_now_iso8601};
 use crate::attest_log::{file_hash, AttestationLog};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,8 @@ use serde::{Deserialize, Serialize};
 pub const WITNESS_PREFIX: &str = "erebus-witness-checkpoint/v1";
 /// Sidecar next to `HEAD` in a trail directory.
 pub const WITNESS_FILE: &str = "HEAD.witness.json";
+/// High-water mark root, outside the trail so a trail owner cannot roll it back.
+pub const STATE_DIR_ENV: &str = "ERE_WITNESS_STATE_DIR";
 /// Private key file name under the witness dir.
 pub const KEY_FILE: &str = "witness.key";
 
@@ -94,6 +96,92 @@ pub fn default_dir() -> PathBuf {
     }
 }
 
+/// Last sealed head for one origin, kept outside the trail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WitnessState {
+    pub origin: String,
+    pub size: u64,
+    pub root: String,
+    pub witnessed_at: String,
+}
+
+/// State root: `$ERE_WITNESS_STATE_DIR`, else XDG / `~/.local/share/erebus`.
+pub fn default_state_dir() -> PathBuf {
+    if let Some(d) = std::env::var_os(STATE_DIR_ENV) {
+        return PathBuf::from(d);
+    }
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        return PathBuf::from(xdg).join("erebus").join("witness-state");
+    }
+    match std::env::var_os("HOME") {
+        Some(home) => PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("erebus")
+            .join("witness-state"),
+        None => PathBuf::from(".erebus").join("witness-state"),
+    }
+}
+
+fn state_path(state_dir: &Path, origin: &str) -> Result<PathBuf, anyhow::Error> {
+    let digest = sha256_hex(origin.as_bytes());
+    let key = digest.strip_prefix("sha256:").unwrap_or(&digest);
+    Ok(state_dir.join(format!("{key}.json")))
+}
+
+fn read_state(state_dir: &Path, origin: &str) -> Result<Option<WitnessState>, anyhow::Error> {
+    let path = state_path(state_dir, origin)?;
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::anyhow!("failed to read {}: {e}", path.display())),
+    }
+}
+
+/// Refuse to replace newer last-seen state with an older (or forked) seal.
+fn record_seen(state_dir: &Path, cp: &WitnessCheckpoint) -> Result<(), anyhow::Error> {
+    if let Some(prev) = read_state(state_dir, &cp.origin)? {
+        if prev.size > cp.size || (prev.size == cp.size && prev.root != cp.root) {
+            anyhow::bail!(
+                "TAMPERED: witness state already records a newer head (size {})",
+                prev.size
+            );
+        }
+    }
+    let state = WitnessState {
+        origin: cp.origin.clone(),
+        size: cp.size,
+        root: cp.root.clone(),
+        witnessed_at: cp.witnessed_at.clone(),
+    };
+    let path = state_path(state_dir, &cp.origin)?;
+    std::fs::create_dir_all(state_dir)?;
+    let json = serde_json::to_vec_pretty(&state)?;
+    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    write_private(&tmp, &json)
+        .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .map_err(|e| anyhow::anyhow!("failed to install {}: {e}", path.display()))
+}
+
+/// Reject a saved seal that is older than the last one this verifier saw.
+pub fn check_not_rolled_back(
+    state_dir: &Path,
+    cp: &WitnessCheckpoint,
+) -> Result<(), anyhow::Error> {
+    let Some(prev) = read_state(state_dir, &cp.origin)? else {
+        return Ok(());
+    };
+    if prev.size > cp.size || (prev.size == cp.size && prev.root != cp.root) {
+        anyhow::bail!(
+            "TAMPERED: witness checkpoint (size {}) is older than last-seen state (size {})",
+            cp.size,
+            prev.size
+        );
+    }
+    Ok(())
+}
+
 /// Load a witness signing key from `ERE_WITNESS_KEY` or `dir/witness.key`.
 pub fn load_signing_key(dir: Option<&Path>) -> Result<SigningKey, anyhow::Error> {
     let path = match std::env::var_os("ERE_WITNESS_KEY") {
@@ -126,6 +214,15 @@ pub fn keygen(dir: &Path) -> Result<(SigningKey, PathBuf), anyhow::Error> {
     Ok((key, path))
 }
 
+/// Canonical trail origin signed into the checkpoint.
+fn trail_origin(log: &AttestationLog) -> String {
+    log.dir()
+        .canonicalize()
+        .unwrap_or_else(|_| log.dir().to_path_buf())
+        .display()
+        .to_string()
+}
+
 /// Sign the current trail head into a [`WitnessCheckpoint`].
 ///
 /// Empty trails are refused: there is nothing meaningful to seal.
@@ -148,14 +245,10 @@ pub fn witness_trail_head(
     if head_ptr.as_deref() != Some(root.as_str()) {
         anyhow::bail!("TAMPERED: trail HEAD does not match the last receipt file");
     }
-    let origin = log
-        .dir()
-        .canonicalize()
-        .unwrap_or_else(|_| log.dir().to_path_buf());
     let witnessed_at = utc_now_iso8601();
     let witness_id = key_fingerprint(&key.verifying_key());
     let mut cp = WitnessCheckpoint {
-        origin: origin.display().to_string(),
+        origin: trail_origin(log),
         size,
         root,
         witnessed_at,
@@ -167,16 +260,27 @@ pub fn witness_trail_head(
     Ok(cp)
 }
 
-/// Write `HEAD.witness.json` beside the trail (atomic replace).
+/// Write `HEAD.witness.json` beside the trail (atomic replace) and remember
+/// the sealed head outside the trail.
 pub fn write_witness(
     log: &AttestationLog,
     cp: &WitnessCheckpoint,
+) -> Result<PathBuf, anyhow::Error> {
+    write_witness_with_state(log, cp, &default_state_dir())
+}
+
+/// Same as [`write_witness`] with an explicit state root (used by tests).
+pub fn write_witness_with_state(
+    log: &AttestationLog,
+    cp: &WitnessCheckpoint,
+    state_dir: &Path,
 ) -> Result<PathBuf, anyhow::Error> {
     let path = log.dir().join(WITNESS_FILE);
     let json = serde_json::to_vec_pretty(cp)?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, &json)?;
     std::fs::rename(&tmp, &path)?;
+    record_seen(state_dir, cp)?;
     Ok(path)
 }
 
@@ -212,14 +316,23 @@ pub fn seal_trail_best_effort(log: &AttestationLog) {
     }
 }
 
-/// Verify a witness seal. With `require`, the trail size and head must still
-/// equal the sealed snapshot (detects insertions). Without it, only the
-/// signature is checked — a trail that grew after the seal still reports
-/// `witnessed_at` for the historical checkpoint.
+/// Verify a witness seal. The signed `origin` must always match the trail;
+/// with `require`, the size/head must match the seal and the seal must not be
+/// older than the last one seen by this verifier.
 pub fn check_trail_witness(
     log: &AttestationLog,
     key: &VerifyingKey,
     require: bool,
+) -> Result<Option<WitnessCheckpoint>, anyhow::Error> {
+    check_trail_witness_with_state(log, key, require, &default_state_dir())
+}
+
+/// Same as [`check_trail_witness`] with an explicit state root (used by tests).
+pub fn check_trail_witness_with_state(
+    log: &AttestationLog,
+    key: &VerifyingKey,
+    require: bool,
+    state_dir: &Path,
 ) -> Result<Option<WitnessCheckpoint>, anyhow::Error> {
     let Some(cp) = load_witness(log)? else {
         if require {
@@ -231,6 +344,14 @@ pub fn check_trail_witness(
         return Ok(None);
     };
     cp.verify(key)?;
+    let origin = trail_origin(log);
+    if cp.origin != origin {
+        anyhow::bail!(
+            "TAMPERED: witness origin {:?} does not match trail {:?}",
+            cp.origin,
+            origin
+        );
+    }
     if require {
         let entries = log.entries()?;
         let size = entries.len() as u64;
@@ -246,6 +367,7 @@ pub fn check_trail_witness(
         if head != cp.root {
             anyhow::bail!("TAMPERED: trail HEAD does not match witness root");
         }
+        check_not_rolled_back(state_dir, &cp)?;
     }
     Ok(Some(cp))
 }
@@ -366,11 +488,12 @@ mod tests {
         append_one(&trail, &bundle, &op);
 
         let wdir = dir.path().join("witness");
+        let state = dir.path().join("state");
         let (wkey, _) = keygen(&wdir).unwrap();
         let cp = witness_trail_head(&trail, &wkey).unwrap();
-        write_witness(&trail, &cp).unwrap();
+        write_witness_with_state(&trail, &cp, &state).unwrap();
         assert_eq!(cp.size, 2);
-        check_trail_witness(&trail, &wkey.verifying_key(), true).unwrap();
+        check_trail_witness_with_state(&trail, &wkey.verifying_key(), true, &state).unwrap();
 
         // Forge an extra receipt file that is not covered by the seal.
         std::fs::write(
@@ -378,11 +501,74 @@ mod tests {
             b"{\"forged\":true}\n",
         )
         .unwrap();
-        let err = check_trail_witness(&trail, &wkey.verifying_key(), true).unwrap_err();
+        let err = check_trail_witness_with_state(&trail, &wkey.verifying_key(), true, &state)
+            .unwrap_err();
         assert!(err.to_string().contains("TAMPERED"), "{err}");
         assert!(err.to_string().contains("3"), "{err}");
         // Without require, the historical seal still verifies.
-        check_trail_witness(&trail, &wkey.verifying_key(), false).unwrap();
+        check_trail_witness_with_state(&trail, &wkey.verifying_key(), false, &state).unwrap();
+    }
+
+    #[test]
+    fn witness_seal_is_bound_to_trail_origin() {
+        let dir = tempdir().unwrap();
+        let bundle = tiny_bundle(dir.path());
+        let op = SigningKey::from_bytes(&[7u8; 32]);
+        let (wkey, _) = keygen(&dir.path().join("w")).unwrap();
+        let state = dir.path().join("state");
+
+        let sealed = AttestationLog::open(&dir.path().join("sealed")).unwrap();
+        append_one(&sealed, &bundle, &op);
+        let cp = witness_trail_head(&sealed, &wkey).unwrap();
+        write_witness_with_state(&sealed, &cp, &state).unwrap();
+
+        // Copy the whole trail and its sidecar to another path: the seal
+        // stays internally consistent but names the old origin.
+        let copy = AttestationLog::open(&dir.path().join("copy")).unwrap();
+        append_one(&copy, &bundle, &op);
+        std::fs::write(
+            copy.dir().join(WITNESS_FILE),
+            serde_json::to_vec(&cp).unwrap(),
+        )
+        .unwrap();
+        for require in [false, true] {
+            let err = check_trail_witness_with_state(&copy, &wkey.verifying_key(), require, &state)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("origin"), "{err}");
+        }
+    }
+
+    #[test]
+    fn witness_rollback_is_detected_by_state() {
+        let dir = tempdir().unwrap();
+        let bundle = tiny_bundle(dir.path());
+        let op = SigningKey::from_bytes(&[7u8; 32]);
+        let (wkey, _) = keygen(&dir.path().join("w")).unwrap();
+        let state = dir.path().join("state");
+        let trail = AttestationLog::open(&dir.path().join("trail")).unwrap();
+        append_one(&trail, &bundle, &op);
+
+        let old_cp = witness_trail_head(&trail, &wkey).unwrap();
+        write_witness_with_state(&trail, &old_cp, &state).unwrap();
+        let old_sidecar = std::fs::read(trail.dir().join(WITNESS_FILE)).unwrap();
+        let old_head = std::fs::read(trail.dir().join("HEAD")).unwrap();
+
+        append_one(&trail, &bundle, &op);
+        let new_cp = witness_trail_head(&trail, &wkey).unwrap();
+        write_witness_with_state(&trail, &new_cp, &state).unwrap();
+        assert!(new_cp.size > old_cp.size);
+
+        // Truncate back to the first seal and restore its sidecar + HEAD.
+        let entries = trail.entries().unwrap();
+        std::fs::remove_file(entries.last().unwrap()).unwrap();
+        std::fs::write(trail.dir().join(WITNESS_FILE), &old_sidecar).unwrap();
+        std::fs::write(trail.dir().join("HEAD"), &old_head).unwrap();
+
+        let err = check_trail_witness_with_state(&trail, &wkey.verifying_key(), true, &state)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("older than last-seen state"), "{err}");
     }
 
     #[test]

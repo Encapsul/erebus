@@ -99,6 +99,12 @@ fn disconnected_anchoring_witness_refuses_insertion_then_syncs() {
     let out = dir.path().join("agent.erebus.attest");
     let trail = erebus_core::attest_log::default_log_dir(&out);
     let witness_dir = dir.path().join("witness");
+    let state_dir = dir.path().join("witness-state");
+    let erebus_state = || {
+        let mut cmd = erebus();
+        cmd.env("ERE_WITNESS_STATE_DIR", &state_dir);
+        cmd
+    };
 
     // 1. Offline trail of N receipts.
     for _ in 0..3 {
@@ -107,12 +113,12 @@ fn disconnected_anchoring_witness_refuses_insertion_then_syncs() {
     assert!(trail.join("HEAD").exists());
 
     // 2. Witness keygen + seal.
-    erebus()
+    erebus_state()
         .args(["witness", "keygen", "--dir", witness_dir.to_str().unwrap()])
         .assert()
         .success();
     let wkey = witness_dir.join("witness.key");
-    erebus()
+    erebus_state()
         .env("ERE_WITNESS_KEY", &wkey)
         .args(["witness", "seal", "--trail", trail.to_str().unwrap()])
         .assert()
@@ -121,7 +127,7 @@ fn disconnected_anchoring_witness_refuses_insertion_then_syncs() {
     assert!(witness_file.exists());
 
     // 3. Publish with a bad registry URL → fails; witness remains / is refreshed.
-    erebus()
+    erebus_state()
         .env("ERE_WITNESS_KEY", &wkey)
         .args([
             "attest",
@@ -140,7 +146,7 @@ fn disconnected_anchoring_witness_refuses_insertion_then_syncs() {
     assert!(witness_file.exists());
 
     // Freeze the sealed size after the failed-push append.
-    erebus()
+    erebus_state()
         .env("ERE_WITNESS_KEY", &wkey)
         .args(["witness", "seal", "--trail", trail.to_str().unwrap()])
         .assert()
@@ -152,7 +158,7 @@ fn disconnected_anchoring_witness_refuses_insertion_then_syncs() {
     let wpub = witness_pub(&witness_dir);
 
     // 5. --require-witness refuses the insertion.
-    erebus()
+    erebus_state()
         .args([
             "verify-attest",
             "--chain",
@@ -169,7 +175,7 @@ fn disconnected_anchoring_witness_refuses_insertion_then_syncs() {
 
     // 6. Remove forge, start real registry, publish backlog (fresh --push).
     std::fs::remove_file(&forge).unwrap();
-    erebus()
+    erebus_state()
         .args([
             "verify-attest",
             "--chain",
@@ -213,7 +219,7 @@ fn disconnected_anchoring_witness_refuses_insertion_then_syncs() {
         .unwrap()
         .to_string();
 
-    erebus()
+    erebus_state()
         .env("ERE_WITNESS_KEY", &wkey)
         .args([
             "attest",
@@ -240,7 +246,7 @@ fn disconnected_anchoring_witness_refuses_insertion_then_syncs() {
 
     // Keep the outage seal (do not re-seal): witnessed_at ≤ checkpoint time.
     // 7. Report shows witness time and later anchor time.
-    erebus()
+    erebus_state()
         .args([
             "verify-attest",
             out.to_str().unwrap(),
