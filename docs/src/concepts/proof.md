@@ -27,7 +27,7 @@ what was executed, and tamper evidence for the record of it.
 | The agent did the *right* thing — correct, safe, within policy | That is a judgement about semantics, made *before* deployment by evaluations and guardrails. erebus records what happened; it does not grade it. | Your eval suite; the receipt then proves the graded version is the one that ran. |
 | The *plaintext* of inputs and outputs | Receipts carry digests, not content. The operator keeps the data; the digest proves that what they hand the auditor is what was hashed at run time. | Retention is the operator's job; `erebus audit` bundles receipts + evidence. |
 | A host with root compromised | The machine key is a software key in `~/.local/share/erebus/machine/machine.key` (0600). Root can copy it. | TPM2-bound key and quote (roadmap, optional per fleet). |
-| The RFC 3161 token is cryptographically valid | erebus checks the token structurally (imprint, policy, time) and stores it | `openssl ts -verify` against the TSA chain, documented in the spec |
+| The RFC 3161 token is cryptographically valid | erebus parses the TSTInfo structurally: the imprint must be `messageImprint`, and the displayed time is that TSTInfo's `genTime` (never the unsigned JSON hint) | `openssl ts -verify` against the TSA chain, documented in the spec |
 | Compliance with a given regulation | Mapping receipts to EU AI Act record-keeping, SOC 2 or ISO 42001 is the compliance team's work | erebus gives that team evidence instead of screenshots |
 
 ## Why this boundary is the right product, not a shortfall

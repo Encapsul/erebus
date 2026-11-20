@@ -188,8 +188,14 @@ class FakeTsa(BaseHTTPRequestHandler):
         tst_info = m._der(0x30, m._der_int(1) + m._der(0x06, b"\x2a\x03\x04")
                           + m._der(0x30, m._TSA_SHA256_ALGID + m._der(0x04, digest))
                           + m._der_int(42) + gen_time)
+        # RFC 5652 CMS: id-signedData → SignedData → encapContentInfo
+        # (id-ct-TSTInfo) → OCTET STRING holding the TSTInfo.
+        encap = m._der(0x30, m._der(0x06, bytes.fromhex("2a864886f70d0109100104"))
+                       + m._der(0xA0, m._der(0x04, tst_info)))
+        signed_data = m._der(0x30, m._der_int(1) + m._der(0x31, b"")
+                             + encap + m._der(0x31, b""))
         content = m._der(0x30, m._der(0x06, bytes.fromhex("2a864886f70d010702"))
-                         + m._der(0xA0, m._der(0x30, m._der(0x04, tst_info))))
+                         + m._der(0xA0, signed_data))
         status = m._der(0x30, m._der_int(0))
         resp = m._der(0x30, status + content)
         self.send_response(200)

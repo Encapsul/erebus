@@ -26,6 +26,16 @@ use crate::merkle::{self, Hash};
 pub const PROOF_SPEC: &str = "erebus-log-proof/v1";
 pub const CHECKPOINT_PREFIX: &str = "erebus-log-checkpoint/v1";
 
+/// CMS `ContentInfo.contentType = id-signedData`.
+const OID_SIGNED_DATA: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02];
+/// `eContentType = id-ct-TSTInfo` inside `SignedData.encapContentInfo`.
+const OID_TST_INFO: &[u8] = &[
+    0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x10, 0x01, 0x04,
+];
+const SHA256_ALGID: &[u8] = &[
+    0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+];
+
 /// Signed tree head as served by `GET /log/checkpoint`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Checkpoint {
@@ -45,6 +55,8 @@ pub struct Anchor {
     pub root: String,
     pub requested_at: String,
     pub tsa_url: String,
+    /// Legacy unsigned JSON hint. Kept for wire compatibility but **ignored**
+    /// by verification: `genTime` comes only from the token's `TSTInfo`.
     #[serde(default)]
     pub gen_time: Option<String>,
     pub token_b64: String,
@@ -220,8 +232,8 @@ fn parse_path(hexes: &[String]) -> Result<Vec<Hash>, anyhow::Error> {
         .collect()
 }
 
-/// The token must be a granted `TimeStampResp` whose `TSTInfo` carries the
-/// imprint of *this* checkpoint.
+/// The token must be a granted `TimeStampResp` whose `TSTInfo.messageImprint`
+/// is the imprint of *this* checkpoint. Only the `TSTInfo`'s `genTime` is used.
 fn check_anchor(anchor: &Anchor, cp: &Checkpoint) -> Result<AnchorReport, anyhow::Error> {
     if anchor.size != cp.size || anchor.root != cp.root {
         anyhow::bail!("TAMPERED: anchor covers a different tree head than the checkpoint");
@@ -234,38 +246,15 @@ fn check_anchor(anchor: &Anchor, cp: &Checkpoint) -> Result<AnchorReport, anyhow
     if status > 1 {
         anyhow::bail!("TAMPERED: TSA token status {status} (not granted)");
     }
-    if !body.windows(32).any(|w| w == imprint) {
-        anyhow::bail!("TAMPERED: TSA token does not cover this checkpoint's imprint");
-    }
     Ok(AnchorReport {
         tsa_url: anchor.tsa_url.clone(),
-        gen_time: anchor.gen_time.clone().or_else(|| extract_gen_time(body)),
+        gen_time: Some(tst_info_gen_time(body, &imprint)?),
         cms_verified: false,
     })
 }
 
-/// Minimal DER: `SEQUENCE { SEQUENCE { INTEGER status … } token… }`.
-/// Returns `(status, bytes after the PKIStatusInfo)`.
-fn parse_timestamp_resp(der: &[u8]) -> Result<(u64, &[u8]), anyhow::Error> {
-    let bad = || anyhow::anyhow!("anchor token is not a TimeStampResp");
-    let (tag, outer) = der_tlv(der).ok_or_else(bad)?;
-    if tag != 0x30 {
-        return Err(bad());
-    }
-    let (stag, status_info) = der_tlv(outer).ok_or_else(bad)?;
-    let (itag, status_bytes) = der_tlv(status_info).ok_or_else(bad)?;
-    if stag != 0x30 || itag != 0x02 || status_bytes.is_empty() || status_bytes.len() > 8 {
-        return Err(bad());
-    }
-    let status = status_bytes
-        .iter()
-        .fold(0u64, |acc, b| (acc << 8) | u64::from(*b));
-    let consumed = der.len() - outer.len() + (outer.len() - rest_after(outer, status_info));
-    Ok((status, der.get(consumed..).unwrap_or(&[])))
-}
-
-/// Split one TLV: returns `(tag, content)`; the caller computes what follows.
-fn der_tlv(buf: &[u8]) -> Option<(u8, &[u8])> {
+/// Split one TLV into `(tag, content, remainder)` without pointer arithmetic.
+fn der_tlv(buf: &[u8]) -> Option<(u8, &[u8], &[u8])> {
     let tag = *buf.first()?;
     let first = *buf.get(1)?;
     let (len, hdr) = if first & 0x80 == 0 {
@@ -283,34 +272,115 @@ fn der_tlv(buf: &[u8]) -> Option<(u8, &[u8])> {
             2 + n,
         )
     };
-    Some((tag, buf.get(hdr..hdr.checked_add(len)?)?))
+    let end = hdr.checked_add(len)?;
+    Some((tag, buf.get(hdr..end)?, buf.get(end..)?))
 }
 
-/// Length of `outer` remaining after the TLV whose content is `inner`.
-fn rest_after(outer: &[u8], inner: &[u8]) -> usize {
-    let inner_end = inner.as_ptr() as usize + inner.len();
-    let outer_end = outer.as_ptr() as usize + outer.len();
-    outer_end.saturating_sub(inner_end)
-}
-
-/// `GeneralizedTime` (tag 0x18) `YYYYMMDDHHMMSS[.fff]Z` inside the token.
-fn extract_gen_time(body: &[u8]) -> Option<String> {
-    for i in 0..body.len().saturating_sub(2) {
-        if body[i] != 0x18 {
-            continue;
-        }
-        let len = usize::from(body[i + 1]);
-        if !(15..=24).contains(&len) {
-            continue;
-        }
-        let Some(raw) = body.get(i + 2..i + 2 + len) else {
-            continue;
-        };
-        if raw.last() == Some(&b'Z') && raw[..14].iter().all(u8::is_ascii_digit) {
-            return String::from_utf8(raw.to_vec()).ok();
-        }
+fn expect_tag<'a>(
+    buf: &'a [u8],
+    tag: u8,
+    what: &str,
+) -> Result<(&'a [u8], &'a [u8]), anyhow::Error> {
+    let (found, content, rest) =
+        der_tlv(buf).ok_or_else(|| anyhow::anyhow!("anchor token has no {what}"))?;
+    if found != tag {
+        anyhow::bail!("anchor token has no {what}");
     }
-    None
+    Ok((content, rest))
+}
+
+/// `TimeStampResp ::= SEQUENCE { PKIStatusInfo, TimeStampToken }`.
+fn parse_timestamp_resp(der: &[u8]) -> Result<(u64, &[u8]), anyhow::Error> {
+    let bad = || anyhow::anyhow!("anchor token is not a TimeStampResp");
+    let (outer, _) = expect_tag(der, 0x30, "TimeStampResp").map_err(|_| bad())?;
+    let (status_info, token) = expect_tag(outer, 0x30, "PKIStatusInfo").map_err(|_| bad())?;
+    let (status_bytes, _) =
+        expect_tag(status_info, 0x02, "PKIStatusInfo status").map_err(|_| bad())?;
+    if status_bytes.is_empty() || status_bytes.len() > 8 {
+        return Err(bad());
+    }
+    let status = status_bytes
+        .iter()
+        .fold(0u64, |acc, b| (acc << 8) | u64::from(*b));
+    Ok((status, token))
+}
+
+/// `encapContentInfo ::= SEQUENCE { id-ct-TSTInfo, [0] OCTET STRING TSTInfo }`.
+fn encap_tst_info(seq: &[u8]) -> Option<&[u8]> {
+    let (tag, oid, rest) = der_tlv(seq)?;
+    if tag != 0x06 || oid != OID_TST_INFO {
+        return None;
+    }
+    let (tag, explicit, _) = der_tlv(rest)?;
+    if tag != 0xA0 {
+        return None;
+    }
+    let (tag, tst_info, _) = der_tlv(explicit)?;
+    (tag == 0x04).then_some(tst_info)
+}
+
+/// Walk `SignedData` fields to the encapsulated `TSTInfo`; reject a token whose
+/// CMS content is not a timestamp token.
+fn tst_info_gen_time(body: &[u8], imprint: &[u8]) -> Result<String, anyhow::Error> {
+    let bad = || anyhow::anyhow!("TAMPERED: anchor token is not a CMS timestamp token");
+    let (content_info, _) = expect_tag(body, 0x30, "ContentInfo").map_err(|_| bad())?;
+    let (oid, rest) =
+        expect_tag(content_info, 0x06, "ContentInfo contentType").map_err(|_| bad())?;
+    if oid != OID_SIGNED_DATA {
+        return Err(bad());
+    }
+    let (explicit, _) = expect_tag(rest, 0xA0, "ContentInfo content").map_err(|_| bad())?;
+    let (signed_data, _) = expect_tag(explicit, 0x30, "SignedData").map_err(|_| bad())?;
+    let mut fields = signed_data;
+    while !fields.is_empty() {
+        let (tag, content, rest) = der_tlv(fields).ok_or_else(bad)?;
+        if tag == 0x30 {
+            if let Some(tst_info) = encap_tst_info(content) {
+                return parse_tst_info(tst_info, imprint);
+            }
+        }
+        fields = rest;
+    }
+    Err(bad())
+}
+
+fn validate_gen_time(raw: &[u8]) -> Result<(), anyhow::Error> {
+    let text = std::str::from_utf8(raw)
+        .map_err(|_| anyhow::anyhow!("TAMPERED: TSTInfo genTime is not ASCII"))?;
+    let core = text
+        .strip_suffix('Z')
+        .and_then(|s| s.split('.').next())
+        .unwrap_or_default();
+    if core.len() != 14 || !core.bytes().all(|b| b.is_ascii_digit()) {
+        anyhow::bail!("TAMPERED: TSTInfo genTime is not GeneralizedTime");
+    }
+    Ok(())
+}
+
+/// Strict sequential `TSTInfo` parse: the imprint is `messageImprint.hashedMessage`
+/// and `genTime` is the field after `serialNumber` — never a byte scan.
+fn parse_tst_info(der: &[u8], imprint: &[u8]) -> Result<String, anyhow::Error> {
+    let bad = || anyhow::anyhow!("TAMPERED: anchor token has no valid TSTInfo");
+    let (fields, _) = expect_tag(der, 0x30, "TSTInfo").map_err(|_| bad())?;
+    let (version, rest) = expect_tag(fields, 0x02, "TSTInfo version").map_err(|_| bad())?;
+    if version != [1] {
+        return Err(bad());
+    }
+    let (_, rest) = expect_tag(rest, 0x06, "TSTInfo policy").map_err(|_| bad())?;
+    let (msg_imprint, rest) = expect_tag(rest, 0x30, "messageImprint").map_err(|_| bad())?;
+    let (alg, hashed) =
+        expect_tag(msg_imprint, 0x30, "messageImprint algorithm").map_err(|_| bad())?;
+    if !alg.starts_with(SHA256_ALGID) {
+        return Err(bad());
+    }
+    let (digest, _) = expect_tag(hashed, 0x04, "messageImprint digest").map_err(|_| bad())?;
+    if digest != imprint {
+        anyhow::bail!("TAMPERED: TSA token does not cover this checkpoint's imprint");
+    }
+    let (_, rest) = expect_tag(rest, 0x02, "TSTInfo serialNumber").map_err(|_| bad())?;
+    let (time, _) = expect_tag(rest, 0x18, "TSTInfo genTime").map_err(|_| bad())?;
+    validate_gen_time(time)?;
+    String::from_utf8(time.to_vec()).map_err(|_| bad())
 }
 
 #[cfg(test)]
@@ -334,6 +404,36 @@ mod tests {
         out
     }
 
+    /// Minimal CMS timestamp token: id-signedData → `SignedData` →
+    /// id-ct-TSTInfo → `TSTInfo`. Mirrors the fake TSA in the Python tests.
+    fn build_token(imprint: &[u8], gen_time: &[u8], status: u8, extra: &[u8]) -> Vec<u8> {
+        let alg_seq = der(0x30, &[SHA256_ALGID, &der(0x05, &[])].concat());
+        let tst_info = der(
+            0x30,
+            &[
+                der(0x02, &[1]),
+                der(0x06, &[0x2a, 0x03, 0x04]),
+                der(0x30, &[alg_seq, der(0x04, imprint)].concat()),
+                der(0x02, &[42]),
+                der(0x18, gen_time),
+            ]
+            .concat(),
+        );
+        let encap = der(
+            0x30,
+            &[der(0x06, OID_TST_INFO), der(0xA0, &der(0x04, &tst_info))].concat(),
+        );
+        let mut sd = [der(0x02, &[1]), der(0x31, &[]), encap].concat();
+        sd.extend_from_slice(extra);
+        sd.extend_from_slice(&der(0x31, &[]));
+        let signed_data = der(0x30, &sd);
+        let content = der(
+            0x30,
+            &[der(0x06, OID_SIGNED_DATA), der(0xA0, &signed_data)].concat(),
+        );
+        der(0x30, &[der(0x30, &der(0x02, &[status])), content].concat())
+    }
+
     /// Registry-side construction, mirrored from `registry_server.py`.
     fn build(receipts: &[&[u8]], index: usize, anchored: bool) -> (LogProof, Vec<u8>) {
         let leaves: Vec<Hash> = receipts.iter().map(|r| merkle::leaf_hash(r)).collect();
@@ -352,14 +452,7 @@ mod tests {
         cp.signature_hex = hex::encode(key.sign(&cp.signed_bytes().unwrap()).to_bytes());
         let anchor = anchored.then(|| {
             let imprint: Hash = Sha256::digest(cp.anchor_bytes().unwrap()).into();
-            let tst = der(
-                0x30,
-                &[der(0x04, &imprint), der(0x18, b"20260917120000Z")].concat(),
-            );
-            let token = der(
-                0x30,
-                &[der(0x30, &der(0x02, &[0])), der(0x30, &tst)].concat(),
-            );
+            let token = build_token(&imprint, b"20260917120000Z", 0, &[]);
             Anchor {
                 size: cp.size,
                 root: cp.root.clone(),
@@ -448,13 +541,38 @@ mod tests {
         let receipts: [&[u8]; 1] = [b"only"];
         let (mut proof, receipt) = build(&receipts, 0, true);
         let imprint: Hash = Sha256::digest(proof.checkpoint.anchor_bytes().unwrap()).into();
-        let token = der(
-            0x30,
-            &[der(0x30, &der(0x02, &[2])), der(0x04, &imprint)].concat(),
-        );
+        let token = build_token(&imprint, b"20260917120000Z", 2, &[]);
         proof.anchor.as_mut().unwrap().token_b64 =
             base64::engine::general_purpose::STANDARD.encode(token);
         let err = verify_proof(&receipt, &proof, &[log_key().verifying_key()]).unwrap_err();
         assert!(err.to_string().contains("status 2"), "{err}");
+    }
+
+    #[test]
+    fn gen_time_comes_from_tstinfo_not_json_or_stray_bytes() {
+        let receipts: [&[u8]; 2] = [b"a", b"b"];
+        let trusted = [log_key().verifying_key()];
+        let (mut proof, receipt) = build(&receipts, 0, true);
+        let imprint: Hash = Sha256::digest(proof.checkpoint.anchor_bytes().unwrap()).into();
+
+        // Unsigned JSON hint and a stray GeneralizedTime in SignedData are
+        // ignored: the report still shows the TSTInfo genTime.
+        proof.anchor.as_mut().unwrap().gen_time = Some("19990101000000Z".into());
+        let extra = der(0x30, &der(0x18, b"19990101000000Z"));
+        proof.anchor.as_mut().unwrap().token_b64 = base64::engine::general_purpose::STANDARD
+            .encode(build_token(&imprint, b"20260917120000Z", 0, &extra));
+        let report = verify_proof(&receipt, &proof, &trusted).unwrap();
+        assert_eq!(
+            report.anchor.unwrap().gen_time.as_deref(),
+            Some("20260917120000Z")
+        );
+
+        // The imprint must be inside messageImprint: a stray copy elsewhere
+        // in the token does not make a TSTInfo over another digest valid.
+        let extra = der(0x04, &imprint);
+        proof.anchor.as_mut().unwrap().token_b64 = base64::engine::general_purpose::STANDARD
+            .encode(build_token(&[0u8; 32], b"20260917120000Z", 0, &extra));
+        let err = verify_proof(&receipt, &proof, &trusted).unwrap_err();
+        assert!(err.to_string().contains("imprint"), "{err}");
     }
 }
