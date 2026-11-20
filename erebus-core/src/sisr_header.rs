@@ -198,6 +198,8 @@ mod tests {
                     length: 1024,
                 })
                 .collect(),
+
+            identity: None,
         };
         let overhead = SIZE + manifest.encoded_len().unwrap();
         assert!(
@@ -262,6 +264,8 @@ mod tests {
                 hash: [7; 32],
                 length: 4096,
             }],
+
+            identity: None,
         };
         let manifest_bytes = manifest.serialize().unwrap();
         let e = SisrFooterExt {
@@ -295,6 +299,8 @@ mod tests {
             version: crate::manifest::VERSION,
             payload_len: 0,
             chunks: vec![],
+
+            identity: None,
         };
         let manifest_bytes = manifest.serialize().unwrap();
         let e = SisrFooterExt {

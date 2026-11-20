@@ -497,6 +497,8 @@ mod tests {
             version: crate::manifest::VERSION,
             payload_len: chunks.iter().map(|c| u64::from(c.length)).sum(),
             chunks,
+
+            identity: None,
         };
 
         let engine = SisrEngine;
@@ -542,6 +544,8 @@ mod tests {
                 hash: sha256_of(b"unavailable"),
                 length: 512,
             }],
+
+            identity: None,
         };
         let fetcher = MapFetcher::new();
         assert!(SisrEngine
@@ -576,6 +580,8 @@ mod tests {
                 hash: want_hash,
                 length: "tampered-content".len() as u32,
             }],
+
+            identity: None,
         };
 
         let res = SisrEngine.apply_update(&cur, &target, &fetcher, &UNSIGNED);
@@ -592,6 +598,8 @@ mod tests {
             version: crate::manifest::VERSION,
             payload_len: 9999,
             chunks: vec![],
+
+            identity: None,
         };
         assert!(SisrEngine
             .apply_update(&cur, &bad, &MapFetcher::new(), &UNSIGNED)
@@ -629,6 +637,8 @@ mod tests {
                 hash,
                 length: payload.len() as u32,
             }],
+
+            identity: None,
         };
         let (updated, stats) = SisrEngine
             .apply_update_with_stats(&out, &target, &fetcher, &UNSIGNED)
@@ -657,6 +667,8 @@ mod tests {
                 hash: sha256_of(&payload),
                 length: payload.len() as u32,
             }],
+
+            identity: None,
         };
         fetcher.put(sha256_of(&payload), payload.clone());
         let (updated, _) = SisrEngine
@@ -694,6 +706,8 @@ mod tests {
             version: crate::manifest::VERSION,
             payload_len: chunks.iter().map(|c| u64::from(c.length)).sum(),
             chunks,
+
+            identity: None,
         };
 
         let before = fs::read(&cur).unwrap();

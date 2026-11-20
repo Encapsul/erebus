@@ -18,10 +18,66 @@
 
 use std::io;
 
+use sha2::{Digest, Sha256};
+
 pub const MAGIC: &[u8; 4] = b"XBMD";
+/// Legacy schema, still readable so existing signed SISR binaries verify.
 pub const VERSION: u8 = 1;
+/// Current schema: adds the signed identity block below.
+pub const CURRENT_VERSION: u8 = 2;
 pub const HEADER_SIZE: usize = 20;
+/// sequence u64 + five SHA-256 digests.
+pub const V2_IDENTITY_SIZE: usize = 8 + 5 * 32;
+pub const V2_HEADER_SIZE: usize = HEADER_SIZE + V2_IDENTITY_SIZE;
 pub const ENTRY_SIZE: usize = 36;
+
+/// Signed identity of the artifact a manifest belongs to.
+///
+/// v1 manifests predate this block. v2 update manifests must carry it so a
+/// valid signature from another app, launcher or older build cannot be
+/// replayed against this binary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestIdentity {
+    pub sequence: u64,
+    pub app_sha256: [u8; 32],
+    pub app_version_sha256: [u8; 32],
+    pub stub_sha256: [u8; 32],
+    pub meta_sha256: [u8; 32],
+    pub payload_sha256: [u8; 32],
+}
+
+impl ManifestIdentity {
+    /// Derives the identity from the bytes the launcher will actually use.
+    pub fn new(
+        sequence: u64,
+        app: &str,
+        app_version: &str,
+        stub: &[u8],
+        meta: &[u8],
+        payload: &[u8],
+    ) -> Self {
+        Self {
+            sequence,
+            app_sha256: sha256(app.as_bytes()),
+            app_version_sha256: sha256(app_version.as_bytes()),
+            stub_sha256: sha256(stub),
+            meta_sha256: sha256(meta),
+            payload_sha256: sha256(payload),
+        }
+    }
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+fn header_size(version: u8) -> usize {
+    if version >= CURRENT_VERSION {
+        V2_HEADER_SIZE
+    } else {
+        HEADER_SIZE
+    }
+}
 
 /// One content-addressed chunk of the reconstructed payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,12 +91,14 @@ pub struct ChunkEntry {
 /// The embedded `SISR` delta manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeltaManifest {
-    /// Manifest schema version (see [`VERSION`]).
+    /// Manifest schema version (see [`VERSION`] and [`CURRENT_VERSION`]).
     pub version: u8,
     /// Total size in bytes of the reconstructed payload.
     pub payload_len: u64,
     /// Content-addressed chunks, in payload order.
     pub chunks: Vec<ChunkEntry>,
+    /// Signed identity block. `None` only for legacy v1 manifests.
+    pub identity: Option<ManifestIdentity>,
 }
 
 impl DeltaManifest {
@@ -53,22 +111,43 @@ impl DeltaManifest {
         self.chunks
             .len()
             .checked_mul(ENTRY_SIZE)
-            .and_then(|n| n.checked_add(HEADER_SIZE))
+            .and_then(|n| n.checked_add(header_size(self.version)))
             .ok_or_else(|| err("manifest size overflow"))
     }
 
     /// Serializes the manifest into its compact binary form.
     ///
-    /// Returns an error if the chunk count exceeds `u32::MAX`.
+    /// Returns an error if the chunk count exceeds `u32::MAX` or a v2
+    /// manifest is missing its identity block.
     pub fn serialize(&self) -> io::Result<Vec<u8>> {
+        if self.version == 0 || self.version > CURRENT_VERSION {
+            return Err(err("unsupported delta manifest version"));
+        }
+        let identity = if self.version >= CURRENT_VERSION {
+            Some(
+                self.identity
+                    .as_ref()
+                    .ok_or_else(|| err("v2 delta manifest requires an identity block"))?,
+            )
+        } else {
+            None
+        };
         let chunk_count =
             u32::try_from(self.chunks.len()).map_err(|_| err("chunk count exceeds u32::MAX"))?;
         let mut out = Vec::with_capacity(self.encoded_len()?);
         out.extend_from_slice(MAGIC);
-        out.push(VERSION);
+        out.push(self.version);
         out.extend_from_slice(&[0u8; 3]);
         out.extend_from_slice(&chunk_count.to_le_bytes());
         out.extend_from_slice(&self.payload_len.to_le_bytes());
+        if let Some(id) = identity {
+            out.extend_from_slice(&id.sequence.to_le_bytes());
+            out.extend_from_slice(&id.app_sha256);
+            out.extend_from_slice(&id.app_version_sha256);
+            out.extend_from_slice(&id.stub_sha256);
+            out.extend_from_slice(&id.meta_sha256);
+            out.extend_from_slice(&id.payload_sha256);
+        }
         for chunk in &self.chunks {
             out.extend_from_slice(&chunk.hash);
             out.extend_from_slice(&chunk.length.to_le_bytes());
@@ -85,22 +164,42 @@ impl DeltaManifest {
             return Err(err("bad delta manifest magic"));
         }
         let version = bytes[4];
-        if version > VERSION {
+        if version == 0 || version > CURRENT_VERSION {
             return Err(err("unsupported delta manifest version"));
+        }
+        if bytes[5..8] != [0u8; 3] {
+            return Err(err("nonzero delta manifest reserved bytes"));
+        }
+        let header = header_size(version);
+        if bytes.len() < header {
+            return Err(err("truncated delta manifest identity"));
         }
         let chunk_count = u32::from_le_bytes(fixed(&bytes[8..12])?);
         let payload_len = u64::from_le_bytes(fixed(&bytes[12..20])?);
+        let identity = if version >= CURRENT_VERSION {
+            let off = HEADER_SIZE;
+            Some(ManifestIdentity {
+                sequence: u64::from_le_bytes(fixed(&bytes[off..off + 8])?),
+                app_sha256: fixed(&bytes[off + 8..off + 40])?,
+                app_version_sha256: fixed(&bytes[off + 40..off + 72])?,
+                stub_sha256: fixed(&bytes[off + 72..off + 104])?,
+                meta_sha256: fixed(&bytes[off + 104..off + 136])?,
+                payload_sha256: fixed(&bytes[off + 136..off + 168])?,
+            })
+        } else {
+            None
+        };
         let table_len = usize::try_from(chunk_count)
             .ok()
             .and_then(|n| n.checked_mul(ENTRY_SIZE))
-            .and_then(|n| n.checked_add(HEADER_SIZE))
+            .and_then(|n| n.checked_add(header))
             .ok_or_else(|| err("delta manifest chunk table too large"))?;
         if bytes.len() != table_len {
             return Err(err("delta manifest length mismatch"));
         }
         let mut chunks = Vec::with_capacity(chunk_count as usize);
         for i in 0..chunk_count as usize {
-            let base = HEADER_SIZE + i * ENTRY_SIZE;
+            let base = header + i * ENTRY_SIZE;
             let entry = &bytes[base..base + ENTRY_SIZE];
             let mut hash = [0u8; 32];
             hash.copy_from_slice(&entry[0..32]);
@@ -113,6 +212,7 @@ impl DeltaManifest {
             version,
             payload_len,
             chunks,
+            identity,
         })
     }
 }
@@ -144,6 +244,7 @@ mod tests {
                     length: 2048,
                 },
             ],
+            identity: None,
         }
     }
 
@@ -170,15 +271,62 @@ mod tests {
             version: VERSION,
             payload_len: 0,
             chunks: vec![],
+            identity: None,
         };
         let bytes = m.serialize().unwrap();
         assert_eq!(bytes.len(), HEADER_SIZE);
         assert_eq!(DeltaManifest::parse(&bytes).unwrap(), m);
     }
 
+    fn sample_v2() -> DeltaManifest {
+        DeltaManifest {
+            version: CURRENT_VERSION,
+            payload_len: 4096,
+            chunks: sample().chunks,
+            identity: Some(ManifestIdentity::new(
+                7,
+                "demo-app",
+                "1.2.3",
+                b"stub-bytes",
+                br#"{"name":"demo-app"}"#,
+                &[9u8; 4096],
+            )),
+        }
+    }
+
+    #[test]
+    fn v2_identity_roundtrips_bit_exactly() {
+        let m = sample_v2();
+        let bytes = m.serialize().unwrap();
+        assert_eq!(bytes.len(), V2_HEADER_SIZE + 2 * ENTRY_SIZE);
+        let parsed = DeltaManifest::parse(&bytes).unwrap();
+        assert_eq!(parsed, m);
+        let id = parsed.identity.unwrap();
+        assert_eq!(id.sequence, 7);
+        assert_eq!(id.app_sha256, sha256(b"demo-app"));
+        assert_eq!(id.payload_sha256, sha256(&[9u8; 4096]));
+    }
+
+    #[test]
+    fn v2_manifest_requires_identity() {
+        let mut m = sample();
+        m.version = CURRENT_VERSION;
+        assert!(m.serialize().is_err());
+    }
+
+    #[test]
+    fn v1_manifest_still_parses_legacy_bytes() {
+        let legacy = sample().serialize().unwrap();
+        let parsed = DeltaManifest::parse(&legacy).unwrap();
+        assert_eq!(parsed.version, VERSION);
+        assert!(parsed.identity.is_none());
+    }
+
     #[test]
     fn encoded_len_matches_serialized_len() {
         let m = sample();
+        assert_eq!(m.encoded_len().unwrap(), m.serialize().unwrap().len());
+        let m = sample_v2();
         assert_eq!(m.encoded_len().unwrap(), m.serialize().unwrap().len());
     }
 
@@ -257,6 +405,7 @@ mod proptests {
                 version: VERSION,
                 payload_len,
                 chunks,
+                identity: None,
             };
             let parsed = DeltaManifest::parse(&m.serialize().unwrap()).unwrap();
             prop_assert_eq!(&parsed, &m);

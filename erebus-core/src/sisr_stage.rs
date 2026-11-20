@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::chunker::{Chunker, FastCDC};
-use crate::manifest::{self, ChunkEntry, DeltaManifest};
+use crate::manifest::{self, ChunkEntry, DeltaManifest, ManifestIdentity, CURRENT_VERSION};
 
 /// Ed25519 private key used to sign the `SISR` manifest during the build.
 ///
@@ -53,6 +53,41 @@ pub struct RemoteManifest {
     pub merkle_root: [u8; 32],
     pub signature: [u8; 64],
     pub manifest: DeltaManifest,
+}
+
+/// The bytes a v2 manifest is bound to on the receiving machine.
+///
+/// The sequence is deliberately absent: at-rest verification cannot know the
+/// build number without trusting mutable metadata, while update verification
+/// checks monotonicity against the currently installed manifest.
+#[derive(Debug, Clone, Copy)]
+pub struct SisrVerifyContext<'a> {
+    pub app: &'a str,
+    pub app_version: &'a str,
+    pub stub: &'a [u8],
+    pub meta: &'a [u8],
+}
+
+impl<'a> SisrVerifyContext<'a> {
+    pub fn new(app: &'a str, app_version: &'a str, stub: &'a [u8], meta: &'a [u8]) -> Self {
+        Self {
+            app,
+            app_version,
+            stub,
+            meta,
+        }
+    }
+
+    /// Checks every signed digest except `payload_sha256`, which the caller
+    /// verifies against the actual payload bytes.
+    pub fn matches_identity(&self, id: &ManifestIdentity) -> bool {
+        let expected =
+            ManifestIdentity::new(0, self.app, self.app_version, self.stub, self.meta, &[]);
+        ct_eq_hash(&expected.app_sha256, &id.app_sha256)
+            & ct_eq_hash(&expected.app_version_sha256, &id.app_version_sha256)
+            & ct_eq_hash(&expected.stub_sha256, &id.stub_sha256)
+            & ct_eq_hash(&expected.meta_sha256, &id.meta_sha256)
+    }
 }
 
 impl SisrBuildConfig {
@@ -123,13 +158,33 @@ impl RemoteManifest {
     }
 }
 
-/// Runs the whole `SISR` stage over the payload.
+/// Runs the whole `SISR` stage over the payload (legacy v1, no identity).
 pub fn build_artifacts(payload: &[u8], config: &SisrBuildConfig) -> io::Result<SisrArtifacts> {
+    build_artifacts_with(payload, config, manifest::VERSION, None)
+}
+
+/// Builds a v2 artifact whose signed identity binds it to the app, version,
+/// launcher, metadata and payload bytes.
+pub fn build_artifacts_bound(
+    payload: &[u8],
+    config: &SisrBuildConfig,
+    identity: ManifestIdentity,
+) -> io::Result<SisrArtifacts> {
+    build_artifacts_with(payload, config, CURRENT_VERSION, Some(identity))
+}
+
+fn build_artifacts_with(
+    payload: &[u8],
+    config: &SisrBuildConfig,
+    version: u8,
+    identity: Option<ManifestIdentity>,
+) -> io::Result<SisrArtifacts> {
     let chunks = chunk_payload(payload, config.chunk_target_size)?;
     let manifest = DeltaManifest {
-        version: manifest::VERSION,
+        version,
         payload_len: payload.len() as u64,
         chunks,
+        identity,
     };
     let manifest_bytes = manifest.serialize()?;
     let merkle_root = merkle_root_of(&manifest);
@@ -229,8 +284,34 @@ pub fn verify_embedded_sisr(
     payload: &[u8],
     publics: &[VerifyingKey],
 ) -> io::Result<()> {
+    verify_embedded_sisr_inner(ext, manifest, payload, publics, None)
+}
+
+/// v2 at-rest verification: the signed identity must match the actual app,
+/// version, launcher, metadata and payload being executed. v1 manifests are
+/// still accepted so existing signed binaries keep working.
+pub fn verify_embedded_sisr_bound(
+    ext: &crate::sisr_header::SisrFooterExt,
+    manifest: &DeltaManifest,
+    payload: &[u8],
+    publics: &[VerifyingKey],
+    ctx: &SisrVerifyContext<'_>,
+) -> io::Result<()> {
+    verify_embedded_sisr_inner(ext, manifest, payload, publics, Some(ctx))
+}
+
+fn verify_embedded_sisr_inner(
+    ext: &crate::sisr_header::SisrFooterExt,
+    manifest: &DeltaManifest,
+    payload: &[u8],
+    publics: &[VerifyingKey],
+    ctx: Option<&SisrVerifyContext<'_>>,
+) -> io::Result<()> {
     if ext.signature == [0u8; 64] {
         return Err(err("unsigned SISR section refused at rest"));
+    }
+    if publics.is_empty() {
+        return Err(err("no trusted keys - refuse SISR binary at rest"));
     }
     if merkle_root_of(manifest) != ext.merkle_root {
         return Err(err("embedded SISR Merkle root does not match chunk table"));
@@ -242,7 +323,80 @@ pub fn verify_embedded_sisr(
     {
         return Err(err("embedded SISR signature verification failed"));
     }
+    if let Some(identity) = &manifest.identity {
+        let ctx = ctx.ok_or_else(|| err("v2 SISR manifest requires bound verification"))?;
+        if !ctx.matches_identity(identity) {
+            return Err(err("v2 SISR identity does not match this binary"));
+        }
+        if !ct_eq_hash(&sha256_digest(payload), &identity.payload_sha256) {
+            return Err(err("v2 SISR payload digest does not match signed identity"));
+        }
+    }
     verify_payload_chunks(manifest, payload)
+}
+
+/// Authenticates a remote update manifest before any chunk is fetched.
+///
+/// v1 manifests are only valid for at-rest verification of installed
+/// binaries. An update must be v2 so the publisher signature binds the app
+/// identity, launcher, metadata, payload and a monotonic sequence number —
+/// otherwise a signature from a different app or an older build can be
+/// replayed against this binary.
+pub fn verify_update_manifest(
+    remote: &RemoteManifest,
+    current: Option<&DeltaManifest>,
+    publics: &[VerifyingKey],
+    ctx: &SisrVerifyContext<'_>,
+) -> io::Result<()> {
+    if remote.signature == [0u8; 64] {
+        return Err(err("unsigned update manifest refused"));
+    }
+    if publics.is_empty() {
+        return Err(err("no trusted keys - refuse update manifest"));
+    }
+    if remote.manifest.version < CURRENT_VERSION {
+        return Err(err("legacy v1 manifest is not accepted as an update"));
+    }
+    let Some(identity) = &remote.manifest.identity else {
+        return Err(err("v2 update manifest requires an identity block"));
+    };
+    if identity.sequence == 0 {
+        return Err(err("update manifest sequence must be greater than zero"));
+    }
+    if let Some(current_id) = current.and_then(|m| m.identity.as_ref()) {
+        if identity.sequence <= current_id.sequence {
+            return Err(err(
+                "update sequence is not newer than the installed version",
+            ));
+        }
+    }
+    if !remote.verify_merkle() {
+        return Err(err(
+            "update manifest Merkle root does not match chunk table",
+        ));
+    }
+    if !remote.verify_any(publics) {
+        return Err(err(
+            "update manifest signature does not match any trusted key",
+        ));
+    }
+    if !ctx.matches_identity(identity) {
+        return Err(err("update manifest identity does not match this artifact"));
+    }
+    if !chunk_lengths_match_payload_len(&remote.manifest) {
+        return Err(err(
+            "update manifest chunk table does not match payload_len",
+        ));
+    }
+    Ok(())
+}
+
+fn chunk_lengths_match_payload_len(manifest: &DeltaManifest) -> bool {
+    manifest
+        .chunks
+        .iter()
+        .try_fold(0u64, |acc, c| acc.checked_add(u64::from(c.length)))
+        == Some(manifest.payload_len)
 }
 
 /// Binds `payload` to the signed chunk table: exact tiling plus a
@@ -313,6 +467,7 @@ mod tests {
                     length: 4096,
                 })
                 .collect(),
+            identity: None,
         }
     }
 
@@ -598,5 +753,127 @@ mod tests {
             verify_embedded_sisr(&ext, &manifest, &payload, &[key.verifying_key()]).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("Merkle root does not match"));
+    }
+
+    /// Builds a signed v2 remote manifest bound to a fixed app identity.
+    fn bound_remote(key: &SigningKey, sequence: u64, payload: &[u8]) -> (RemoteManifest, Vec<u8>) {
+        let config = SisrBuildConfig {
+            enabled: true,
+            chunk_target_size: 4096,
+            signing_key: Some(key.clone()),
+        };
+        let identity = ManifestIdentity::new(sequence, APP, APP_VERSION, STUB, META, payload);
+        let artifacts = build_artifacts_bound(payload, &config, identity).unwrap();
+        (
+            RemoteManifest {
+                merkle_root: artifacts.merkle_root,
+                signature: artifacts.signature,
+                manifest: artifacts.manifest,
+            },
+            payload.to_vec(),
+        )
+    }
+
+    const APP: &str = "demo";
+    const APP_VERSION: &str = "1.0";
+    const STUB: &[u8] = b"stub";
+    const META: &[u8] = br#"{"name":"demo"}"#;
+
+    fn ctx() -> SisrVerifyContext<'static> {
+        SisrVerifyContext::new(APP, APP_VERSION, STUB, META)
+    }
+
+    #[test]
+    fn verify_update_manifest_accepts_a_valid_v2_update() {
+        let key = SigningKey::from_bytes(&[9u8; 32]);
+        let payload = random_buf(9000, 41);
+        let (remote, _) = bound_remote(&key, 1, &payload);
+        verify_update_manifest(&remote, None, &[key.verifying_key()], &ctx()).unwrap();
+    }
+
+    #[test]
+    fn verify_update_manifest_rejects_a_legacy_v1_update() {
+        let key = SigningKey::from_bytes(&[9u8; 32]);
+        let payload = random_buf(9000, 41);
+        let config = SisrBuildConfig {
+            enabled: true,
+            chunk_target_size: 4096,
+            signing_key: Some(key.clone()),
+        };
+        let artifacts = build_artifacts(&payload, &config).unwrap();
+        let remote = RemoteManifest {
+            merkle_root: artifacts.merkle_root,
+            signature: artifacts.signature,
+            manifest: artifacts.manifest,
+        };
+        let err =
+            verify_update_manifest(&remote, None, &[key.verifying_key()], &ctx()).unwrap_err();
+        assert!(err.to_string().contains("legacy v1"));
+    }
+
+    #[test]
+    fn verify_update_manifest_rejects_rollback() {
+        let key = SigningKey::from_bytes(&[9u8; 32]);
+        let payload = random_buf(9000, 41);
+        let (current, _) = bound_remote(&key, 5, &payload);
+        let (older, _) = bound_remote(&key, 4, &payload);
+        let err = verify_update_manifest(
+            &older,
+            Some(&current.manifest),
+            &[key.verifying_key()],
+            &ctx(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not newer"));
+    }
+
+    #[test]
+    fn verify_update_manifest_rejects_a_different_app() {
+        let key = SigningKey::from_bytes(&[9u8; 32]);
+        let payload = random_buf(9000, 41);
+        let (remote, _) = bound_remote(&key, 1, &payload);
+        let other = SisrVerifyContext::new("other-app", "1.0", b"stub", br#"{"name":"other"}"#);
+        let err =
+            verify_update_manifest(&remote, None, &[key.verifying_key()], &other).unwrap_err();
+        assert!(err.to_string().contains("identity does not match"));
+    }
+
+    #[test]
+    fn bound_at_rest_verification_checks_identity_and_payload() {
+        let key = SigningKey::from_bytes(&[9u8; 32]);
+        let payload = random_buf(9000, 41);
+        let config = SisrBuildConfig {
+            enabled: true,
+            chunk_target_size: 4096,
+            signing_key: Some(key.clone()),
+        };
+        let identity = ManifestIdentity::new(1, APP, APP_VERSION, STUB, META, &payload);
+        let artifacts = build_artifacts_bound(&payload, &config, identity).unwrap();
+        let ext = crate::sisr_header::SisrFooterExt {
+            sisr_version: crate::sisr_header::SISR_VERSION,
+            chunk_table_offset: 0,
+            chunk_table_len: artifacts.manifest_bytes.len() as u32,
+            merkle_root: artifacts.merkle_root,
+            signature: artifacts.signature,
+        };
+        let good = ctx();
+        verify_embedded_sisr_bound(
+            &ext,
+            &artifacts.manifest,
+            &payload,
+            &[key.verifying_key()],
+            &good,
+        )
+        .unwrap();
+        let wrong = SisrVerifyContext::new("other", APP_VERSION, STUB, META);
+        let err = verify_embedded_sisr_bound(
+            &ext,
+            &artifacts.manifest,
+            &payload,
+            &[key.verifying_key()],
+            &wrong,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("identity does not match"));
     }
 }
