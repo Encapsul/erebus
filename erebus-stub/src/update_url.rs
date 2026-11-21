@@ -2,7 +2,8 @@
 //!
 //! Provides `resolve_update_url` (precedence: `--erebus-update=<URL>` CLI arg >
 //! env > embedded meta) and `normalize_base_url` (strip trailing slashes,
-//! reject non-http(s)).
+//! reject non-http(s)). Plain HTTP is loopback-only unless
+//! `ERE_ALLOW_PLAIN_HTTP_UPDATES=1` is set explicitly.
 
 use std::ffi::OsString;
 use std::io;
@@ -35,8 +36,24 @@ pub fn resolve_update_url(args: &[OsString], idx: usize, meta: &Metadata) -> io:
     ))
 }
 
-/// Strips trailing slashes and rejects non-http(s) schemes.
+/// Strips trailing slashes and rejects non-http(s) schemes. Plain HTTP is
+/// limited to loopback: an on-path attacker could otherwise swap the update
+/// manifest in flight. HTTPS has transport authentication and stays allowed.
+///
+/// Controlled deployments with their own transport protection can opt out of
+/// the loopback restriction with `ERE_ALLOW_PLAIN_HTTP_UPDATES=1`. The update
+/// manifest still requires a trusted Ed25519 signature and a v2 identity
+/// match, so this only relaxes transport authentication, not publisher trust.
 pub fn normalize_base_url(url: &str) -> io::Result<String> {
+    let allow_plain_http = plain_http_opted_in(std::env::var_os("ERE_ALLOW_PLAIN_HTTP_UPDATES"));
+    normalize_base_url_with_policy(url, allow_plain_http)
+}
+
+fn plain_http_opted_in(value: Option<std::ffi::OsString>) -> bool {
+    matches!(value, Some(v) if v == "1")
+}
+
+fn normalize_base_url_with_policy(url: &str, allow_plain_http: bool) -> io::Result<String> {
     let base = url.trim().trim_end_matches('/').to_string();
     if base.is_empty() || !(base.starts_with("http://") || base.starts_with("https://")) {
         return Err(io::Error::new(
@@ -44,7 +61,25 @@ pub fn normalize_base_url(url: &str) -> io::Result<String> {
             "update URL must be http(s)://<host>/<path>",
         ));
     }
+    if base.starts_with("http://") && !allow_plain_http && !is_loopback_authority(&base[7..]) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "plain HTTP update URLs are allowed only for loopback; use HTTPS or set \
+             ERE_ALLOW_PLAIN_HTTP_UPDATES=1",
+        ));
+    }
     Ok(base)
+}
+
+fn is_loopback_authority(rest: &str) -> bool {
+    let authority = rest.split('/').next().unwrap_or("");
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(end) = host_port.find(']') {
+        &host_port[..=end]
+    } else {
+        host_port.split(':').next().unwrap_or("")
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]")
 }
 
 #[cfg(test)]
@@ -65,6 +100,34 @@ mod tests {
             normalize_base_url("  https://x.example  ").unwrap(),
             "https://x.example"
         );
+    }
+
+    #[test]
+    fn normalize_base_url_rejects_plain_http_off_loopback() {
+        assert!(normalize_base_url("http://updates.example.com/app").is_err());
+        assert!(normalize_base_url("http://192.168.1.10:8080/app").is_err());
+        assert!(normalize_base_url("http://localhost.evil/app").is_err());
+        assert_eq!(
+            normalize_base_url("http://127.0.0.1:8080/app").unwrap(),
+            "http://127.0.0.1:8080/app"
+        );
+        assert_eq!(
+            normalize_base_url("http://[::1]:8080/app").unwrap(),
+            "http://[::1]:8080/app"
+        );
+    }
+
+    #[test]
+    fn plain_http_opt_in_allows_non_loopback_only_when_exactly_one() {
+        let url = "http://updates.example.com/app";
+        assert!(normalize_base_url_with_policy(url, false).is_err());
+        assert_eq!(normalize_base_url_with_policy(url, true).unwrap(), url);
+        // A value other than "1" must not silently relax the restriction.
+        let one = Some(std::ffi::OsString::from("1"));
+        let zero = Some(std::ffi::OsString::from("0"));
+        assert!(plain_http_opted_in(one));
+        assert!(!plain_http_opted_in(zero));
+        assert!(!plain_http_opted_in(None));
     }
 
     #[test]

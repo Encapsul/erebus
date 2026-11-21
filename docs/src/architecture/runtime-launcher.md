@@ -98,6 +98,15 @@ The manifest is **authenticated before a single byte is written**:
 
 Only then does the engine assemble and atomically swap.
 
+Update manifests must use the v2 schema: the publisher signature binds a
+monotonic sequence, the app name and version, the launcher bytes, the metadata
+and the payload hash. An older build, or a signed build from a different app,
+is refused before any chunk is fetched. Plain `http://` update URLs are
+restricted to loopback; controlled deployments with their own transport
+protection can set `ERE_ALLOW_PLAIN_HTTP_UPDATES=1` to allow other hosts. This
+relaxes transport authentication only — the publisher signature and identity
+checks still apply.
+
 ## Atomicity guarantees
 
 `sisr::swap::AtomicWriter` writes to `.<tag>.tmp-<pid>` in the same directory,
@@ -158,6 +167,8 @@ the engine falls back to fetching every chunk — correct, just not incremental.
 | Manifest URL unreachable / non-2xx | update refused, binary untouched |
 | No update URL resolvable (`--erebus-update` alone) | update refused with guidance |
 | Signature fails (no trusted key verifies) | update refused before any write |
+| Manifest is legacy v1, replayed, or bound to a different app | update refused before any write |
+| Plain HTTP update URL off loopback | refused unless `ERE_ALLOW_PLAIN_HTTP_UPDATES=1` |
 | Merkle root mismatch | update refused before any write |
 | Fetched chunk wrong length or SHA-256 | engine errors, binary untouched |
 | Embedded SISR section unsigned / untrusted / payload mismatch at cold start | launcher exits (override: `ERE_SISR_ALLOW_UNSIGNED=1`) |
