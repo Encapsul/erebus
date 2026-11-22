@@ -54,7 +54,7 @@ fn untrusted_signature_is_refused() {
     let out = run_update(&e);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(!out.status.success(), "untrusted signature must fail");
-    assert_refused(&e, &stderr, "signature verification failed");
+    assert_refused(&e, &stderr, "signature does not match any trusted key");
 }
 
 /// An unsigned remote manifest (all-zeros signature — what a build without
@@ -73,7 +73,7 @@ fn unsigned_remote_manifest_is_refused() {
     let out = run_update(&e);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(!out.status.success(), "unsigned manifest must fail");
-    assert_refused(&e, &stderr, "signature");
+    assert_refused(&e, &stderr, "unsigned update manifest refused");
 }
 
 /// Garbage at `/manifest` must be rejected before any write.
@@ -142,6 +142,30 @@ fn merkle_root_mismatch_is_refused() {
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(!out.status.success(), "merkle mismatch must fail");
     assert_refused(&e, &stderr, "Merkle");
+}
+
+/// A validly signed manifest whose sequence is not newer than the installed
+/// one must be refused: a genuine older publisher build must not be replayed.
+#[test]
+fn rolled_back_sequence_is_refused() {
+    let e = env(BODY_V1, BODY_V2);
+    let mut manifest = e.staged.remote.manifest.clone();
+    manifest.identity.as_mut().unwrap().sequence = 1;
+    let rollback = erebus_core::sisr_stage::RemoteManifest {
+        merkle_root: e.staged.remote.merkle_root,
+        signature: sign(
+            &manifest.serialize().unwrap(),
+            &e.staged.remote.merkle_root,
+            &super::key(),
+        ),
+        manifest,
+    };
+    e.server.route_manifest(&rollback.to_bytes().unwrap());
+
+    let out = run_update(&e);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!out.status.success(), "rollback must fail: {stderr}");
+    assert_refused(&e, &stderr, "not newer than the installed version");
 }
 
 /// An unsigned SISR binary (built without `--key`) must be refused at cold

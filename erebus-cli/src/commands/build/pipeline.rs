@@ -790,7 +790,7 @@ pub(crate) fn build_single_target(
         &entrypoint,
         &env_pairs,
         &erebus_core::assembly::MetaOptions {
-            version: version_info,
+            version: version_info.clone(),
             author,
             description,
             license,
@@ -885,8 +885,28 @@ pub(crate) fn build_single_target(
         let sisr_config = build_sisr_config(&args.key, args.embed_model.is_some())?;
         let artifacts = match sisr_artifacts_opt {
             Some(a) => a,
-            None => erebus_core::sisr_stage::build_artifacts(&payload, &sisr_config)
-                .context("SISR stage failed during build")?,
+            None => {
+                // Sequence from the previous manifest makes replay of an
+                // older signed update detectable at verification time.
+                let previous_sequence = prev_manifest_bytes
+                    .as_deref()
+                    .and_then(|bytes| {
+                        erebus_core::sisr_stage::RemoteManifest::from_bytes(bytes)
+                            .ok()
+                            .and_then(|m| m.manifest.identity.map(|id| id.sequence))
+                    })
+                    .unwrap_or(0);
+                let identity = erebus_core::manifest::ManifestIdentity::new(
+                    previous_sequence.saturating_add(1),
+                    &app_name,
+                    version_info.as_deref().unwrap_or(""),
+                    &stub_bytes,
+                    &meta,
+                    &payload,
+                );
+                erebus_core::sisr_stage::build_artifacts_bound(&payload, &sisr_config, identity)
+                    .context("SISR stage failed during build")?
+            }
         };
         let input = erebus_core::assembly::AssemblyInput {
             stub_bytes: &stub_bytes,

@@ -17,11 +17,11 @@ use std::process::{Command, Output};
 
 use ed25519_dalek::SigningKey;
 use erebus_core::assembly::{assemble_erebus, AssemblyInput};
-use erebus_core::format::Footer;
-use erebus_core::manifest::DeltaManifest;
+use erebus_core::format::{read_at, Footer};
+use erebus_core::manifest::ManifestIdentity;
 use erebus_core::sisr::health::{HealthState, HealthStore};
 use erebus_core::sisr_header::read_sisr;
-use erebus_core::sisr_stage::{build_artifacts, RemoteManifest, SisrBuildConfig};
+use erebus_core::sisr_stage::{build_artifacts_bound, RemoteManifest, SisrBuildConfig};
 use sha2::{Digest, Sha256};
 
 const KEY_SEED: [u8; 32] = [7u8; 32];
@@ -83,7 +83,8 @@ fn build_erebus(work: &Path, stub: &Path, body: &str) {
     };
     let stub_bytes = fs::read(stub).unwrap();
     let body_bytes = payload(body);
-    let artifacts = build_artifacts(&body_bytes, &config).unwrap();
+    let identity = ManifestIdentity::new(1, "rollback-e2e", "", &stub_bytes, meta(), &body_bytes);
+    let artifacts = build_artifacts_bound(&body_bytes, &config, identity).unwrap();
     let out = work.join("app.erebus");
     assemble_erebus(
         &out,
@@ -104,23 +105,40 @@ fn build_erebus(work: &Path, stub: &Path, body: &str) {
 /// manifest path and the target version's content hash.
 fn stage_update(work: &Path, current: &Path, body: &str) -> (PathBuf, String) {
     let data = fs::read(current).unwrap();
-    let have: HashSet<[u8; 32]> = read_sisr(&mut Cursor::new(&data))
+    let footer = Footer::read_from(&mut Cursor::new(&data)).unwrap();
+    let stub_bytes = read_at(
+        &mut Cursor::new(&data),
+        0,
+        usize::try_from(footer.payload_offset).unwrap(),
+    )
+    .unwrap();
+    let current_manifest = read_sisr(&mut Cursor::new(&data))
         .unwrap()
         .expect("binary must embed a SISR manifest")
-        .1
-        .chunks
-        .iter()
-        .map(|c| c.hash)
-        .collect();
+        .1;
+    let have: HashSet<[u8; 32]> = current_manifest.chunks.iter().map(|c| c.hash).collect();
+    let sequence = current_manifest
+        .identity
+        .as_ref()
+        .map_or(1, |id| id.sequence.saturating_add(1));
 
     let target_payload = payload(body);
-    let artifacts = build_artifacts(
+    let identity = ManifestIdentity::new(
+        sequence,
+        "rollback-e2e",
+        "",
+        &stub_bytes,
+        meta(),
+        &target_payload,
+    );
+    let artifacts = build_artifacts_bound(
         &target_payload,
         &SisrBuildConfig {
             enabled: true,
             chunk_target_size: CHUNK_TARGET,
             signing_key: Some(key()),
         },
+        identity,
     )
     .unwrap();
 
@@ -142,11 +160,7 @@ fn stage_update(work: &Path, current: &Path, body: &str) -> (PathBuf, String) {
     let remote = RemoteManifest {
         merkle_root: artifacts.merkle_root,
         signature: artifacts.signature,
-        manifest: DeltaManifest {
-            version: artifacts.manifest.version,
-            payload_len: artifacts.manifest.payload_len,
-            chunks: artifacts.manifest.chunks,
-        },
+        manifest: artifacts.manifest,
     };
     let manifest_path = work.join("update.manifest");
     fs::write(&manifest_path, remote.to_bytes().unwrap()).unwrap();

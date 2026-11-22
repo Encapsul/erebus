@@ -22,9 +22,10 @@ use std::process::{Command, Output};
 
 use ed25519_dalek::SigningKey;
 use erebus_core::assembly::{assemble_erebus, AssemblyInput};
-use erebus_core::format::Footer;
+use erebus_core::format::{read_at, Footer};
+use erebus_core::manifest::ManifestIdentity;
 use erebus_core::sisr_header::read_sisr;
-use erebus_core::sisr_stage::{build_artifacts, RemoteManifest, SisrBuildConfig};
+use erebus_core::sisr_stage::{build_artifacts_bound, RemoteManifest, SisrBuildConfig};
 use sha2::{Digest, Sha256};
 
 use mock_server::MockHttpServer;
@@ -133,7 +134,8 @@ pub fn build_erebus_unsigned(work: &Path, stub: &Path, body: &str, shared: &[u8]
 fn assemble(work: &Path, stub: &Path, body: &str, shared: &[u8], config: &SisrBuildConfig) {
     let stub_bytes = fs::read(stub).unwrap();
     let body_bytes = payload(body, shared);
-    let artifacts = build_artifacts(&body_bytes, config).unwrap();
+    let identity = ManifestIdentity::new(1, "e2e-sisr", "", &stub_bytes, meta(), &body_bytes);
+    let artifacts = build_artifacts_bound(&body_bytes, config, identity).unwrap();
     let out = work.join("app.erebus");
     assemble_erebus(
         &out,
@@ -169,23 +171,33 @@ pub fn stage_update(
     signing_key: SigningKey,
 ) -> StagedUpdate {
     let data = fs::read(current).unwrap();
-    let have: HashSet<[u8; 32]> = read_sisr(&mut Cursor::new(&data))
+    let footer = Footer::read_from(&mut Cursor::new(&data)).unwrap();
+    let stub_bytes = read_at(
+        &mut Cursor::new(&data),
+        0,
+        usize::try_from(footer.payload_offset).unwrap(),
+    )
+    .unwrap();
+    let current_manifest = read_sisr(&mut Cursor::new(&data))
         .unwrap()
         .expect("binary must embed a SISR manifest")
-        .1
-        .chunks
-        .iter()
-        .map(|c| c.hash)
-        .collect();
+        .1;
+    let have: HashSet<[u8; 32]> = current_manifest.chunks.iter().map(|c| c.hash).collect();
+    let sequence = current_manifest
+        .identity
+        .as_ref()
+        .map_or(1, |id| id.sequence.saturating_add(1));
 
     let payload = payload(body, shared);
-    let artifacts = build_artifacts(
+    let identity = ManifestIdentity::new(sequence, "e2e-sisr", "", &stub_bytes, meta(), &payload);
+    let artifacts = build_artifacts_bound(
         &payload,
         &SisrBuildConfig {
             enabled: true,
             chunk_target_size: CHUNK_TARGET,
             signing_key: Some(signing_key),
         },
+        identity,
     )
     .unwrap();
 
