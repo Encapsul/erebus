@@ -3,7 +3,7 @@ use clap::Args;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-const GITHUB_API: &str = "https://api.github.com/repos/Tednoob17/erebus/releases/latest";
+const GITHUB_API: &str = "https://api.github.com/repos/Encapsul/erebus/releases/latest";
 
 #[derive(Args)]
 pub struct UpgradeArgs {
@@ -53,7 +53,7 @@ pub fn run(args: UpgradeArgs) -> Result<()> {
     // Naming contract of .github/workflows/release.yml (shared with install.sh).
     let tag = format!("v{latest}");
     let asset = format!("erebus_{latest}_{platform}.tar.gz");
-    let url = format!("https://github.com/Tednoob17/erebus/releases/download/{tag}/{asset}");
+    let url = format!("https://github.com/Encapsul/erebus/releases/download/{tag}/{asset}");
 
     if args.dry_run {
         eprintln!("Would upgrade from {current} to {latest}");
@@ -70,7 +70,7 @@ pub fn run(args: UpgradeArgs) -> Result<()> {
     // The digest lives in the release's single checksums.txt, next to the
     // archive, not in a per-file .sha256 sidecar.
     let checksum_url =
-        format!("https://github.com/Tednoob17/erebus/releases/download/{tag}/checksums.txt");
+        format!("https://github.com/Encapsul/erebus/releases/download/{tag}/checksums.txt");
     let expected = fetch_asset_checksum(&checksum_url, &asset)
         .context("failed to fetch release checksum; refusing an unverified upgrade")?;
     if verbose() {

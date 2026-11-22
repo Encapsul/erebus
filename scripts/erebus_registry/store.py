@@ -102,10 +102,35 @@ class Store:
     def bootstrap_open_uploads(self) -> bool:
         with self.lock:
             # Fail-closed (default-deny): anonymous uploads require an
-            # explicit opt-in flag. `require_auth` forces closure regardless.
+            # explicit opt-in flag AND an empty user table. Leaving the door
+            # open after registration lets anyone replace published packages.
             if self.require_auth:
                 return False
+            if self._load(self.users_path, {}).get("users"):
+                return False
             return self.allow_anon_uploads
+
+    def is_admin(self, user: str | None) -> bool:
+        """Global admin role, granted out of band via ERE_ADMIN_USERS."""
+        if not user:
+            return False
+        names = {
+            name.strip()
+            for name in os.environ.get("ERE_ADMIN_USERS", "").split(",")
+            if name.strip()
+        }
+        return user in names
+
+    def can_overwrite(self, fname: str, owner: str | None, admin: bool = False) -> bool:
+        """A published package may only be replaced by its recorded owner."""
+        with self.lock:
+            meta = self.get_meta(fname)
+            if not meta or not os.path.isfile(os.path.join(self.pkg_dir, fname)):
+                return True
+            recorded = meta.get("owner")
+            if recorded in (None, "__anon__"):
+                return True
+            return recorded == owner or admin
 
     @staticmethod
     def _hash_password(password: str, salt: bytes) -> str:
@@ -769,9 +794,11 @@ class Store:
         meta_names = set(os.listdir(self.meta_dir)) if os.path.isdir(self.meta_dir) else set()
         for meta_name in meta_names:
             if meta_name.endswith(".json"):
+                # meta files are `<fname>.json` and fname already ends in
+                # `.erebus`: app.erebus.json -> app.erebus, not app.erebus.erebus.
                 pkg_name = meta_name[:-5]
-                if pkg_name + ".erebus" in index_names:
-                    referenced.add(pkg_name + ".erebus")
+                if pkg_name in index_names:
+                    referenced.add(pkg_name)
         unreachable = sorted(index_names - referenced)
         quarantined = []
         if not dry_run:

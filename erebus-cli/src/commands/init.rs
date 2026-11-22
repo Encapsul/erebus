@@ -263,7 +263,7 @@ echo "Saved to $DIR/models/model.gguf"
 
 const README: &str = r#"# my-agent
 
-Self-contained llama.cpp AI agent built with [erebus](https://github.com/Tednoob17/erebus).
+Self-contained llama.cpp AI agent built with [erebus](https://github.com/Encapsul/erebus).
 
 ## Build
 

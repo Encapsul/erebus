@@ -192,7 +192,10 @@ class Handler(BaseHTTPRequestHandler):
         user = self._authorized_user()
         if not user:
             return self.send_json({"error": "authentication required"}, 401)
-        dry_run = not any("execute=1" in q for q in self.path.split("?")[1].split("&") if "?" in self.path)
+        if not self.store.is_admin(user):
+            return self.send_json({"error": "admin role required"}, 403)
+        query = self.path.split("?", 1)[1] if "?" in self.path else ""
+        dry_run = "execute=1" not in query.split("&")
         report = self.store.garbage_collect_locked(dry_run=dry_run)
         self.send_json(report)
 
@@ -200,6 +203,8 @@ class Handler(BaseHTTPRequestHandler):
         user = self._authorized_user()
         if not user:
             return self.send_json({"error": "authentication required"}, 401)
+        if not self.store.is_admin(user):
+            return self.send_json({"error": "admin role required"}, 403)
         manifest = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "packages": [],
@@ -225,6 +230,8 @@ class Handler(BaseHTTPRequestHandler):
         user = self._authorized_user()
         if not user:
             return self.send_json({"error": "authentication required"}, 401)
+        if not self.store.is_admin(user):
+            return self.send_json({"error": "admin role required"}, 403)
         payload = self._read_json(raw)
         if payload is None:
             return self.send_json({"error": "invalid json"}, 400)
@@ -1016,6 +1023,8 @@ class Handler(BaseHTTPRequestHandler):
         user = self._authorized_user()
         if not user:
             return self.send_json({"error": "authentication required"}, 401)
+        if not self.store.is_admin(user):
+            return self.send_json({"error": "admin role required"}, 403)
         results = []
         for name in sorted(os.listdir(self.store.pkg_dir)):
             if not name.endswith(".erebus") and not name.endswith(".gguf"):
@@ -1191,11 +1200,13 @@ class Handler(BaseHTTPRequestHandler):
     def _mcp_upload(self):
         self.close_connection = True
         open_mode = self.store.bootstrap_open_uploads()
-        owner = self._authorized_user() if not open_mode else "__anon__"
-        if not open_mode and owner is None:
+        user = None if open_mode else self._authorized_user()
+        if not open_mode and user is None:
             return self.send_json(
                 {"error": "authentication required — register via /auth/register"}, 401
             )
+        owner = user if not open_mode else "__anon__"
+        admin = self.store.is_admin(user)
         ctype = self.headers.get("Content-Type", "")
         if "boundary=" not in ctype:
             return self.send_json({"error": "expected multipart/form-data"}, 400)
@@ -1217,6 +1228,11 @@ class Handler(BaseHTTPRequestHandler):
             os.unlink(tmp)
             return self.send_json(
                 {"error": "invalid upload filename (want *.erebus)"}, 400
+            )
+        if not self.store.can_overwrite(fname, owner, admin):
+            os.unlink(tmp)
+            return self.send_json(
+                {"error": "package is published by another owner"}, 403
             )
         final = os.path.join(self.store.pkg_dir, fname)
         os.replace(tmp, final)
@@ -1248,11 +1264,13 @@ class Handler(BaseHTTPRequestHandler):
         # unread tail is never parsed as a pipelined request.
         self.close_connection = True
         open_mode = self.store.bootstrap_open_uploads()
-        owner = self._authorized_user() if not open_mode else "__anon__"
-        if not open_mode and owner is None:
+        user = None if open_mode else self._authorized_user()
+        if not open_mode and user is None:
             return self.send_json(
                 {"error": "authentication required — register via /auth/register"}, 401
             )
+        owner = user if not open_mode else "__anon__"
+        admin = self.store.is_admin(user)
         # Optional org publish: X-Erebus-Org header keeps the streamed
         # multipart parser untouched. Developer role required.
         audit_org = None
@@ -1296,6 +1314,11 @@ class Handler(BaseHTTPRequestHandler):
             os.unlink(tmp)
             return self.send_json(
                 {"error": "invalid upload filename (want *.erebus or *.pack[.sha256])"}, 400
+            )
+        if not self.store.can_overwrite(fname, owner, admin):
+            os.unlink(tmp)
+            return self.send_json(
+                {"error": "package is published by another owner"}, 403
             )
         final = os.path.join(self.store.pkg_dir, fname)
         os.replace(tmp, final)

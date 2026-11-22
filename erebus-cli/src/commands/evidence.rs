@@ -161,8 +161,8 @@ struct Tally {
     operator_keys: BTreeSet<String>,
 }
 
-/// Keys a pack is checked against: operator keys sign receipts; the
-/// registry set (operator + log keys) certifies machines and checkpoints.
+/// Keys a pack is checked against: operator keys sign receipts; registry
+/// (log) keys certify machines and checkpoints. The two sets must be disjoint.
 struct Keys {
     operator: Vec<VerifyingKey>,
     registry: Vec<VerifyingKey>,
@@ -242,8 +242,15 @@ fn export_keys(args: &ExportArgs) -> Result<(Keys, Vec<VerifyingKey>)> {
         .iter()
         .map(|k| va::parse_log_key(k))
         .collect::<Result<Vec<_>>>()?;
-    let registry = [operator.clone(), log_keys.clone()].concat();
-    Ok((Keys { operator, registry }, log_keys))
+    // Only the explicit registry key may certify machines and checkpoints:
+    // an operator key must never double as the "independent" log trust root.
+    Ok((
+        Keys {
+            operator,
+            registry: log_keys.clone(),
+        },
+        log_keys,
+    ))
 }
 
 fn default_trail(bundle: &Path) -> PathBuf {
@@ -718,8 +725,10 @@ fn verify_unpacked(
     anyhow::ensure!(!operator.is_empty(), "pack carries no operator key");
     let log_keys = va::load_trusted_keys(&dir.join("keys/registry"))?;
     let key_ids = check_pins(&operator, &log_keys, args)?;
-    let registry = [operator.clone(), log_keys].concat();
-    let keys = Keys { operator, registry };
+    let keys = Keys {
+        operator,
+        registry: log_keys,
+    };
     let bundle_checked = check_bundle_file(dir, m, args.bundle.as_deref())?;
     if m.since.is_some() || m.until.is_some() {
         verify_claim(dir, m, &keys.operator)?;
@@ -765,6 +774,10 @@ fn check_pins(
         .iter()
         .map(|h| va::parse_log_key(h).map(|k| key_fingerprint(&k)))
         .collect::<Result<BTreeSet<_>>>()?;
+    anyhow::ensure!(
+        log_keys.iter().all(|k| !operator.contains(k)),
+        "TAMPERED: a key is packed as both operator and registry — trust roots must be separate"
+    );
     for (have, want, what) in [
         (&op_ids, &want_op, "operator"),
         (&log_ids, &want_log, "registry"),
@@ -955,4 +968,25 @@ fn file_name(p: &Path) -> Result<String> {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+
+    #[test]
+    fn pins_refuse_a_shared_operator_and_registry_key() {
+        let sk = SigningKey::from_bytes(&[3u8; 32]);
+        let key = sk.verifying_key();
+        let args = VerifyEvidenceArgs {
+            pack: PathBuf::from("pack.zip"),
+            bundle: None,
+            operator_keys: vec![],
+            log_keys: vec![],
+            json: false,
+        };
+        assert!(check_pins(&[key], &[key], &args).is_err());
+        assert!(check_pins(&[key], &[], &args).is_ok());
+    }
 }

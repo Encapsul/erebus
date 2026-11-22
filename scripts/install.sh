@@ -40,17 +40,18 @@ detect_platform() {
 verify_checksum() {
   local file="$1" checksum_file="$2"
 
+  # Fail closed: an installer that silently skips verification hands an
+  # attacker a free arbitrary-code-execution path via a tampered download.
   if [ ! -f "$checksum_file" ]; then
-    warn "no checksum file found, skipping verification"
-    return 0
+    err "checksums.txt is missing — refusing to install an unverified binary"
   fi
 
   local expected got
-  expected="$(grep "$(basename "$file")" "$checksum_file" 2>/dev/null | awk '{print $1}')"
+  expected="$(awk -v want="$(basename "$file")" \
+    '$2 == want || $2 == "*"want {print $1; exit}' "$checksum_file" 2>/dev/null)"
 
   if [ -z "$expected" ]; then
-    warn "checksum for $(basename "$file") not found in checksums.txt, skipping"
-    return 0
+    err "checksum for $(basename "$file") not found in checksums.txt — refusing to install"
   fi
 
   if command -v sha256sum &>/dev/null; then
@@ -58,8 +59,7 @@ verify_checksum() {
   elif command -v shasum &>/dev/null; then
     got="$(shasum -a 256 "$file" | awk '{print $1}')"
   else
-    warn "no sha256sum or shasum found, skipping verification"
-    return 0
+    err "no sha256sum or shasum found — refusing to install an unverified binary"
   fi
 
   if [ "$expected" != "$got" ]; then

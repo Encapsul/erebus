@@ -161,10 +161,10 @@ pub fn run(args: VerifyAttestArgs) -> Result<()> {
         (None, Some(file)) => verify_single(file, &keys, bundle_bytes.as_deref())?,
         (None, None) => anyhow::bail!("provide a receipt path or --chain <dir>"),
     };
-    let mut registry_keys = keys.clone();
-    if let Some(hex_key) = &args.log_key {
-        registry_keys.push(parse_log_key(hex_key)?);
-    }
+    // Registry/log trust is a separate root from operator trust. Reusing an
+    // operator key here would let one stolen key forge a receipt *and* the
+    // machine certificate or log checkpoint that is supposed to attest it.
+    let registry_keys = registry_keys(args.log_key.as_deref(), &keys)?;
     if args.strict {
         let file = args
             .attest_file
@@ -261,6 +261,20 @@ pub fn run(args: VerifyAttestArgs) -> Result<()> {
         print_human(&report);
     }
     Ok(())
+}
+
+/// Registry/log keys come only from the explicit `--log-key` flag. An empty
+/// set fails closed in the certificate and checkpoint verifiers.
+fn registry_keys(log_key: Option<&str>, operator: &[VerifyingKey]) -> Result<Vec<VerifyingKey>> {
+    let Some(hex_key) = log_key else {
+        return Ok(Vec::new());
+    };
+    let key = parse_log_key(hex_key)?;
+    anyhow::ensure!(
+        !operator.contains(&key),
+        "--log-key must not be an operator key: operator and registry trust must stay separate"
+    );
+    Ok(vec![key])
 }
 
 pub(crate) fn verify_single(
@@ -941,4 +955,23 @@ pub(crate) fn load_trusted_keys(dir: &Path) -> Result<Vec<VerifyingKey>> {
         }
     }
     Ok(keys)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+
+    #[test]
+    fn registry_keys_reject_operator_key_reuse() {
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let operator = sk.verifying_key();
+        let hex = hex::encode(operator.as_bytes());
+        assert!(registry_keys(None, &[operator]).unwrap().is_empty());
+        assert!(registry_keys(Some(&hex), &[]).is_ok());
+        let err = registry_keys(Some(&hex), &[operator])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("trust must stay separate"), "{err}");
+    }
 }

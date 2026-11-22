@@ -104,7 +104,7 @@ LANDING = """<!DOCTYPE html><html><head><meta charset="utf-8">
 <button>Join the waitlist</button></form>
 <div id="msg"></div>
 <div class="tag">Open source · MIT —
-<a href="https://github.com/Tednoob17/erebus">github.com/Tednoob17/erebus</a> ·
+<a href="https://github.com/Encapsul/erebus">github.com/Encapsul/erebus</a> ·
 <a href="/ui/dashboard">Dashboard</a> · API: <code>/index.json</code> · <code>/packages/&lt;name&gt;</code></div>
 <script>
 async function refresh(){{
@@ -177,6 +177,8 @@ def main() -> None:
                     help="OPT-IN fail-open: permit anonymous uploads before the "
                          "first user registers. Off by default — the registry is "
                          "fail-closed, so mutations require auth unless this is set")
+    # /admin/* endpoints are gated by ERE_ADMIN_USERS=alice,bob (comma-separated
+    # usernames); with it unset nobody has the global admin role.
     ap.add_argument("--verify", action="store_true",
                     help="Run a one-shot integrity scan of all stored blobs and exit")
     ap.add_argument("--tls-cert",
@@ -307,6 +309,7 @@ def main() -> None:
         f"erebus registry v2 on {scheme}://{args.host}:{port} dir={args.dir} "
         f"quota={args.quota_gb}GB/month cap={args.upload_cap_gb}GB/upload "
         f"auth={'required (strict, --require-auth)' if args.require_auth else 'OPEN — anonymous uploads (opt-in --allow-anon-uploads)' if bootstrap else 'required (fail-closed by default)'} "
+        f"admins={','.join(n for n in os.environ.get('ERE_ADMIN_USERS', '').split(',') if n.strip()) or '-'} "
         f"billing={billing_state}",
         flush=True,
     )

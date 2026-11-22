@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
-const ASSET_BASE: &str = "https://github.com/Tednoob17/erebus/releases/download";
+const ASSET_BASE: &str = "https://github.com/Encapsul/erebus/releases/download";
 const MAX_ASSET_BYTES: u64 = 80 * 1024 * 1024;
 
 /// `<os>_<arch>` tag of the release archive that contains this stub, when
