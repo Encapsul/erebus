@@ -4,7 +4,7 @@ use ed25519_dalek::{Verifier, VerifyingKey};
 use erebus_core::format::{Footer, SIG_BLOCK_SIZE, SIG_LEN};
 use erebus_core::paths::trusted_keys_dir;
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn write_json_output(value: &serde_json::Value, output: Option<&std::path::Path>) -> Result<()> {
     let json_str = serde_json::to_string_pretty(value)?;
@@ -38,30 +38,191 @@ pub struct VerifyArgs {
     /// Write JSON output to file (requires --json)
     #[arg(short, long)]
     pub output: Option<PathBuf>,
+
+    /// Verify the full evidence set in one pass: bundle signature, receipt,
+    /// hash-chained trail, transparency-log proof, approval and witness seal
+    #[arg(long)]
+    pub all: bool,
+
+    /// Receipt to verify with --all (default: `<file>.attest`)
+    #[arg(long, value_name = "FILE", requires = "all")]
+    pub attest: Option<PathBuf>,
+
+    /// Trail directory (default: `<receipt>.d` when it exists)
+    #[arg(long, value_name = "DIR", requires = "all")]
+    pub chain: Option<PathBuf>,
+
+    /// Registry public key (64 hex) for log proofs and machine certificates
+    #[arg(
+        long,
+        value_name = "HEX",
+        visible_alias = "registry-key",
+        requires = "all"
+    )]
+    pub log_key: Option<String>,
+
+    /// Approver public key (64 hex) or path to a `.pub` file
+    #[arg(long, value_name = "HEX|FILE", requires = "all")]
+    pub approver_key: Option<String>,
+
+    /// Witness public key (64 hex) or path to a `.pub` file
+    #[arg(long, value_name = "HEX|FILE", requires = "all")]
+    pub witness_key: Option<String>,
+
+    /// With --all: refuse if the witness seal is missing or the trail grew
+    /// past the sealed size / head
+    #[arg(long, requires = "all")]
+    pub require_witness: bool,
+
+    /// With --all: require the enrolled-machine co-signature
+    #[arg(long, requires = "all")]
+    pub strict: bool,
+
+    /// With --all: SLSA provenance envelope for the bundle
+    #[arg(long, value_name = "FILE", requires = "all")]
+    pub provenance: Option<PathBuf>,
 }
 
 pub fn run(args: VerifyArgs) -> Result<()> {
-    let trusted_dir = args.trusted_dir.unwrap_or_else(trusted_keys_dir);
+    if args.all {
+        return run_all(&args);
+    }
+    let trusted_dir = args.trusted_dir.clone().unwrap_or_else(trusted_keys_dir);
+    let verdict = verify_bundle(&args.file, &trusted_dir)?;
+    if !verdict.signed {
+        if args.json {
+            write_json_output(&verdict.report, args.output.as_deref())?;
+        } else {
+            eprintln!("file is not signed");
+        }
+        return Ok(());
+    }
+    if !args.quiet {
+        if let Some(k) = verdict.report.get("key").and_then(|v| v.as_str()) {
+            eprintln!("Verified against {k}");
+        }
+    }
+    if args.json {
+        write_json_output(&verdict.report, args.output.as_deref())?;
+    }
+    // A JSON report with `verified:false` must never be a green CI gate.
+    if !verdict.verified {
+        anyhow::bail!("TAMPERED: signature does not match any trusted key");
+    }
+    if !args.quiet && !args.json {
+        eprintln!("OK: signature verified");
+    }
+    Ok(())
+}
 
-    let mut f = std::fs::File::open(&args.file)
+/// `--all`: one bundle, its receipt, and every sidecar that exists next to it.
+fn run_all(args: &VerifyArgs) -> Result<()> {
+    let trusted_dir = args.trusted_dir.clone().unwrap_or_else(trusted_keys_dir);
+    let verdict = verify_bundle(&args.file, &trusted_dir)?;
+    let base = serde_json::json!({
+        "file": args.file.display().to_string(),
+        "mode": "all",
+        "verified": false,
+        "bundle": verdict.report,
+    });
+    if !verdict.signed {
+        if args.json {
+            write_json_output(&base, args.output.as_deref())?;
+        }
+        anyhow::bail!("file is not signed");
+    }
+    if !verdict.verified {
+        if args.json {
+            write_json_output(&base, args.output.as_deref())?;
+        }
+        anyhow::bail!("TAMPERED: bundle signature does not match any trusted key");
+    }
+
+    let bundle_bytes = std::fs::read(&args.file)
         .with_context(|| format!("failed to open {}", args.file.display()))?;
-    let footer = Footer::read_from(&mut f).context("failed to read erebus footer")?;
+    let receipt = args
+        .attest
+        .clone()
+        .unwrap_or_else(|| receipt_path_for(&args.file));
+    anyhow::ensure!(
+        receipt.is_file(),
+        "--all needs a receipt at {} (create one with `erebus attest {}`)",
+        receipt.display(),
+        args.file.display()
+    );
+    let keys = load_trusted_keys(&trusted_dir)?;
+    let publics: Vec<VerifyingKey> = keys.into_iter().map(|(_, vk)| vk).collect();
+    let evidence = super::verify_attest::verify_all_evidence(&super::verify_attest::AllEvidence {
+        receipt: &receipt,
+        trail: args.chain.as_deref(),
+        bundle_bytes: Some(&bundle_bytes),
+        operator_keys: &publics,
+        log_key: args.log_key.as_deref(),
+        approver_key: args.approver_key.as_deref(),
+        witness_key: args.witness_key.as_deref(),
+        require_witness: args.require_witness,
+        strict: args.strict,
+        provenance: args.provenance.as_deref(),
+        proof_path: None,
+    })?;
 
+    let report = serde_json::json!({
+        "file": args.file.display().to_string(),
+        "mode": "all",
+        "verified": true,
+        "bundle": verdict.report,
+        "evidence": evidence,
+    });
+    if args.json {
+        write_json_output(&report, args.output.as_deref())?;
+    } else if !args.quiet {
+        let scheme = report["bundle"]["scheme"].as_str().unwrap_or("?");
+        let key = report["bundle"]["key"].as_str().unwrap_or("?");
+        eprintln!("OK: bundle signature verified ({scheme})");
+        eprintln!("  file: {}\n  key:  {key}", args.file.display());
+        eprintln!();
+        super::verify_attest::print_human(&report["evidence"]);
+    }
+    Ok(())
+}
+
+/// Receipt that `erebus attest <bundle>` writes by default.
+fn receipt_path_for(bundle: &Path) -> PathBuf {
+    let mut name = bundle
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    name.push_str(".attest");
+    bundle.with_file_name(name)
+}
+
+struct BundleVerdict {
+    report: serde_json::Value,
+    signed: bool,
+    verified: bool,
+}
+
+/// Verify the trailing Ed25519 signature and return the signed facts.
+fn verify_bundle(file: &Path, trusted_dir: &Path) -> Result<BundleVerdict> {
+    let mut f =
+        std::fs::File::open(file).with_context(|| format!("failed to open {}", file.display()))?;
+    let footer = Footer::read_from(&mut f).context("failed to read erebus footer")?;
     let has_sig_block = footer.format_version >= 3 && footer.sig_offset != 0;
     if has_sig_block != footer.is_signed() {
         anyhow::bail!("inconsistent signature state (flag/offset mismatch)");
     }
     if !has_sig_block {
-        if args.json {
-            let info = serde_json::json!({
-                "file": args.file.display().to_string(),
+        return Ok(BundleVerdict {
+            report: serde_json::json!({
+                "file": file.display().to_string(),
                 "signed": false,
-            });
-            write_json_output(&info, args.output.as_deref())?;
-        } else {
-            eprintln!("file is not signed");
-        }
-        return Ok(());
+                "scheme": "none",
+                "verified": false,
+                "key": null,
+            }),
+            signed: false,
+            verified: false,
+        });
     }
 
     // Read sig block: [sig_size:u32le][64-byte ed25519 signature]
@@ -75,7 +236,6 @@ pub fn run(args: VerifyArgs) -> Result<()> {
     }
     let signature_bytes = &sig_data[4..SIG_BLOCK_SIZE];
 
-    // Read payload and metadata for hash
     let payload =
         erebus_core::format::read_at(&mut f, footer.payload_offset, footer.payload_csize as usize)?;
     let meta = erebus_core::format::read_at(&mut f, footer.meta_offset, footer.meta_size as usize)?;
@@ -89,8 +249,7 @@ pub fn run(args: VerifyArgs) -> Result<()> {
     hasher.update(&footer.pack_full());
     let hash = hasher.finalize();
 
-    // Try each trusted key
-    let keys = load_trusted_keys(&trusted_dir)?;
+    let keys = load_trusted_keys(trusted_dir)?;
     if keys.is_empty() {
         anyhow::bail!(
             "no trusted keys in {} — add keys with: erebus trust <pubkey_file>",
@@ -99,42 +258,30 @@ pub fn run(args: VerifyArgs) -> Result<()> {
     }
 
     let sig = ed25519_dalek::Signature::from_slice(signature_bytes)?;
-    let mut verified = false;
-    let mut verified_key: Option<String> = None;
-
-    for (key_path, vk) in &keys {
-        if vk.verify(&hash, &sig).is_ok() {
-            verified = true;
-            verified_key = Some(key_path.display().to_string());
-            if !args.quiet {
-                eprintln!("Verified against {}", key_path.display());
-            }
-            break;
-        }
-    }
-
-    if args.json {
-        let info = serde_json::json!({
-            "file": args.file.display().to_string(),
+    let verified_key = keys.iter().find_map(|(key_path, vk)| {
+        vk.verify(&hash, &sig)
+            .ok()
+            .map(|()| key_path.display().to_string())
+    });
+    let verified = verified_key.is_some();
+    Ok(BundleVerdict {
+        report: serde_json::json!({
+            "file": file.display().to_string(),
             "signed": true,
+            "scheme": "erebus",
             "verified": verified,
             "key": verified_key,
-        });
-        write_json_output(&info, args.output.as_deref())?;
-    } else if !verified {
-        anyhow::bail!("TAMPERED: signature does not match any trusted key");
-    } else if !args.quiet {
-        eprintln!("OK: signature verified");
-    }
-
-    Ok(())
+        }),
+        signed: true,
+        verified,
+    })
 }
 
 /// Public key that verifies `file`, from `dir`. Used by `erebus policy` to
 /// match a signer allowlist against the key that actually signed the bundle.
 pub(crate) fn matching_key(file: &std::path::Path, dir: &std::path::Path) -> Result<VerifyingKey> {
     let (hash, sig) = signature_preimage(file)?;
-    let keys = load_trusted_keys(&dir.to_path_buf())?;
+    let keys = load_trusted_keys(dir)?;
     anyhow::ensure!(
         !keys.is_empty(),
         "no trusted keys in {} — add keys with: erebus trust <pubkey_file>",
@@ -169,7 +316,7 @@ fn signature_preimage(file: &std::path::Path) -> Result<(Vec<u8>, ed25519_dalek:
     Ok((hasher.finalize().to_vec(), sig))
 }
 
-fn load_trusted_keys(dir: &PathBuf) -> Result<Vec<(PathBuf, VerifyingKey)>> {
+fn load_trusted_keys(dir: &Path) -> Result<Vec<(PathBuf, VerifyingKey)>> {
     let mut keys = Vec::new();
     if !dir.exists() {
         return Ok(keys);

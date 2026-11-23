@@ -33,6 +33,21 @@ pub struct VerifyAttestArgs {
     #[arg(long, value_name = "DIR", conflicts_with = "attest_file")]
     pub chain: Option<PathBuf>,
 
+    /// Verify the receipt and every sidecar present next to it (trail,
+    /// transparency-log proof, approval, witness) in one pass. A sidecar that
+    /// exists is never accepted without its trust anchor; absent sidecars are
+    /// reported as such.
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "chain",
+            "tool_trail",
+            "require_tool_linkage",
+            "require_tool_execution",
+        ]
+    )]
+    pub all: bool,
+
     /// Bundle the receipt(s) must cover: its SHA-256 is compared to the
     /// signed bundle digest
     #[arg(long, value_name = "FILE")]
@@ -142,6 +157,10 @@ pub fn run(args: VerifyAttestArgs) -> Result<()> {
         .map(|p| std::fs::read(p).with_context(|| format!("failed to read bundle {}", p.display())))
         .transpose()?;
 
+    if args.all {
+        return run_all_attest(&args, &keys, bundle_bytes.as_deref());
+    }
+
     let mut report = match (&args.chain, &args.attest_file) {
         (Some(dir), _) => {
             // With --require-witness, refuse a trail that grew past the seal
@@ -248,17 +267,56 @@ pub fn run(args: VerifyAttestArgs) -> Result<()> {
         report["provenance"] = verify_provenance(prov, &keys, bytes)?;
     }
 
-    if args.json {
-        let json_str = serde_json::to_string_pretty(&report)?;
-        if let Some(path) = args.output {
-            std::fs::write(&path, &json_str)
+    output_report(args.json, args.output.as_deref(), &report)
+}
+
+/// `--all`: one receipt plus every sidecar that exists next to it.
+fn run_all_attest(
+    args: &VerifyAttestArgs,
+    keys: &[VerifyingKey],
+    bundle_bytes: Option<&[u8]>,
+) -> Result<()> {
+    let file = args
+        .attest_file
+        .as_ref()
+        .context("--all needs a receipt path")?;
+    let mut report = verify_all_evidence(&AllEvidence {
+        receipt: file,
+        trail: None,
+        bundle_bytes,
+        operator_keys: keys,
+        log_key: args.log_key.as_deref(),
+        approver_key: args.approver_key.as_deref(),
+        witness_key: args.witness_key.as_deref(),
+        require_witness: args.require_witness,
+        strict: args.strict,
+        provenance: args.provenance.as_deref(),
+        proof_path: args.proof_file.as_deref(),
+    })?;
+    if let Some(body_path) = &args.response_body {
+        report["response_body"] = verify_response_body(file, body_path)?;
+    }
+    if let Some(want) = &args.expected_output_hash {
+        report["expected_output_hash"] = verify_expected_output_hash(file, want)?;
+    }
+    if let Some(body_path) = &args.request_body {
+        report["request_body"] = verify_request_body(file, body_path)?;
+    }
+    output_report(args.json, args.output.as_deref(), &report)
+}
+
+fn output_report(json: bool, output: Option<&Path>, report: &serde_json::Value) -> Result<()> {
+    if json {
+        let json_str = serde_json::to_string_pretty(report)?;
+        if let Some(path) = output {
+            std::fs::write(path, &json_str)
                 .with_context(|| format!("failed to write to {}", path.display()))?;
             eprintln!("Wrote JSON to {}", path.display());
         } else {
             println!("{json_str}");
         }
     } else {
-        print_human(&report);
+        print_human(report);
     }
     Ok(())
 }
@@ -306,6 +364,123 @@ pub(crate) fn verify_single(
         "bundle_checked": bundle_bytes.is_some(),
         "execution": exec,
     }))
+}
+
+/// Options for `verify --all` / `verify-attest --all`: one receipt plus every
+/// sidecar artifact that exists next to it.
+pub(crate) struct AllEvidence<'a> {
+    pub receipt: &'a Path,
+    pub trail: Option<&'a Path>,
+    pub bundle_bytes: Option<&'a [u8]>,
+    pub operator_keys: &'a [VerifyingKey],
+    pub log_key: Option<&'a str>,
+    pub approver_key: Option<&'a str>,
+    pub witness_key: Option<&'a str>,
+    pub require_witness: bool,
+    pub strict: bool,
+    pub provenance: Option<&'a Path>,
+    pub proof_path: Option<&'a Path>,
+}
+
+/// Verify a receipt and every sidecar that is present in one pass.
+///
+/// Absent sidecars are reported as `{"present": false}`; a sidecar that *is*
+/// present is never accepted unverified, so a missing trust anchor fails
+/// closed instead of silently downgrading the check.
+pub(crate) fn verify_all_evidence(opts: &AllEvidence<'_>) -> Result<serde_json::Value> {
+    let mut report = verify_single(opts.receipt, opts.operator_keys, opts.bundle_bytes)?;
+    report["mode"] = serde_json::json!("all");
+
+    let trail = opts
+        .trail
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| erebus_core::attest_log::default_log_dir(opts.receipt));
+    report["chain"] = if trail.is_dir() {
+        verify_chain(&trail, opts.operator_keys, opts.bundle_bytes)?
+    } else {
+        serde_json::json!({
+            "present": false,
+            "dir": trail.display().to_string(),
+        })
+    };
+
+    let proof_path = opts
+        .proof_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| super::attest::proof_path_for(opts.receipt));
+    report["log_proof"] = if proof_path.is_file() {
+        let log_keys = registry_keys(opts.log_key, opts.operator_keys)?;
+        anyhow::ensure!(
+            !log_keys.is_empty(),
+            "transparency-log proof {} is present but --log-key is missing",
+            proof_path.display()
+        );
+        verify_log_proof(opts.receipt, &proof_path, &log_keys)?
+    } else {
+        serde_json::json!({"present": false, "file": proof_path.display().to_string()})
+    };
+
+    report["approval"] = if receipt_has_approval(opts.receipt)? {
+        let spec = opts.approver_key.ok_or_else(|| {
+            anyhow::anyhow!(
+                "receipt carries an approval but --approver-key is missing; \
+                 refusing to accept an unverified approval"
+            )
+        })?;
+        verify_approver(opts.receipt, spec)?
+    } else {
+        serde_json::json!({"present": false})
+    };
+
+    let seal = trail.join("HEAD.witness.json");
+    report["witness"] = if seal.is_file() {
+        let spec = opts.witness_key.ok_or_else(|| {
+            anyhow::anyhow!(
+                "witness seal {} is present but --witness-key is missing",
+                seal.display()
+            )
+        })?;
+        verify_witness_trail(&trail, spec, opts.require_witness)?.unwrap_or(serde_json::Value::Null)
+    } else if opts.require_witness {
+        anyhow::bail!("--require-witness: no witness seal at {}", seal.display());
+    } else {
+        serde_json::json!({"present": false, "file": seal.display().to_string()})
+    };
+
+    if let (Some(w), Some(lp)) = (
+        report.get("witness").filter(|v| v.is_object()),
+        report.get("log_proof").filter(|v| v.is_object()),
+    ) {
+        let witnessed = w
+            .get("witnessed_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let anchored = lp
+            .get("checkpoint_time")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if !witnessed.is_empty() && !anchored.is_empty() {
+            erebus_core::witness::check_witness_before_anchor(witnessed, anchored)?;
+        }
+    }
+
+    if opts.strict {
+        let log_keys = registry_keys(opts.log_key, opts.operator_keys)?;
+        report["machine"] = verify_strict(opts.receipt, &log_keys)?;
+    }
+    if let Some(prov) = opts.provenance {
+        let bytes = opts.bundle_bytes.context("--provenance needs --bundle")?;
+        report["provenance"] = verify_provenance(prov, opts.operator_keys, bytes)?;
+    }
+    Ok(report)
+}
+
+fn receipt_has_approval(file: &Path) -> Result<bool> {
+    let data = std::fs::read_to_string(file)
+        .with_context(|| format!("failed to read {}", file.display()))?;
+    let attestation: Attestation = serde_json::from_str(&data)
+        .with_context(|| format!("failed to parse {}", file.display()))?;
+    Ok(attestation.execution.approval.is_some())
 }
 
 /// `--strict`: machine co-signature + registry certificate (see
@@ -667,7 +842,7 @@ fn signed_subject(att: &Attestation, name: &str) -> Option<String> {
         .and_then(|s| s.digest.get("sha256").cloned())
 }
 
-fn print_human(report: &serde_json::Value) {
+pub(crate) fn print_human(report: &serde_json::Value) {
     let s = |k: &str| {
         report
             .get(k)
@@ -676,21 +851,7 @@ fn print_human(report: &serde_json::Value) {
             .to_string()
     };
     if report.get("mode").and_then(|v| v.as_str()) == Some("chain") {
-        eprintln!(
-            "OK: chain verified — {} receipt(s) in {}",
-            report.get("count").and_then(|v| v.as_u64()).unwrap_or(0),
-            s("dir")
-        );
-        eprintln!("  head:    {}", s("head"));
-        print_linkage(&report["tool_linkage"]);
-        match report.get("tool_trust").and_then(|v| v.as_str()) {
-            Some("separate") => eprintln!("  trust:   tool trails signed by separate keys"),
-            Some(_) => eprintln!(
-                "  trust:   tool trails accepted with the agent's keys \
-                 (one key can forge both; see --tool-trusted-dir)"
-            ),
-            None => {}
-        }
+        print_chain_report(report);
     } else {
         eprintln!("OK: attestation verified (key: {})", s("key"));
         eprintln!("  type:     {}", s("attestation_type"));
@@ -738,6 +899,16 @@ fn print_human(report: &serde_json::Value) {
             }
         );
     }
+    if let Some(c) = report.get("chain").filter(|c| c.is_object()) {
+        if c.get("verified") == Some(&serde_json::Value::Bool(true)) {
+            print_chain_report(c);
+        } else if c.get("present") == Some(&serde_json::Value::Bool(false)) {
+            eprintln!(
+                "note: no trail at {}",
+                c.get("dir").and_then(|v| v.as_str()).unwrap_or("?")
+            );
+        }
+    }
     if let Some(m) = report.get("machine").filter(|m| m.is_object()) {
         let ms = |k: &str| m.get(k).and_then(|v| v.as_str()).unwrap_or("?");
         eprintln!(
@@ -771,33 +942,57 @@ fn print_human(report: &serde_json::Value) {
             n("tool_history")
         );
     }
-    if let Some(lp) = report.get("log_proof") {
-        print_log_proof(lp);
-    }
-    if let Some(a) = report.get("approval").filter(|a| a.is_object()) {
-        let s = |k: &str| a.get(k).and_then(|v| v.as_str()).unwrap_or("?");
-        eprintln!(
-            "OK: approval {} by {} (subject {})",
-            s("decision"),
-            s("key_fingerprint"),
-            s("subject_digest")
-        );
-    }
-    if let Some(w) = report.get("witness").filter(|w| w.is_object()) {
-        let s = |k: &str| w.get(k).and_then(|v| v.as_str()).unwrap_or("?");
-        let n = w.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
-        eprintln!(
-            "OK: witnessed at {} — size {n}, witness {}",
-            s("witnessed_at"),
-            s("witness_id")
-        );
-        if let Some(lp) = report.get("log_proof").filter(|v| v.is_object()) {
-            let anchored = lp
-                .get("checkpoint_time")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
-            eprintln!("  anchored at {anchored} (after witness)");
+    match report.get("log_proof").filter(|v| v.is_object()) {
+        Some(lp) if lp.get("verified") == Some(&serde_json::Value::Bool(true)) => {
+            print_log_proof(lp);
         }
+        Some(lp) if lp.get("present") == Some(&serde_json::Value::Bool(false)) => {
+            eprintln!(
+                "note: no transparency-log proof at {}",
+                lp.get("file").and_then(|v| v.as_str()).unwrap_or("?")
+            );
+        }
+        _ => {}
+    }
+    match report.get("approval").filter(|a| a.is_object()) {
+        Some(a) if a.get("verified") == Some(&serde_json::Value::Bool(true)) => {
+            let s = |k: &str| a.get(k).and_then(|v| v.as_str()).unwrap_or("?");
+            eprintln!(
+                "OK: approval {} by {} (subject {})",
+                s("decision"),
+                s("key_fingerprint"),
+                s("subject_digest")
+            );
+        }
+        Some(a) if a.get("present") == Some(&serde_json::Value::Bool(false)) => {
+            eprintln!("note: receipt carries no approval");
+        }
+        _ => {}
+    }
+    match report.get("witness").filter(|w| w.is_object()) {
+        Some(w) if w.get("verified") == Some(&serde_json::Value::Bool(true)) => {
+            let s = |k: &str| w.get(k).and_then(|v| v.as_str()).unwrap_or("?");
+            let n = w.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+            eprintln!(
+                "OK: witnessed at {} — size {n}, witness {}",
+                s("witnessed_at"),
+                s("witness_id")
+            );
+            if let Some(lp) = report.get("log_proof").filter(|v| v.is_object()) {
+                let anchored = lp
+                    .get("checkpoint_time")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                eprintln!("  anchored at {anchored} (after witness)");
+            }
+        }
+        Some(w) if w.get("present") == Some(&serde_json::Value::Bool(false)) => {
+            eprintln!(
+                "note: no witness seal at {}",
+                w.get("file").and_then(|v| v.as_str()).unwrap_or("?")
+            );
+        }
+        _ => {}
     }
     if let Some(src) = report.get("provenance").filter(|v| v.is_object()) {
         let dirty = src.get("dirty").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -806,6 +1001,25 @@ fn print_human(report: &serde_json::Value) {
             "OK: source commit {commit}{}",
             if dirty { " (dirty tree)" } else { "" }
         );
+    }
+}
+
+fn print_chain_report(c: &serde_json::Value) {
+    let s = |k: &str| c.get(k).and_then(|v| v.as_str()).unwrap_or("?");
+    eprintln!(
+        "OK: chain verified — {} receipt(s) in {}",
+        c.get("count").and_then(|v| v.as_u64()).unwrap_or(0),
+        s("dir")
+    );
+    eprintln!("  head:    {}", s("head"));
+    print_linkage(&c["tool_linkage"]);
+    match c.get("tool_trust").and_then(|v| v.as_str()) {
+        Some("separate") => eprintln!("  trust:   tool trails signed by separate keys"),
+        Some(_) => eprintln!(
+            "  trust:   tool trails accepted with the agent's keys \
+             (one key can forge both; see --tool-trusted-dir)"
+        ),
+        None => {}
     }
 }
 

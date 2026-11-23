@@ -439,6 +439,7 @@ fn post_run_verify(agent_trail: &Path, tool_trail: &Path, key: &Path) -> Result<
     let args = super::verify_attest::VerifyAttestArgs {
         attest_file: None,
         chain: Some(agent_trail.to_path_buf()),
+        all: false,
         bundle: None,
         trusted_dir: Some(trusted),
         proof: false,

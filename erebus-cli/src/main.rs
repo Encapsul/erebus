@@ -36,6 +36,10 @@ struct Cli {
     #[arg(short, long, global = true)]
     quiet: bool,
 
+    /// Enable experimental commands (also `ERE_EXPERIMENTAL=1`)
+    #[arg(long, global = true)]
+    experimental: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -191,7 +195,18 @@ enum Commands {
     ///   erebus replicate pull --leader `<https://registry.example.com>` --dir /var/lib/erebus-registry --token-file token
     Replicate(commands::replicate::ReplicateArgs),
 
-    /// Verify a .erebus file's signature
+    /// Verify a .erebus file's signature, or its full evidence set with --all
+    ///
+    /// `--all` chains the bundle signature, the execution receipt, the
+    /// hash-chained trail, the transparency-log proof, the human approval and
+    /// the witness seal into one report. A sidecar that exists is never
+    /// accepted without its trust anchor; absent sidecars are reported.
+    ///
+    /// Examples:
+    ///   erebus verify agent.erebus
+    ///   erebus verify agent.erebus --all
+    ///   erebus verify agent.erebus --all --approver-key approver.pub
+    ///   erebus verify agent.erebus --all --witness-key witness.pub --require-witness
     Verify(commands::verify::VerifyArgs),
 
     /// Verify execution receipts (single, trail, log proof, machine identity)
@@ -206,6 +221,7 @@ enum Commands {
     ///   erebus verify-attest agent.erebus.attest --proof --log-key <hex>      # transparency log
     ///   erebus verify-attest agent.erebus.attest --strict --registry-key <hex> # enrolled machine
     ///   erebus verify-attest agent.erebus.attest --approver-key <hex|file.pub>
+    ///   erebus verify-attest agent.erebus.attest --all --bundle agent.erebus
     ///   erebus verify-attest tool.attest --expected-output-hash sha256:<hex>
     VerifyAttest(commands::verify_attest::VerifyAttestArgs),
 
@@ -349,6 +365,15 @@ enum Shell {
     PowerShell,
 }
 
+/// Keep peripheral, attack-surface-heavy commands out of the default path.
+/// They remain reachable for operators who opt in explicitly.
+fn experimental_guard(enabled: bool, name: &str) -> anyhow::Result<()> {
+    if enabled {
+        return Ok(());
+    }
+    anyhow::bail!("`{name}` is experimental; pass --experimental or set ERE_EXPERIMENTAL=1")
+}
+
 /// Wrap human-panic's crash reporting so a closed output pipe exits quietly.
 ///
 /// `erebus verify | head -1` closes stdout/stderr once enough lines have been
@@ -415,6 +440,7 @@ fn main() -> ExitCode {
     }
 
     let effective_verbose = cli.verbose && !cli.quiet;
+    let experimental = cli.experimental || std::env::var("ERE_EXPERIMENTAL").as_deref() == Ok("1");
 
     let result = match cli.command {
         Commands::Build(args) => commands::build::run(*args, effective_verbose),
@@ -458,7 +484,9 @@ fn main() -> ExitCode {
         }
         Commands::Sbom(args) => commands::sbom::run(args),
         Commands::AuditLog(args) => commands::audit_log::run(args),
-        Commands::Billing(args) => commands::billing::run(args),
+        Commands::Billing(args) => {
+            experimental_guard(experimental, "billing").and_then(|()| commands::billing::run(args))
+        }
         Commands::Verify(mut args) => {
             if cli.quiet {
                 args.quiet = true;
@@ -475,8 +503,11 @@ fn main() -> ExitCode {
             }
             commands::lifecycle::run(args)
         }
-        Commands::Mirror(args) => commands::mirror::run(args),
-        Commands::Replicate(args) => commands::replicate::run(args),
+        Commands::Mirror(args) => {
+            experimental_guard(experimental, "mirror").and_then(|()| commands::mirror::run(args))
+        }
+        Commands::Replicate(args) => experimental_guard(experimental, "replicate")
+            .and_then(|()| commands::replicate::run(args)),
         Commands::Trust(mut args) => {
             if cli.quiet {
                 args.quiet = true;
@@ -491,7 +522,8 @@ fn main() -> ExitCode {
             commands::doctor::run(args)
         }
         Commands::Clean(args) => commands::clean::run(args),
-        Commands::Dashboard(args) => commands::dashboard::run(&args),
+        Commands::Dashboard(args) => experimental_guard(experimental, "dashboard")
+            .and_then(|()| commands::dashboard::run(&args)),
         Commands::Selftest(args) => match commands::selftest::run(args) {
             Ok(code) => return code,
             Err(e) => return error::exit_code_for_error(&e),
