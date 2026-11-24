@@ -1,49 +1,52 @@
 # erebus
 
-> **The proof layer for AI execution.**
+> **The trust center for AI agents.**
 
-**erebus** is the launcher that emits a signed, externally anchored receipt
-of every execution — verifiable offline with erebus or stock `cosign`.
+AI agents now act in environments their vendor does not control: customer
+sites, edge fleets, factories, vehicles, air-gapped networks. The buyer,
+auditor or regulator asks a simple question: *what exactly ran, where, when,
+and what did it do?* Application logs and tracing dashboards cannot answer it:
+the operator can edit them.
 
-The receipt proves this version ran, on this machine, at this time, and the
-trail was not rewritten. `verify-attest --response-body` checks those bytes
-and re-derived tool calls; `--expected-output-hash` pins a deterministic
-tool's result digest. It does not prove the model computed them or that the
-answer is right.
+erebus produces a signed, hash-chained, externally anchored receipt for every
+agent run. The receipt binds the exact bundle and model weights, the enrolled
+machine, the time, the inputs, outputs and tool calls. It verifies offline
+with `erebus` or stock `cosign`; the auditor needs no account, no network and
+no trust in the operator.
 
-Each receipt (`.erebus.attest`, [spec 2.0](./spec/attestation.md): DSSE
-envelope over an in-toto statement) states which exact code and weights ran,
-on which enrolled machine, when, and with which input and output digests. It
-is signed by the operator, co-signed by the machine, hash-chained to the
-previous receipt, and logged in a Merkle transparency log whose checkpoints
-are timestamped by an independent RFC 3161 authority.
+We are building the trust center on top of that proof chain: the place where
+an AI vendor publishes evidence and a regulated buyer verifies it.
 
-```bash
-erebus keygen --key-dir keys                            # operator key
-erebus enroll --registry $ERE_REGISTRY --token-file token   # once per host
-erebus build ./my-agent -o agent.erebus && erebus sign agent.erebus --key keys/<fp>.key
+## What we are building
 
-ERE_ATTEST_KEY=keys/<fp>.key ./agent.erebus --task nightly  # run → signed receipt
-erebus serve agent.erebus --attest-key keys/<fp>.key --push # or: one receipt per inference call
-erebus agent run --provider openai-compat --base-url http://127.0.0.1:11434 \
-  --model llama3.2 --task "…" --attest-key keys/<fp>.key \
-  --mcp-stdio '["python3","mcp_server.py"]' --allow-mcp --stream --encapsulate
-# Streaming display is unsigned; receipt = assembled final body digests.
-# Execution proven; task success = tests / human approve / golden checks — not the receipt.
+| Layer | Product surface | What it answers | State |
+|---|---|---|---|
+| **Capture** | launcher, attested proxy, SDK | which code, model and machine produced this run? | launcher + proxy exist; SDK next |
+| **Prove** | receipts, transparency log, evidence pack | can a third party verify it offline? | proof chain exists; hosted log MVP next |
+| **Consume** | trust center, verification links, control mapping | can a buyer or auditor accept it without a CLI? | not shipped |
 
-erebus verify-attest agent.erebus.attest --bundle agent.erebus --strict --proof --log-key $REG
-erebus evidence export agent.erebus --log-key $REG -o evidence.zip   # hand it to the auditor
-erebus verify-evidence evidence.zip --bundle agent.erebus --operator-key <fp> --log-key $REG
-```
+## Who it is for
 
-Where to go next:
+**AI vendors selling agents into regulated enterprises**: defense, public
+administration, critical infrastructure, financial services and industrial
+edge. The buyer is the vendor's CISO, compliance lead or CTO. The economic
+buyer is the regulated customer or auditor who requires evidence.
 
-- [The problem](./concepts/problem.md) — the auditor's question erebus answers.
-- [What erebus proves — and what it does not](./concepts/proof.md) — the
-  honest boundary.
-- [Auditing an erebus trail](./guides/audit.md) — for the person receiving
-  the evidence.
-- [Execution attestation — spec 2.0](./spec/attestation.md) — byte formats.
+Not for: hobbyist developers, inference hosting, or teams that only need
+application logs. erebus records digests, not prompts or model outputs.
+
+## Why now
+
+- Agents are moving from chat to actions: tool calls, approvals and data
+  access now need a record.
+- Enterprise procurement already asks "which model/version ran, on which
+  machine, with what input and output?" — and the vendor's logs are not
+  evidence the buyer controls.
+- The standards are mature: DSSE, in-toto, Ed25519, Merkle transparency logs,
+  RFC 3161 and `cosign` interop.
+- The EU AI Act high-risk obligations are staggered (Annex III from December
+  2027, Annex I from August 2028). We sell the current procurement and audit
+  pain, not a single deadline.
 
 ## What happens, and who does it
 
@@ -74,8 +77,7 @@ a launcher:
   HTTP (`--base-url` for Ollama, Azure, llama-server, …), MCP tools in the
   loop (`--mcp` / `--mcp-stdio`), optional `--stream` (display unsigned;
   receipt hashes the assembled body), and `--encapsulate` so the receipt
-  subject is a task `.erebus` hash. The receipt proves execution; task
-  success stays a separate layer.
+  subject is a task `.erebus` hash.
 - **Chaos-tested** — the full proof chain and adversarial harnesses
   (SIGKILL, tampering, registry faults, cold-start storms) run in CI on every
   commit.
@@ -84,23 +86,32 @@ Advanced and optional: universal multi-platform binaries, SISR delta
 updates, `Agentfile.yaml` declarative builds. They are documented in the
 Architecture and Guides sections and are not needed for the proof chain.
 
-## Status
+## Status — honest, as of 2026-11-24
 
-The P0 proof chain is replayed in CI on every commit (`proof.yml`). Evidence
-export exists. T2 is not done. There are no production customers.
+- **Proof chain: complete.** Hardened verifier, hash-chained trail, attesting
+  proxy, warm-cache re-verification, Merkle transparency log with RFC 3161
+  anchoring, machine identity, DSSE/in-toto with `cosign` interop.
+- **Evidence export: works.** One zip, offline verification, pinned keys.
+- **Internal pilot: running, not complete.** No production customers yet.
+- **Hosted trust center: not shipped.** This is the current product milestone.
+- **Next proof point:** one design partner with a paid pilot and one external
+  auditor verification.
 
 The receipt proves this version ran, on this machine, at this time, and the
-trail was not rewritten. `verify-attest --response-body` checks those bytes
-and re-derived tool calls; `--expected-output-hash` pins a deterministic
-tool's result digest. It does not prove the model computed them or that the
-answer is right.
+trail was not rewritten. It does not prove the model computed the output or
+that the answer is right, and it does not yet prove that every run was
+captured. See [What erebus proves — and what it does not](./concepts/proof.md).
 
 ## Get started
 
 ```bash
-git clone https://github.com/Encapsul/erebus.git && cd erebus
-cargo build --release
-./target/release/erebus doctor
+curl -fsSL https://raw.githubusercontent.com/Encapsul/erebus/main/scripts/install.sh | bash
+erebus doctor
 ```
 
-Then follow the [Quickstart](./guides/quickstart.md).
+Then follow the [Quickstart](./guides/quickstart.md) or run the local agent
+demo:
+
+```bash
+bash examples/agent/demo.sh
+```

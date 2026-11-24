@@ -56,8 +56,9 @@ fn build_fixture(dir: &Path, model_bytes: &[u8]) -> std::path::PathBuf {
     out
 }
 
-fn swap_args(binary: &Path, target: &str, from: &Path) -> [String; 5] {
+fn swap_args(binary: &Path, target: &str, from: &Path) -> [String; 6] {
     [
+        "--experimental".into(),
         "swap".into(),
         binary.display().to_string(),
         target.into(),

@@ -1,4 +1,4 @@
-//! erebus CLI - signed, verifiable receipts of every AI agent execution
+//! erebus CLI - the trust center for AI agents: signed, verifiable receipts
 
 #![allow(dead_code)]
 
@@ -20,8 +20,8 @@ use std::process::ExitCode;
     name = "erebus",
     version,
     propagate_version = true,
-    about = "Signed, tamper-evident receipts of every AI agent execution",
-    long_about = "erebus is the proof layer for AI execution: it runs an agent from a single sandboxed binary and leaves a signed, hash-chained, externally anchored receipt of every run and every inference call — verifiable offline with erebus or stock cosign.\n\nSupported runtimes: Python and native binaries.\n\nExamples:\n  erebus build ./myapp -o myapp.erebus\n  erebus run myapp.erebus\n  erebus inspect myapp.erebus\n  erebus keygen\n  erebus sign myapp.erebus --key ~/.erebus/keys/*.key\n  erebus verify myapp.erebus\n  erebus attest myapp.erebus --key ~/.erebus/keys/*.key --push\n  erebus verify-attest myapp.erebus.attest --proof --strict\n  erebus evidence export myapp.erebus --log-key $REG -o evidence.zip\n  erebus verify-evidence evidence.zip --bundle myapp.erebus\n  erebus enroll --registry http://host:8080 --token-file token\n  erebus audit myapp.erebus\n  erebus doctor\n  erebus scan .\n  erebus serve agent.erebus --port 8080\n  erebus agent run --provider openai-compat --base-url http://127.0.0.1:11434 --model llama3.2 --task \"…\" --attest-key ops.key\n  erebus chat agent.erebus\n  erebus completion bash >> ~/.bashrc\n  erebus completion zsh >> ~/.zshrc\n  erebus completion fish > ~/.config/fish/completions/erebus.fish\n\nDocumentation: https://github.com/Encapsul/erebus\nReport bugs: https://github.com/Encapsul/erebus/issues\n\nUninstall: rm $(which erebus) && rm -rf ~/.cache/erebus ~/.local/share/erebus"
+    about = "The trust center for AI agents: signed, offline-verifiable execution receipts",
+    long_about = "erebus is the trust center for AI agents. It runs an agent from a single sandboxed binary and leaves a signed, hash-chained, externally anchored receipt of every run and every inference call — verifiable offline with erebus or stock cosign, by a buyer who does not trust the operator's logs.\n\nThe proof chain is the moat. The hosted trust center is the next product surface: publish evidence, search receipts, share a verification link, export an audit pack.\n\nSupported runtimes: Python and native binaries.\n\nExamples:\n  erebus build ./myapp -o myapp.erebus\n  erebus run myapp.erebus\n  erebus inspect myapp.erebus\n  erebus keygen\n  erebus sign myapp.erebus --key ~/.erebus/keys/*.key\n  erebus verify myapp.erebus\n  erebus attest myapp.erebus --key ~/.erebus/keys/*.key --push\n  erebus verify-attest myapp.erebus.attest --proof --strict\n  erebus evidence export myapp.erebus --log-key $REG -o evidence.zip\n  erebus verify-evidence evidence.zip --bundle myapp.erebus\n  erebus enroll --registry http://host:8080 --token-file token\n  erebus audit myapp.erebus\n  erebus doctor\n  erebus scan .\n  erebus serve agent.erebus --port 8080\n  erebus agent run --provider openai-compat --base-url http://127.0.0.1:11434 --model llama3.2 --task \"…\" --attest-key ops.key\n  erebus completion bash >> ~/.bashrc\n  erebus completion zsh >> ~/.zshrc\n  erebus completion fish > ~/.config/fish/completions/erebus.fish\n\nDocumentation: https://github.com/Encapsul/erebus\nReport bugs: https://github.com/Encapsul/erebus/issues\n\nUninstall: rm $(which erebus) && rm -rf ~/.cache/erebus ~/.local/share/erebus"
 )]
 struct Cli {
     /// Enable verbose output
@@ -36,7 +36,7 @@ struct Cli {
     #[arg(short, long, global = true)]
     quiet: bool,
 
-    /// Enable experimental commands (also `ERE_EXPERIMENTAL=1`)
+    /// Enable frozen and experimental commands (also `ERE_EXPERIMENTAL=1`)
     #[arg(long, global = true)]
     experimental: bool,
 
@@ -153,6 +153,7 @@ enum Commands {
     /// Examples:
     ///   erebus sbom myapp.erebus
     ///   erebus sbom myapp.erebus --embed --key ~/.erebus/keys/*.key
+    #[command(hide = true)]
     Sbom(commands::sbom::SbomArgs),
 
     /// Download the registry's monthly audit trail (JSONL)
@@ -167,6 +168,7 @@ enum Commands {
     /// Examples:
     ///   erebus billing status --registry <https://registry.erebus.io> --token-file token
     ///   erebus billing checkout --registry <https://registry.erebus.io> --plan pro --token-file token
+    #[command(hide = true)]
     Billing(commands::billing::BillingArgs),
 
     /// Manage artifact lifecycle state (quarantine / promote / revoke)
@@ -186,6 +188,7 @@ enum Commands {
     /// Examples:
     ///   erebus mirror export --dir /var/lib/erebus-registry -o backup.mirror.enc --password-file secret
     ///   erebus mirror import --input backup.mirror.enc --dir /var/lib/erebus-registry --password-file secret
+    #[command(hide = true)]
     Mirror(commands::mirror::MirrorArgs),
 
     /// Replicate registry data from a leader (incremental or full sync)
@@ -193,6 +196,7 @@ enum Commands {
     /// Examples:
     ///   erebus replicate full --leader `<https://registry.example.com>` --dir /var/lib/erebus-registry
     ///   erebus replicate pull --leader `<https://registry.example.com>` --dir /var/lib/erebus-registry --token-file token
+    #[command(hide = true)]
     Replicate(commands::replicate::ReplicateArgs),
 
     /// Verify a .erebus file's signature, or its full evidence set with --all
@@ -262,6 +266,7 @@ enum Commands {
     Clean(commands::clean::CleanArgs),
 
     /// Interactive TUI dashboard showing SISR benchmark & cache status
+    #[command(hide = true)]
     Dashboard(commands::dashboard::DashboardArgs),
 
     /// Run a provider-agnostic HTTP agent and emit signed receipts
@@ -281,6 +286,7 @@ enum Commands {
     /// Examples:
     ///   erebus chat agent.erebus
     ///   erebus chat agent.erebus --web --port 8080
+    #[command(hide = true)]
     Chat(commands::chat::ChatArgs),
 
     /// Test a .erebus file in an ephemeral sandbox
@@ -301,6 +307,7 @@ enum Commands {
     ///   `erebus hf login` — store `HF` token
     ///   `erebus hf push <model.erebus> — push to HF Hub`
     ///   `erebus hf pull <repo_id> — pull from HF Hub`
+    #[command(hide = true)]
     Hf(commands::hf::HfArgs),
 
     /// Serve a bundle model as an OpenAI-compatible API
@@ -317,6 +324,7 @@ enum Commands {
     ///
     /// Examples:
     ///   erebus swap agent.erebus app/models/agent.gguf --from ./new.gguf
+    #[command(hide = true)]
     Swap(commands::swap::SwapArgs),
 
     /// Manage the local shared-layer registry (runtime packs, models, tools)
@@ -324,6 +332,7 @@ enum Commands {
     /// Examples:
     ///   erebus layer push llama.cpp --name llama-cpp --kind tool
     ///   erebus layer list
+    #[command(hide = true)]
     Layer(commands::layer::LayerArgs),
 
     /// Show erebus environment info
@@ -333,12 +342,14 @@ enum Commands {
     ///
     /// Examples:
     ///   erebus backup --manifest-dir /var/lib/registry/meta --blob-dir /var/lib/registry/packages -o backup.json
+    #[command(hide = true)]
     Backup(commands::backup::BackupArgs),
 
     /// Verify a backup manifest against a verifying key
     ///
     /// Examples:
     ///   erebus restore --manifest backup.json --key ~/.erebus/keys/verify.key
+    #[command(hide = true)]
     Restore(commands::restore::RestoreArgs),
 
     /// Generate shell completion scripts
@@ -374,6 +385,33 @@ fn experimental_guard(enabled: bool, name: &str) -> anyhow::Result<()> {
     anyhow::bail!("`{name}` is experimental; pass --experimental or set ERE_EXPERIMENTAL=1")
 }
 
+/// Frozen surfaces (ROADMAP §4) keep their tests but stay hidden from help
+/// and gated until the trust-center milestone is done. Keeping the list here
+/// means a new frozen command cannot be added to the CLI without being gated.
+fn check_frozen(command: &Commands, experimental: bool) -> anyhow::Result<()> {
+    match frozen_command(command) {
+        Some(name) => experimental_guard(experimental, name),
+        None => Ok(()),
+    }
+}
+
+fn frozen_command(command: &Commands) -> Option<&'static str> {
+    match command {
+        Commands::Billing(_) => Some("billing"),
+        Commands::Mirror(_) => Some("mirror"),
+        Commands::Replicate(_) => Some("replicate"),
+        Commands::Hf(_) => Some("hf"),
+        Commands::Layer(_) => Some("layer"),
+        Commands::Swap(_) => Some("swap"),
+        Commands::Dashboard(_) => Some("dashboard"),
+        Commands::Chat(_) => Some("chat"),
+        Commands::Sbom(_) => Some("sbom"),
+        Commands::Backup(_) => Some("backup"),
+        Commands::Restore(_) => Some("restore"),
+        _ => None,
+    }
+}
+
 /// Wrap human-panic's crash reporting so a closed output pipe exits quietly.
 ///
 /// `erebus verify | head -1` closes stdout/stderr once enough lines have been
@@ -406,7 +444,7 @@ fn main() -> ExitCode {
     // with no arguments, display concise help text."
     let args: Vec<String> = std::env::args().collect();
     if args.len() == 1 {
-        eprintln!("erebus — signed, tamper-evident receipts of every AI agent execution");
+        eprintln!("erebus — the trust center for AI agents");
         eprintln!();
         eprintln!("Usage: erebus <COMMAND> [OPTIONS]");
         eprintln!();
@@ -420,14 +458,16 @@ fn main() -> ExitCode {
         eprintln!("  evidence         Export a trail as an offline-verifiable audit pack");
         eprintln!("  verify-evidence  Verify an audit pack, offline");
         eprintln!();
-        eprintln!("How it runs:");
+        eprintln!("Run the agent:");
         eprintln!("  build            Build a sandboxed .erebus binary from an app directory");
         eprintln!("  sign             Sign a .erebus binary; `verify` checks it");
         eprintln!("  run              Execute a .erebus file");
         eprintln!("  serve            OpenAI-compatible API, one receipt per inference call");
         eprintln!("  agent            HTTP agent loop (openai-compat / anthropic) → receipts");
         eprintln!("  inspect          Inspect a .erebus file's metadata");
+        eprintln!("  doctor           Check system prerequisites");
         eprintln!();
+        eprintln!("Frozen commands (billing, chat, dashboard, sbom, swap, …) need --experimental.");
         eprintln!("Use 'erebus --help' for the full listing of commands and options.");
         return ExitCode::SUCCESS;
     }
@@ -441,6 +481,10 @@ fn main() -> ExitCode {
 
     let effective_verbose = cli.verbose && !cli.quiet;
     let experimental = cli.experimental || std::env::var("ERE_EXPERIMENTAL").as_deref() == Ok("1");
+    if let Err(err) = check_frozen(&cli.command, experimental) {
+        eprintln!("Error: {err:#}");
+        return error::exit_code_for_error(&err);
+    }
 
     let result = match cli.command {
         Commands::Build(args) => commands::build::run(*args, effective_verbose),
@@ -484,9 +528,7 @@ fn main() -> ExitCode {
         }
         Commands::Sbom(args) => commands::sbom::run(args),
         Commands::AuditLog(args) => commands::audit_log::run(args),
-        Commands::Billing(args) => {
-            experimental_guard(experimental, "billing").and_then(|()| commands::billing::run(args))
-        }
+        Commands::Billing(args) => commands::billing::run(args),
         Commands::Verify(mut args) => {
             if cli.quiet {
                 args.quiet = true;
@@ -503,11 +545,8 @@ fn main() -> ExitCode {
             }
             commands::lifecycle::run(args)
         }
-        Commands::Mirror(args) => {
-            experimental_guard(experimental, "mirror").and_then(|()| commands::mirror::run(args))
-        }
-        Commands::Replicate(args) => experimental_guard(experimental, "replicate")
-            .and_then(|()| commands::replicate::run(args)),
+        Commands::Mirror(args) => commands::mirror::run(args),
+        Commands::Replicate(args) => commands::replicate::run(args),
         Commands::Trust(mut args) => {
             if cli.quiet {
                 args.quiet = true;
@@ -522,8 +561,7 @@ fn main() -> ExitCode {
             commands::doctor::run(args)
         }
         Commands::Clean(args) => commands::clean::run(args),
-        Commands::Dashboard(args) => experimental_guard(experimental, "dashboard")
-            .and_then(|()| commands::dashboard::run(&args)),
+        Commands::Dashboard(args) => commands::dashboard::run(&args),
         Commands::Selftest(args) => match commands::selftest::run(args) {
             Ok(code) => return code,
             Err(e) => return error::exit_code_for_error(&e),

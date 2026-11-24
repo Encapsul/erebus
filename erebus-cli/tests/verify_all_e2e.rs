@@ -313,6 +313,19 @@ fn experimental_commands_are_gated() {
             missing_s,
         ],
         &["dashboard"],
+        &["hf", "--operation", "pull", "--repo-id", "org/model"],
+        &["layer", "list"],
+        &["swap", missing_s, "app/model.bin", "--from", missing_s],
+        &["chat", missing_s],
+        &["sbom", missing_s],
+        &[
+            "backup",
+            "--manifest-dir",
+            missing_s,
+            "--blob-dir",
+            missing_s,
+        ],
+        &["restore", "--manifest", missing_s, "--key", missing_s],
     ];
     for args in cases {
         erebus()
@@ -332,6 +345,11 @@ fn experimental_commands_are_gated() {
             "--registry",
             "http://127.0.0.1:1",
         ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("is experimental").not());
+    erebus()
+        .args(["--experimental", "sbom", missing_s])
         .assert()
         .failure()
         .stderr(predicate::str::contains("is experimental").not());

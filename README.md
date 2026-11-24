@@ -9,31 +9,57 @@
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)]()
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Encapsul/erebus/pulls)
 
-**erebus is the launcher that emits a signed, externally anchored receipt of
-every execution, verifiable offline with `erebus` or stock `cosign`.**
+**The trust center for AI agents.**
 
-The receipt proves this version ran, on this machine, at this time, and the
-trail was not rewritten. `verify-attest --response-body` checks those bytes
-and re-derived tool calls; `--expected-output-hash` pins a deterministic
-tool's result digest. It does not prove the model computed them or that the
-answer is right.
+AI agents now act in environments their vendor does not control: customer
+sites, edge fleets, factories, vehicles, air-gapped networks. The buyer,
+auditor or regulator asks a simple question: *what exactly ran, where, when,
+and what did it do?* Application logs and tracing dashboards cannot answer it:
+the operator can edit them.
 
-```bash
-cosign verify-blob-attestation \
-  --key examples/verify/operator.pem \
-  --signature examples/verify/agent.dsse.json \
-  --type https://erebus.dev/attestation/execution/v2 \
-  --insecure-ignore-tlog examples/verify/agent.erebus
-#  Verified OK
-```
+erebus produces a signed, hash-chained, externally anchored receipt for every
+agent run. The receipt binds the exact bundle and model weights, the enrolled
+machine, the time, the inputs, outputs and tool calls. It verifies offline
+with `erebus` or stock `cosign`; the auditor needs no account, no network and
+no trust in the operator.
 
-[`examples/verify/operator.pem`](examples/verify/operator.pem) is the public
-key. [`examples/verify/agent.dsse.json`](examples/verify/agent.dsse.json) is
-the envelope for [`examples/verify/agent.erebus`](examples/verify/agent.erebus).
-See [`examples/verify/`](examples/verify/) for the checked-in envelope, or
-[`examples/agent/demo.sh`](examples/agent/demo.sh) for a local agent demo.
-The command checks the signature over this bundle; it does not check that a
-model computed the output.
+We are building the trust center on top of that proof chain: the place where
+an AI vendor publishes evidence and a regulated buyer verifies it.
+
+## What we are building
+
+| Layer | Product surface | What it answers | State |
+|---|---|---|---|
+| **Capture** | launcher, attested proxy, SDK | which code, model and machine produced this run? | launcher + proxy exist; SDK next |
+| **Prove** | receipts, transparency log, evidence pack | can a third party verify it offline? | proof chain exists; hosted log MVP next |
+| **Consume** | trust center, verification links, control mapping | can a buyer or auditor accept it without a CLI? | not shipped |
+
+The launcher is the high-assurance capture path. The proxy and SDK exist so
+teams can adopt receipts without repackaging their agent. The trust center is
+the product surface: search, verify, share and export evidence.
+
+## Who it is for
+
+**AI vendors selling agents into regulated enterprises**: defense, public
+administration, critical infrastructure, financial services and industrial
+edge. The buyer is the vendor's CISO, compliance lead or CTO. The economic
+buyer is the regulated customer or auditor who requires evidence.
+
+Not for: hobbyist developers, inference hosting, or teams that only need
+application logs. erebus records digests, not prompts or model outputs.
+
+## Why now
+
+- Agents are moving from chat to actions: tool calls, approvals and data
+  access now need a record.
+- Enterprise procurement already asks "which model/version ran, on which
+  machine, with what input and output?" — and the vendor's logs are not
+  evidence the buyer controls.
+- The standards are mature: DSSE, in-toto, Ed25519, Merkle transparency logs,
+  RFC 3161 and `cosign` interop.
+- The EU AI Act high-risk obligations are staggered (Annex III from December
+  2027, Annex I from August 2028). We sell the current procurement and audit
+  pain, not a single deadline.
 
 ## Install
 
@@ -42,12 +68,8 @@ curl -fsSL https://raw.githubusercontent.com/Encapsul/erebus/main/scripts/instal
 erebus doctor
 ```
 
----
-
-Signed at the launcher — the only point the operator controls — the receipt
-names the exact bundle and weights, the enrolled machine, and a Merkle
-transparency log time (RFC 3161). Open-source MIT client and server; the paid
-product is the hosted, anchored proof trail.
+The release install ships the CLI and the launcher. Building from source is
+only needed for development; see [Build from source](#build-from-source).
 
 ## What an auditor gets
 
@@ -65,7 +87,7 @@ silently rewrite:
 | Can I verify it without trusting the vendor? | — | ❌ | ✅ offline, with public keys; or with `cosign verify-blob-attestation` |
 | Does it survive the vendor disappearing? | — | ❌ | ✅ proof files are self-contained |
 
-## Prove what ran — in 60 seconds
+## Prove what ran — current CLI
 
 ```bash
 erebus keygen --key-dir keys                      # operator key (+ <fp>.pem for cosign)
@@ -143,26 +165,39 @@ the human-readable copies. Legacy 1.x receipts stay verifiable.
 The boundary is [What erebus proves — and what it does not](docs/src/concepts/proof.md).
 Pricing for the hosted trail is [in the book](docs/src/pricing.md).
 
-## Status — what the CI proves, nothing more
+## The 90-day product plan
 
-The **P0 proof chain is complete** (2026-09-17): hardened verifier, hash-chained
-trail, attesting proxy, warm-cache re-verification, Merkle transparency log
-with RFC 3161 anchoring, machine identity, standard DSSE/in-toto envelope with
-cosign interop. 650+ Rust tests plus a stdlib Python battery (49 checks,
-including SIGKILL during concurrent publishes → restart → every acknowledged
-receipt still proves into the new tree head).
+The proof chain is not the bottleneck anymore. Adoption is.
 
-The **proof chain badge** above is the [`proof.yml`](.github/workflows/proof.yml)
+| Weeks | Focus | Done when |
+|---|---|---|
+| 1–2 | Customer discovery | one ICP, 5–10 interviews, a written evidence checklist from a real buyer |
+| 3–4 | Activation | install → first receipt → verification link in under 5 minutes |
+| 5–6 | Trust center MVP | org, API key, receipt search, public verification link, evidence export |
+| 7–8 | Design partner pilot | one real agent, 14 days, zero strict verification failures, a case study |
+| 9–12 | Traction | 3 design partners, 1 paid pilot or LOI, one external auditor verification, YC application |
+
+The full plan, frozen surfaces and acceptance criteria are in
+[`ROADMAP.md`](ROADMAP.md).
+
+## Status — honest, as of 2026-11-24
+
+- **Proof chain: complete.** Hardened verifier, hash-chained trail, attesting
+  proxy, warm-cache re-verification, Merkle transparency log with RFC 3161
+  anchoring, machine identity, DSSE/in-toto with `cosign` interop.
+- **Evidence export: works.** One zip, offline verification, pinned keys.
+- **Internal pilot: running, not complete.** No production customers yet.
+- **Hosted trust center: not shipped.** This is the current product milestone.
+- **Next proof point:** one design partner with a paid pilot and one external
+  auditor verification.
+
+The proof chain badge above is the [`proof.yml`](.github/workflows/proof.yml)
 workflow: on every commit and every day, a fresh Linux runner builds erebus
 from source and runs the transparency-log battery, egress e2e, and the extreme
 chaos battery (native C agent, malformed inputs, 12 concurrent agents). Green
 means every one of those checks passed *today*, not once on a laptop.
 
-**No production customers. T2 is not complete.**
-
----
-
-## The launcher underneath
+## How it works
 
 The receipts are only as good as the thing that produces them, so erebus is
 also the runtime: it packages an agent — code, runtime, dependencies, model
@@ -179,13 +214,14 @@ cd your-app && erebus build . -o myapp.erebus
 ./myapp.erebus                       # run it like any executable
 ```
 
-Serve a bundled LLM as an OpenAI-compatible endpoint and chat with it:
+Serve a bundled LLM as an OpenAI-compatible endpoint:
 
 ```bash
 erebus build . --embed-model models/model.gguf -o agent.erebus
 erebus serve agent.erebus --port 8080        # llama-server / vLLM / … launched for you
-erebus chat agent.erebus                     # or talk to it in the terminal
-erebus chat agent.erebus --web --port 8080   # or from the browser (embedded UI)
+curl -s http://127.0.0.1:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"agent","messages":[{"role":"user","content":"hi"}]}'
 ```
 
 ### Build — declaratively
@@ -278,6 +314,10 @@ manifests verify fail-cold at boot.
 
 ## Command reference
 
+Commands marked **frozen** are hidden from the default `--help` and require
+`--experimental`; they keep their tests but receive no new features until the
+trust-center milestone is done.
+
 | Command | Description |
 |---------|-------------|
 | `erebus attest / verify-attest` | Spec 2.0 execution receipts (DSSE + in-toto, JCS); `--envelope` for cosign, `--push` / `--proof` for the transparency log, `--strict` for machine identity, `--chain` for trails, `--response-body` / `--request-body` / `--expected-output-hash` for byte binding |
@@ -291,12 +331,12 @@ manifests verify fail-cold at boot.
 | `erebus run <file>` | Execute a bundle (namespace isolation, health gate) |
 | `erebus serve <file>` | OpenAI-compatible HTTP API (`--attest-key`: signed receipt per call; `--push`: registry proof per call) |
 | `erebus agent run` / `agent build` | Provider-agnostic HTTP agent (`openai-compat` / `anthropic`); MCP stdio/HTTP tools (`--mcp`, `--mcp-stdio`, `--allow-mcp`); auto in-process tool-trail receipts (`--tool-trail`, `--require-tool-execution`) matching `verify-attest --tool-trail`; `--stream` (unsigned display, attested assembled body); `--encapsulate` / `agent build` packages the task into a `.erebus` subject. Execution proven; task success is a separate layer |
-| `erebus chat <file>` | Terminal TUI chat; `--web` serves the embedded browser UI |
+| `erebus chat <file>` | **frozen** — terminal TUI chat; `--web` serves the embedded browser UI |
 | `erebus pull / publish` | Registry download (integrity-checked, cached) / upload |
-| `erebus swap <file> <path> --from <new>` | Replace a file inside an existing bundle (hot-swap) |
+| `erebus swap <file> <path> --from <new>` | **frozen** — replace a file inside an existing bundle (hot-swap) |
 | `erebus inspect <file>` | Metadata, slice tables, JSON output |
-| `erebus layer push/list` | Manage shared runtime packs & models (local CAS) |
-| `erebus dashboard` | Interactive TUI: SISR benchmarks, cache status |
+| `erebus layer push/list` | **frozen** — manage shared runtime packs & models (local CAS) |
+| `erebus dashboard` | **frozen** — interactive TUI: SISR benchmarks, cache status |
 | `erebus doctor / scan / env / clean / selftest / upgrade / completion / man` | Ops & tooling |
 
 ## Binary format

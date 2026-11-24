@@ -34,10 +34,14 @@ itself. See [Comparison](../comparison.md) for the full picture.
 
 ## Why it matters now
 
+- **Enterprise procurement** — buyers already ask which model/version ran,
+  on which machine, with what input and output; the vendor's dashboard is not
+  evidence the buyer controls.
 - **EU AI Act** — high-risk systems must automatically record events over
   their lifetime (Art. 12), and providers and deployers must keep those logs
-  (Art. 19, Art. 26); obligations phase in over 2026–2027. erebus gives the
-  compliance team evidence for these logs; it is not a certification.
+  (Art. 19, Art. 26); the high-risk obligations are staggered to December
+  2027 (Annex III) and August 2028 (Annex I). erebus gives the compliance team
+  evidence for these logs; it is not a certification.
 - **SOC 2 / ISO 27001** — auditors ask for evidence of software integrity
   and change control on deployed systems.
 - **Public procurement and defense** — air-gapped deployments must be

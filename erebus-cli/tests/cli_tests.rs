@@ -14,8 +14,11 @@ fn test_help_output() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("proof layer for AI execution"))
-        .stdout(predicate::str::contains("verify-evidence"));
+        .stdout(predicate::str::contains("trust center for AI agents"))
+        .stdout(predicate::str::contains("verify-evidence"))
+        .stdout(predicate::str::contains("billing").not())
+        .stdout(predicate::str::contains("dashboard").not())
+        .stdout(predicate::str::contains("sbom").not());
 }
 
 #[test]

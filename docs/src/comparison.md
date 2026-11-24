@@ -14,6 +14,7 @@ teams will use erebus alongside several of them.
 | With what input, producing what output? | text, editable | ✅ in a database | ❌ | ❌ | ✅ digests per run and per inference call |
 | Can the operator rewrite it afterwards? | yes | yes (their account) | n/a | n/a | ❌ hash chain, public log, external timestamp |
 | Verifiable offline by a third party? | ❌ | ❌ | ✅ | with vendor roots | ✅ `verify-evidence`, `cosign`, `openssl ts` |
+| Proves every run was captured? | only what was logged | only what was traced | n/a | only attested launches | ❌ today — attested gateway + coverage report are roadmap P0-4 |
 | Proves the computation itself was faithful? | ❌ | ❌ | ❌ | partly (code identity, not semantics) | ❌ — see [the boundary](./concepts/proof.md) |
 | Special hardware or cloud? | no | no | no | yes | no |
 

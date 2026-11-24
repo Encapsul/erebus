@@ -1,154 +1,232 @@
-# ROADMAP.md — erebus: the proof layer for AI execution
+# ROADMAP.md — erebus: the trust center for AI agents
 
-> **Rewritten 2026-09-17** after a full code audit (38 k lines Rust, 9 k Python/shell).
-> Source of truth for product state, what is *actually* proven by the code,
-> what is left, and in which order. Business model and pitch are condensed
-> in §6–§7; technical decisions are archived in §8.
+> Rewritten 2026-11-24 after a product review. This file is the source of truth
+> for product state, the buyer, the 90-day plan, frozen surfaces and the
+> technical invariants that must not move.
 >
-> One-liner: *« AI agents run everywhere. Nobody can prove what they did.
-> We generate the cryptographic proof. »*
+> One-liner: *« AI agents act in environments their vendor does not control.
+> erebus gives every run a signed, offline-verifiable receipt, and gives the
+> buyer a trust center to verify it. »*
 
 ---
 
 ## 0. Where we are, in one paragraph
 
-The proof chain is built and re-proven on every push (`proof.yml`: demo,
-cosign, chaos). P0, P1, and buyer items R1–R5 and R7 are landed; their
-write-ups are in §10, not repeated below. What is left is §3: finish the
-internal pilot on the calendar, and Windows confinement. The TPM2 seal
-is in: two swtpm instances, a copied key does not unseal. The Windows
-test is in the tree and on `windows-latest`; it has not run yet.
-`COMPLIANCE.json` stays a pointer; filling an Annex IV file is the
-compliance team's job.
-Breadth stays frozen (§4). No production users.
+The proof chain is built and re-proven on every push: signed bundles,
+DSSE/in-toto receipts, hash-chained trails, machine co-signatures, a Merkle
+transparency log with RFC 3161 anchoring, offline evidence packs and `cosign`
+interop. The internal pilot is running. There are still **no production
+customers**, and the product surface is too broad: packaging, model serving,
+registry, chat, TUI, universal binaries and a long CLI all compete for
+attention.
+
+The reset is deliberate: **stop widening the runtime, start shipping the trust
+center.** The next 90 days are about one buyer, one workflow and one proof of
+demand — not another feature. The technical moat stays the proof chain. The
+product becomes the place where an AI vendor publishes evidence and a regulated
+buyer verifies it.
 
 ---
 
 ## 1. Vision
 
-**Erebus = the proof layer for AI execution.**
+**Erebus is the trust center for AI agents.**
 
-Every AI agent runs on a machine. Nobody can prove what it did, when, where,
-with which model, unmodified. erebus is the *only point of execution* the
-operator controls — the launcher — and that launcher emits a signed,
-hash-chained, externally-anchored receipt of every run. Regulated buyers
-(EU AI Act high-risk lifecycle documentation, SOC 2, ISO 27001, public
-procurement, defense/air-gapped) need this evidence and have no tool that
-produces it.
+An AI vendor sells an agent into a regulated environment. The buyer asks:
+*which exact code and model ran, on which machine, when, with what input and
+output, and can I verify that without trusting the vendor's logs?* Today the
+answer is a screenshot, a log export or a tracing account the vendor controls.
+erebus answers with a signed receipt and a verification path that works
+offline.
 
-**The moat is not packaging, not SISR, not the registry.** It is the
-execution-attestation chain: `.erebus` (signed artifact) + `.attest` receipts
-(signed, chained) + transparency log (Merkle, anchored) = offline-verifiable
-evidence. The bigger the trail, the stronger the lock-in.
+### 1.1 Three product layers
 
-**Three proof levels, honestly stated:**
+| Layer | Surface | Job | State |
+|---|---|---|---|
+| **Capture** | launcher, attested proxy, SDK | bind the receipt to the bytes and the machine that actually ran | launcher + proxy exist; SDK next |
+| **Prove** | receipts, transparency log, evidence pack | make the record independently verifiable | proof chain exists; hosted log MVP next |
+| **Consume** | trust center, verification links, control mapping | let a buyer or auditor accept the evidence without a CLI | not shipped |
 
-| Level | Claim | erebus status |
+The launcher is the high-assurance capture path. The proxy and SDK exist so a
+team can adopt receipts without repackaging its agent. The trust center is the
+product surface: search, verify, share, export, map to controls.
+
+### 1.2 Buyer and wedge
+
+**ICP:** AI vendors selling agents into regulated enterprises — defense,
+public administration, critical infrastructure, financial services and
+industrial edge.
+
+- **Buyer:** CISO, Head of Compliance or CTO at the AI vendor.
+- **Economic buyer:** the regulated customer or auditor who requires evidence.
+- **User:** the platform/security engineer who instruments the agent.
+- **Channel:** auditors, insurers, system integrators and procurement teams.
+
+The first wedge is not "all AI agents". It is **one AI vendor, one regulated
+buyer, one evidence pack that the buyer's auditor accepts**. Expand only after
+that works.
+
+### 1.3 Proof levels — keep the boundary honest
+
+| Level | Claim | Status |
 |---|---|---|
-| L1 — artifact integrity | this exact bundle/model ran, unmodified | ✅ SHA-256 + Ed25519 at cold start; warm cache re-hashed (`rootfs.merkle`) |
-| L3 — non-repudiation / trace integrity | this key attested this run at this time; the trail cannot be silently edited | ✅ hash chain (P0-2), Merkle log + TSA (P0-5), machine co-signature (P0-6), DSSE (P0-7) |
-| L2 — execution correctness | output = f(input, weights) | ❌ out of scope (TEE/zkML), stays a documented future option |
+| **L1 — artifact integrity** | this exact bundle/model ran, unmodified | ✅ SHA-256 + Ed25519 at cold start; warm-cache rootfs re-hash |
+| **L3 — non-repudiation / trail integrity** | this key attested this run at this time; the trail cannot be silently edited | ✅ hash chain, Merkle log + TSA, machine co-signature, DSSE |
+| **L2 — execution correctness** | output = f(input, weights) | ❌ out of scope (TEE/zkML only if a customer asks) |
 
-The pitch must say **"we prove the execution happened, unaltered, and the
-trail is tamper-evident"** — never "we prove the agent did the right thing".
+Never claim L2. The pitch is: **we prove the execution happened, unaltered,
+and the record is tamper-evident.** We do not prove the agent did the right
+thing.
+
+### 1.4 Moat
+
+The moat is not packaging, SISR or model serving. It is:
+
+1. the **execution-attestation chain** (signed artifact + receipts + anchored
+   log);
+2. the **accumulated anchored history** a fork cannot recreate;
+3. the **standard and auditor network** (DSSE, in-toto, `cosign`, offline
+   verification);
+4. the **capture point** the operator cannot silently bypass.
+
+The bigger the trail, the stronger the lock-in.
 
 ---
 
 ## 2. Closed
 
-The 2026-09-17 audit (A1–A12) is closed. P0 made the proof true, P1 made
-the claims run in CI, and R1–R5 plus R7 answered the first buyer questions.
+The 2026-09-17 audit (A1–A12) is closed. P0 made the proof true, P1 made the
+claims run in CI, and R1–R5 plus R7 answered the first buyer questions.
 Acceptance tests are in `cargo test --workspace` and `proof.yml`. Do not
 reopen those items. The dilution finding (A13: breadth beside a small proof
-core) stays as the freeze in §4.
+core) is enforced by the freeze in §4.
 
 ---
 
 ## 3. What is left
 
-Order is strict. An item is done only when its acceptance test runs in CI,
-or, for T2–T4, when the artifact named below exists. Nothing else is in
-scope.
+Order is strict. An item is done only when the acceptance test runs in CI, or
+when the named artifact exists. Nothing else is in scope.
 
-### T2 — calendar, not code
+### 3.1 The 90-day plan
 
-Internal pilot started 2026-09-29: one real agent behind `serve --attest-key
---push`, 2 enrolled machines (Linux VPS, macOS laptop), registry with
-`--tsa-url`. Earliest complete **2026-10-13**, and only when
-`scripts/pilot` writes a `pilot-report.json` that shows anchored receipts,
-0 `verify-attest --strict --proof` failures, and bytes of evidence per
-call. Do not describe T2 as complete before that file says so.
+| Weeks | Focus | Deliverable | Done when |
+|---|---|---|---|
+| 1–2 | Customer discovery | one ICP, 5–10 buyer interviews, a written evidence checklist | the checklist names the exact artifacts an auditor accepts |
+| 3–4 | Activation | install → `erebus init` → `erebus demo` → first receipt → verification link | fresh Linux VM, under 5 minutes, no cargo/Rust |
+| 5–6 | Trust center MVP | org/project, API key, receipt search, public verification link, evidence export | a non-erebus user opens the link and verifies offline |
+| 7–8 | Design partner pilot | one real agent, 14 days, strict + proof verification | zero failures, one case study with numbers |
+| 9–12 | Traction | 3 design partners, 1 paid pilot or LOI, one external auditor verification | YC application can cite names and numbers |
 
-### T3 / T4 — a name, not a feature
+### 3.2 Code workstreams
 
-- **T3.** One design partner in the ICP (defense, public administration,
-  industrial edge) and a letter of intent on the Enterprise tier. The
-  offline verifier is already what `verify-evidence` does.
-- **T4.** One written verification by an auditor or consultancy that does
-  not trust us, using `erebus verify-attest` / `cosign` and public keys
-  obtained out of band. After T2.
+#### P0-1 — Activation: first receipt in under 5 minutes
 
-### Code
+Today the quickstart starts with `make stub`, Rust and musl. That is a
+developer path, not a product path.
 
-1. **TPM2.** Done 2026-10-02. `erebus enroll --tpm` seals `machine.key`
-   with `tpm2_create` (`erebus-tpm2-seal/v1`). Unseal uses
-   `TPM2TOOLS_TCTI`. A blob sealed on swtpm A unseals on A and fails on
-   swtpm B (`scripts/test_tpm2_swtpm.sh`,
-   `swtpm_copied_blob_cannot_unseal`). Software enrollments keep the v1
-   certificate bytes (`erebus-machine-cert/v1\n…`, no `key_storage`
-   field). An already-sealed XOR blob (`erebus-tpm-seal/v1`) still
-   unseals with `ERE_TPM_BINDING`. Proven here in Docker against two
-   swtpm instances. The same script is a CI job; that job has not gone
-   green on GitHub yet.
-2. **Policy in the stub.** Done 2026-10-02. `erebus build --policy FILE`
-   embeds the YAML. The stub calls `enforce_embedded` before extraction
-   and again after a SISR update, so `./agent.erebus` refuses on its own.
-   Acceptance: `embedded_policy_refuses_before_exec` (no `erebus run`).
-   The signer fingerprint match against the trusted directory stays in
-   `erebus run --policy`; the stub refuses an unsigned bundle when the
-   policy lists signers, and enforces isolation, model allowlist and
-   `require_receipt`.
-3. **Fleet proof status.** Done 2026-10-02. `GET /fleet?bundle=&since=&until=`
-   returns each receipt with `proof_status` `verified`, `missing` or
-   `failed`. Acceptance: `scripts/test_transparency_log.py` (auth required,
-   one-second window, status `verified`). No region column. No HTML page.
-4. **Windows confinement that holds.** Not observed yet. Non-detached
-   children with a working directory start in an AppContainer that is
-   granted write on that directory only, then in a job with
-   `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. A job object cannot refuse a
-   write, so the write jail is the AppContainer. If `userenv` has no
-   AppContainer exports (Wine), the launch continues with the job only.
-   Acceptance: on `windows-latest`,
-   `sandbox_kills_child_and_blocks_outside_write` — a child still running
-   when the launcher drops it is killed, and a write outside the payload
-   directory is refused. This host is macOS and cannot run that test.
+- `erebus demo`: create a temporary Python agent, build it, run it, emit a
+  receipt, verify it, print a shareable verification path.
+- `erebus init`: keep the scaffold, but make the first run one command.
+- Release install is the default path; source build is for contributors.
+- Acceptance: fresh Linux VM → install → `erebus demo` → `OK` in < 5 min,
+  covered by an integration test that does not require a prebuilt repo.
 
-### Out of scope
+#### P0-2 — Trust center MVP
 
-TEE remote attestation, zkML, multi-party consensus, Rekor (the erebus
-transparency log is the anchor), a full offline Merkle log (R1 seals the
-local trail head only), proving a tool's effect on the outside world,
-hosting inference, healthcare, hobbyist devs.
+The hosted product is the paid surface. The registry is infrastructure, not a
+trust center.
+
+- org, project, API key, log origin;
+- receipt ingestion, search and status (`verified`, `missing`, `failed`);
+- public verification link for a receipt or evidence pack;
+- evidence export in one click;
+- retention, backups, status page and a minimal audit log.
+- Acceptance: one design partner uploads 1,000 receipts; a buyer verifies a
+  link without an erebus account; restore from backup is tested.
+
+#### P0-3 — Integration without repackaging
+
+The launcher is the high-assurance path, not the only path.
+
+- attested proxy in front of OpenAI-compatible and Anthropic APIs;
+- Python and Node SDKs for custom agents;
+- MCP tool-call receipts;
+- one framework integration (LangChain, LlamaIndex, CrewAI or AutoGen);
+- Acceptance: a demo agent emits a receipt with three lines of code; the
+  proxy emits one receipt per inference call; neither requires `erebus build`.
+
+#### P0-4 — Completeness: every run, not just the runs that opt in
+
+A receipt proves a run happened. It does not prove every run was captured.
+This is the biggest audit objection and must be a first-class product claim.
+
+- attested gateway / egress path for model and tool traffic;
+- signed launch policy that requires receipts;
+- heartbeat receipts and a coverage report in the evidence pack;
+- independent monitor that flags a gap between traffic and receipts;
+- Acceptance: a run outside the gateway is detectable; the evidence pack
+  reports coverage explicitly; the limitation is documented in the proof page.
+
+#### P0-5 — Design partner and paid pilot
+
+- one named design partner in the ICP;
+- 14-day pilot on a real agent;
+- one evidence pack accepted by the partner's auditor;
+- one LOI or paid pilot on the Enterprise tier;
+- Acceptance: a case study with receipts/day, verification latency, bytes of
+  evidence per call and the buyer's own words.
+
+#### P0-6 — External verification
+
+- an auditor or consultancy verifies a trail with only public keys,
+  `verify-attest` / `verify-evidence` and `cosign`;
+- written confirmation that the pack is sufficient;
+- Acceptance: T4 evidence in the repo or a public write-up, with no erebus
+  account and no network access.
+
+### 3.3 Existing pilot gates
+
+- **T2 internal pilot** (started 2026-09-29): one real agent behind
+  `serve --attest-key`, at least two enrolled machines, a registry with
+  `--tsa-url`, zero `verify-attest --strict --proof` failures. Running, not
+  complete.
+- **T3 design partner**: one named partner in the ICP, offline verifier
+  delivered, LOI on the Enterprise tier.
+- **T4 third-party verification**: an auditor verifies a trail in writing.
+
+### 3.4 Out of scope
+
+TEE remote attestation, zkML, multi-party consensus, Rekor (the erebus log is
+the anchor), a full offline Merkle log, proving a tool's effect on the outside
+world, hosting inference, healthcare, hobbyist developers, a marketplace.
 
 ---
 
 ## 4. Frozen
 
-P0 is green. These surfaces still get **no new features**. They keep their
-tests and stay marked `experimental` in `--help`:
+P0 is green. These surfaces keep their tests, stay hidden from the default
+`--help`, and require `--experimental`; they receive **no new features**:
 
 `billing`, `mirror`, `replicate`, `hf`, `layer`, `swap`, `dashboard` (TUI),
 `chat` (TUI + web UI), `sbom` beyond what `audit` needs, `scan --cve`,
 `backup`/`restore`, webhooks, SSO/SAML, K8s Helm chart, the five protocol
-frontends (`scripts/frontends/`), MCP registry endpoints (the attested tool
-boundary already shipped with R2), waitlist/landing.
+frontends (`scripts/frontends/`), MCP registry endpoints, waitlist/landing.
 
-Rule: a PR touching a frozen surface must name an open item in §3 that it
-unblocks.
+Rules:
+
+- A PR touching a frozen surface must name an open item in §3 that it unblocks.
+- Frozen commands are hidden from the default help and require
+  `--experimental` (or `ERE_EXPERIMENTAL=1`).
+- The default `erebus --help` should read like a product, not a toolbox.
+- Packaging, SISR, universal binaries and model serving are **means**, not the
+  product. They do not get new scope until §3 is done.
 
 ---
 
-## 5. The end-to-end demo (2 minutes; proof batteries green in CI — `proof.yml`)
+## 5. The end-to-end demo
+
+### 5.1 Current developer demo (2 minutes)
 
 ```bash
 erebus keygen                                   # Ed25519 key, 0600
@@ -156,45 +234,50 @@ erebus trust <fingerprint>.pub
 erebus build ./agent -o agent.erebus            # sandboxed single binary
 erebus sign agent.erebus --key <fingerprint>.key
 erebus verify agent.erebus                      # OK: signature verified
-ERE_ATTEST_KEY=<key> ./agent.erebus < prompt    # runs; receipt appended to agent.erebus.attest.d/
-ERE_ATTEST_KEY=<key> ./agent.erebus < prompt    # second run → chained receipt
-erebus serve agent.erebus --attest-key <key> &  # attesting proxy on :8080 (engine hidden on loopback)
-curl :8080/v1/chat/completions -d '{...}'       # answer unchanged; 3rd receipt = {POST /v1/chat/completions, 200, req/resp hashes}
-erebus verify-attest --chain agent.erebus.attest.d --bundle agent.erebus   # 3 receipts, chain OK
-sed -i 's/"exit_code": 0/"exit_code": 1/' agent.erebus.attest.d/000001-*.json
-erebus verify-attest --chain agent.erebus.attest.d   # TAMPERED: exit_code differs from signed statement
-printf '\x00' | dd of=agent.erebus bs=1 seek=3000000 count=1 conv=notrunc
-erebus verify agent.erebus                      # TAMPERED: signature does not match
+ERE_ATTEST_KEY=<key> ./agent.erebus < prompt    # runs; receipt appended
+erebus verify-attest --chain agent.erebus.attest.d --bundle agent.erebus
 ```
 
-Extended (P0-5): `erebus attest --push` → `erebus verify-attest --proof` shows
-the receipt is included in a checkpoint timestamped by an independent TSA.
+Extended proof chain: `erebus attest --push` → `erebus verify-attest --proof`
+shows inclusion in a checkpoint timestamped by an independent TSA.
 
-A local full e2e demo harness (gitignored) runs this plus enroll, `--strict`,
-cosign and the chaos harnesses. Public CI (`proof.yml`) re-proves the
-transparency-log, egress, and chaos batteries on every push.
+### 5.2 Target buyer demo (5 minutes)
+
+```bash
+curl -fsSL https://get.erebus.dev | bash
+erebus demo
+#  agent: hello-agent.erebus
+#  receipt: hello-agent.erebus.attest
+#  verify: https://verify.erebus.dev/r/<id>
+#  OK: signature, chain, machine, transparency log
+```
+
+The buyer opens the link, sees `Verified OK`, downloads the evidence pack and
+verifies it offline. No erebus account, no CLI, no trust in the vendor.
+
+The demo must not depend on a repo clone or a local Rust toolchain.
 
 ---
 
-## 6. Business model (condensed, decided 2026-08-26, unchanged)
+## 6. Business model
 
-Client **and** server stay MIT forever; we monetize the **hosted trail**.
+Client **and** server stay MIT forever. We monetize the **hosted trust
+center** and the enterprise operation around it.
 
-| Tier | Price | Includes |
+| Tier | Price hypothesis | Includes |
 |---|---|---|
-| Free | €0 | public packages, 10 GB/month, local receipts |
-| Pro | $29/mo | private packages, hosted transparency log, anchored checkpoints, 1 TB SISR |
-| Team | $99/mo | Pro + RBAC, audit log, evidence packs, webhooks, 5 TB |
-| Enterprise | $24k/yr | air-gapped mirror + offline verifier, SSO, SLA, compliance reports |
-| Enterprise+ | $50/node/yr | per-machine identity (P0-6), fleet dashboard, full history |
+| Free | €0 | public packages, local receipts, self-hosted registry |
+| Team | $500–2k/mo | hosted trust center, private receipts, verification links, evidence packs, RBAC |
+| Enterprise | $25k–100k/yr | air-gapped mirror, offline verifier, SSO, SLA, retention, compliance reports, external audit support |
+| Enterprise+ | per protected agent/node | fleet identity, coverage monitoring, full history |
 
-ICP: defense/administration (air-gapped by regulation), industrial edge
-(kiosks, factories, vehicles), AI startups under the EU AI Act. Excluded:
-healthcare, hobbyists. Forbidden: hosting inference, paywalling the client,
-marketplace rev-share now.
+These are hypotheses, not validated prices. The pilot must test willingness to
+pay; do not anchor the company on the current $29/$99 developer tiers.
 
-Math: >95 % gross margin (no GPU), 10 enterprise × $24k = $240k ARR seed
-viable; lock-in = accumulated anchored history.
+**Bottom-up math:** 50 AI vendors × $30k = $1.5M ARR; 500 × $30k = $15M ARR.
+The first milestone is one paid pilot, not a pricing page.
+
+Forbidden: hosting inference, paywalling the client, marketplace rev-share.
 
 ---
 
@@ -202,52 +285,29 @@ viable; lock-in = accumulated anchored history.
 
 ### 7.1 The one-line slide
 
-> *« Teams that deploy AI agents on machines they don't fully control cannot
-> prove to an auditor what those agents ran. erebus is the launcher that emits
-> a signed, externally anchored receipt of every execution — verifiable
-> offline with erebus or stock cosign. MIT client and server; paid hosted,
-> anchored proof trail. »*
+> *« AI vendors selling agents into regulated environments cannot prove to
+> their customers what the agent actually ran. erebus gives every execution a
+> signed, externally anchored receipt, verifiable offline with erebus or stock
+> cosign. MIT client and server; paid hosted trust center. »*
 
 Problem, solution, for whom — one breath. Never lead with platforms, engines,
 SISR or the registry.
 
 ### 7.2 Category — say it right
 
-erebus is **execution provenance for AI agents**: the Sigstore / SLSA /
+erebus is **execution provenance for AI agents**, packaged as a **trust
+center** for the buyer. The technical category is the Sigstore / SLSA /
 in-toto model (signed statement, DSSE, transparency log, `cosign` interop)
-applied to *runs* instead of *builds*. That is the category a technical
-partner recognises, and it is why `cosign verify-blob-attestation → Verified
-OK` matters: we are not a proprietary format.
+applied to *runs* instead of *builds*. The buyer category is the evidence
+layer for AI procurement and audit.
 
-**Do not claim "AI-Native Compliance Infrastructure" as our category slot.**
-Verified 2026-09-28: that framing describes *financial* compliance
-operations — state-by-state licensing, regulatory-change monitoring,
-transaction anomaly detection, reporting headcount — and the companies often
-cited under it (Duna, TovenAI, Hadrius) are AI agents that *do* compliance
-work. We are the evidence layer such agents, and any other, would run on. It
-is an **adjacent buyer** (its "tamper-evident audit trails" line), not our
-category; frame it that way or not at all. Same for *DevTools for AI agents*:
-adjacent.
+Do not claim "AI-Native Compliance Infrastructure": that framing describes
+agents that *do* compliance work, not the evidence layer they run on. It is an
+adjacent buyer, not our category.
 
-**Re-read 2026-10-01 — the RFS that is our slot: "The Future of American
-Defense"** (Secretary of the Army). It asks for "commercially developed,
-modular open-system solutions", "software … that plugs directly into our
-open system architecture", surviving "the most extreme climates". That is
-the ICP of §6 (defense, air-gapped, edge) in the buyer's own words: AI on
-drones, sensors and vehicles that must later prove what it ran. What it
-implies for us: the trail-head seal (R1, landed) and a TPM2 key
-(§3, sealed with tpm2-tools; a copied blob does not unseal on a second
-swtpm), plus arm64/Jetson as a first-class target. Caveat: US Army procurement in
-practice needs a US entity (ITAR/CMMC); the European route (AID/DGA, NATO
-DIANA, UK MOD) takes the same pitch.
-
-Adjacent, cite only as such:
-- *New Operating Systems for the Physical World* — "how do you measure
-  reliability?" across agents, robots and humans; "record all the work as
-  it actually happens". We are the evidence layer under those OSes (R2, R3).
-- *Proving You're Human* — "rebuilding the trust layer". Same problem for
-  machines: knowing what an agent did. Human approvals fit in our receipt
-  (R4); we do not do human identity.
+Do not claim "Datadog for agents": that is an operator-controlled
+observability tool. We are the neutral evidence layer the operator cannot
+rewrite.
 
 ### 7.3 Traction — what we can produce ourselves, in order
 
@@ -256,93 +316,73 @@ that; the steps below can, and each yields a number we are allowed to cite.
 
 | Step | Deliverable | Number we can cite | When |
 |---|---|---|---|
-| T1 | **P1-1**: proof batteries (transparency log, egress, chaos) green in CI, public badge | "the whole proof chain is re-proven on every commit" | done 2026-09-28 |
-| T2 | **Internal pilot**: one real agent behind `serve --attest-key`, ≥ 2 enrolled machines, ≥ 14 days, registry with `--tsa-url` | receipts anchored, machines enrolled, `verify-attest --strict --proof` failures = 0, bytes of evidence per call | after T1 |
-| T3 | **Design partner** in the ICP (defense / administration air-gapped, industrial edge): offline verifier delivered, letter of intent on the Enterprise tier | "1 LOI; air-gapped verification accepted by their auditor" | in parallel |
-| T4 | **Third-party verification**: an auditor or consultancy verifies a trail with nothing but `erebus verify-attest` / `cosign` and public keys, in writing | "verified by someone who does not trust us" | after T2 |
+| T1 | **P1-1**: proof batteries green in CI, public badge | "the whole proof chain is re-proven on every commit" | done 2026-09-28 |
+| T2 | **Internal pilot**: one real agent behind `serve --attest-key`, ≥ 2 enrolled machines, ≥ 14 days, registry with `--tsa-url` | receipts anchored, machines enrolled, strict+proof failures = 0, bytes of evidence per call | running; not complete |
+| T3 | **Design partner** in the ICP: offline verifier delivered, LOI on the Enterprise tier | "1 LOI; air-gapped verification accepted by their auditor" | 90-day plan |
+| T4 | **Third-party verification**: an auditor verifies a trail with only public keys and `verify-evidence` / `cosign`, in writing | "verified by someone who does not trust us" | after T2 |
 
-**T2 running (started 2026-09-29, not complete):**
-
-- `erebus serve --push` now publishes every per-inference receipt and stores a
-  locally verified Merkle inclusion proof; missing proofs are repaired from
-  the append-only trail on restart.
-- Reproducible harness: [`scripts/pilot/`](scripts/pilot/README.md), pinned
-  Apache-2.0 Baguettotron Q8 (321 M), persistent registry with RFC 3161
-  anchoring, node enrollment, daily probe and evidence-derived JSON report.
-- Public registry since 2026-09-29 (TLS, only log/attestation/machine routes
-  exposed), systemd node + daily probe on the registry host. Baseline:
-  2 enrolled machines (Linux VPS, macOS laptop), each with a real inference
-  receipt that is strict+proof verified and RFC 3161-anchored, 0 failures,
-  ~14.2 kB of evidence per call. Machine gate lowered to 2 on 2026-10-01
-  (the two hosts we operate; no third box available).
-- Gate still open: 14 elapsed days (started 2026-09-29 → earliest calendar
-  complete ≈ 2026-10-13; registry host leased for 15). Do not describe T2
-  as complete before `pilot-report.json` says so.
-
-Rules: cite only what CI or a third party proves; no star counts; the founder
-story is told as *results* (proof chain complete, Python signer and Merkle
+Rules: cite only what CI or a third party proves; no star counts; tell the
+founder story as results (proof chain complete, Python signer and Merkle
 byte-compatible with Rust, cosign interop, SIGKILL chaos survived), never as a
 module list.
 
-### 7.4 The boundary, and the three questions (2026-09-28)
+### 7.4 The boundary, and the three questions
 
 Full text: [`docs/src/concepts/proof.md`](docs/src/concepts/proof.md). The
 short form every pitch must respect:
 
 - **We prove** what ran, where, when, with what / producing what, and that
   the record was never edited (L1 + L3 in §1). A flight recorder for agents.
-- **We do not prove** the computation was faithful (L2 — TEE/zkML, roadmap
-  option only if a customer asks), that the agent did the right thing (that is
-  evaluation), the plaintext (digests only), or a root-compromised host
-  (default enrollment is still a software key; `--tpm` seals to the TPM
-  named by `TPM2TOOLS_TCTI`, so a root on that same machine can still ask
-  the TPM to unseal — §3). Never let a slide imply otherwise.
-- **Why this boundary is the product**: Certificate Transparency, Sigstore, a
-  flight recorder, an accounting audit trail — none prove correctness, all
-  make the record undeniable, all changed their industry. Regulators ask for
-  record-keeping and traceability (EU AI Act Art. 12/19/26, SOC 2, ISO 42001),
-  not proofs of correctness.
+- **We do not prove** the computation was faithful (L2 — TEE/zkML only if a
+  customer asks), that the agent did the right thing (that is evaluation), the
+  plaintext (digests only), or a root-compromised host (default enrollment is
+  a software key; `--tpm` seals to the TPM named by `TPM2TOOLS_TCTI`, so root
+  on that machine can still ask the TPM to unseal).
+- **We do not yet prove completeness**: a receipt proves a run happened, not
+  that every run was captured. P0-4 is the workstream that closes this gap;
+  until then the evidence pack must state coverage explicitly.
 - **"And if the agent lies?"** → *We do not judge the agent; we make it
   impossible to lie about what it did.*
 
-The three questions that decide the outcome, and the answers we hold:
+The three questions that decide the outcome:
 
-1. *Who needs this now?* Teams deploying agents on machines they don't fully
-   control, answerable to someone who doesn't trust them. Must be a **name**
-   (T2/T3), not a sector.
-2. *Why now?* Agents act without a human in the loop; record-keeping
-   obligations for high-risk AI are becoming enforceable. Editable logs were
-   tolerated for chatbots, not for systems that act.
+1. *Who needs this now?* AI vendors selling into regulated enterprises,
+   answerable to a buyer or auditor who does not trust their logs. Must be a
+   **name** (T2/T3), not a sector.
+2. *Why now?* Agents act without a human in the loop; procurement already asks
+   for evidence; editable logs are not accepted for systems that act. The EU
+   AI Act high-risk dates are staggered (Annex III from 2027-12-02, Annex I
+   from 2028-08-02), so sell current procurement pain, not one deadline.
 3. *Why not a feature of Datadog / LangSmith?* An operator-run tool cannot
    produce evidence the operator does not control. Traces answer "what
    happened?" to the operator; an anchored receipt answers it to the auditor.
    The neutral log is the product; the launcher is where the signature is
    unbypassable.
 
-What will get us refused is not L2. It is "No production users yet" with no
-pilot or LOI beside it (§7.3).
+What will get us refused is not L2. It is "no production users" with no pilot
+or LOI beside it.
 
-### 7.5 The competitive field, Fall 2025 → Summer 2027 (read 2026-10-01)
+### 7.5 The competitive field, Fall 2025 → Summer 2027
 
 Among accelerator-backed peers surveyed publicly: **none ships signed,
-anchored, offline-verifiable per-execution receipts for agents.** The
-closest, and what each teaches:
+anchored, offline-verifiable per-execution receipts for agents.** The closest,
+and what each teaches:
 
 | Company (batch) | What they do | Relation | Lesson |
 |---|---|---|---|
-| Caution (S26) | verifiable compute on AWS Nitro enclaves; proves prod = reviewed source via reproducible builds | nearest neighbour: proves *what is deployed*, cloud + TEE | link bundle to source (R5); their TPM 2.0 plans meet R6; we own edge / offline / per-run, they own cloud enclaves |
-| Klaimee (Sp26), Mount (Sp26) | liability insurance for deployed agents | **buyer / channel** | they need evidence to underwrite and pay claims; their failure list maps to R2, R3, R7 |
+| Caution (S26) | verifiable compute on AWS Nitro enclaves; proves prod = reviewed source via reproducible builds | nearest neighbour: proves *what is deployed*, cloud + TEE | link bundle to source; we own edge / offline / per-run, they own cloud enclaves |
+| Klaimee (Sp26), Mount (Sp26) | liability insurance for deployed agents | **buyer / channel** | they need evidence to underwrite and pay claims |
 | Valgo (W26) | risk pricing for physical AI, "historical data doesn't exist" | buyer / channel | an anchored trail *is* that loss history |
 | Multifactor (F25), Agentic Fabriq (W26) | agent identity, permissions, audit logs | complement | their audit logs are operator-controlled: we are the tamper-evident back end |
-| Salus (W26) | blocks agent actions before they execute | complement | pre-execution checks = our P2 `policy`; their verdicts belong in receipts |
-| GrayPass (F26) | signed proof a human approved a key action | complement | carry signed approvals in the statement (R4) |
+| Salus (W26) | blocks agent actions before they execute | complement | pre-execution checks belong in receipts |
+| GrayPass (F26) | signed proof a human approved a key action | complement | carry signed approvals in the statement |
 | Sentrial (W26) | "Datadog for agent reliability" | the operator tool we contrast against | — |
 | Seeing Systems (W26) | AI-commanded strike drones; UK Royal Marines + 4 NATO forces | **T3 target** (European, NATO) | defense buyers sit in the batch |
 | Arden (Sp26), Denki (F25) | AI-native audit firms | **T4 target** | a third party that verifies a trail in writing |
 
-Rules: name neighbours by what they prove, never "no one else does this";
-the batch is a pipeline (insurers as channel, drone and industrial
-companies as T3, audit firms as T4), not just a competitor list.
+Rules: name neighbours by what they prove, never "no one else does this"; the
+batch is a pipeline (insurers as channel, drone and industrial companies as
+T3, audit firms as T4), not just a competitor list.
 
 ---
 
@@ -419,6 +459,11 @@ companies as T3, audit firms as T4), not just a competitor list.
 
 ## 10. Changelog (condensed)
 
+- **2026-11-24** — Product reset: erebus is positioned as the **trust center
+  for AI agents**; ICP narrowed to AI vendors selling into regulated
+  enterprises; 90-day plan, completeness workstream, trust-center MVP and
+  frozen-surface rule added. No production customers yet; one design partner
+  and one paid pilot are the next proof points.
 - **2026-10-02** — R1–R5 and R7 landed (witness seal, tool-call receipts,
   stop receipts, signed approvals, SLSA sidecar, incident-window claim).
   Policy is enforced by the stub. Fleet returns `proof_status`.
