@@ -1,86 +1,180 @@
 #!/usr/bin/env bash
-# chaos_monkey.sh — aggressive adversarial fuzzing of the erebus fail-closed path.
+# chaos_monkey.sh — deterministic, fail-closed fuzz harness for erebus bundles.
 #
-# Builds an encrypted bundle, then hammers corrupted copies through the real stub
-# and asserts:
-#   1. Corrupted/truncated binaries NEVER succeed (exit 0) — fail closed
+# Builds a signed encrypted bundle, then hammers corrupted copies through the
+# real stub and asserts:
+#   1. Mutated authenticated bytes NEVER succeed (exit 0) — fail closed
 #   2. The encryption key hex NEVER appears in stderr (no secret leakage)
-#   3. No crash dumps / panics with internal paths on the happy path
-#   4. SIGKILL during startup never poisons subsequent runs (cache self-heal)
-#   5. SISR delta updates survive chunk corruption (content-addressed resilience)
-#   6. Metadata tampering is detected and rejected
-#   7. Footer magic corruption never produces false positives
-#   8. Concurrent writers never produce truncated bundles
+#   3. No panic / sanitizer / core dump on any input
+#   4. No mutated case hangs past the per-case timeout
+#   5. Invalid inputs (empty/garbage/footer-only) are rejected cleanly
+#   6. Footer magic corruption never produces a false positive
+#   7. SIGKILL during startup never poisons subsequent runs (cache self-heal)
+#   8. SISR delta bundles survive payload corruption without false positives
+#   9. Tampering with the real metadata region is always detected
+#  10. Concurrent runs do not corrupt the cache
+#
+# A clean run is bounded evidence for this seed and iteration count, not proof.
+# Failing inputs are kept under the printed artifact directory.
 #
 # Usage: scripts/chaos_monkey.sh [iterations]
+#        ERE_CHAOS_SEED=0xC0FFEE scripts/chaos_monkey.sh 50
 set -euo pipefail
 
 ERE="${ERE_BIN:-./target/release/erebus}"
 ITER="${1:-50}"
+SEED="${ERE_CHAOS_SEED:-0xC0FFEE}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK=$(mktemp -d /tmp/erebus-chaos.XXXXXX)
-trap 'rm -rf "$WORK"' EXIT
+CASES="$WORK/cases"
+FINDINGS="$WORK/findings"
+mkdir -p "$CASES" "$FINDINGS"
+export ERE_TRUSTED_DIR="$WORK/trust"
+mkdir -p "$ERE_TRUSTED_DIR"
+
+FAILURES=0
+ABORTED=1
+cleanup() { # keep artifacts on failure or abrupt exit
+  if [ "$ABORTED" -eq 1 ] || [ "$FAILURES" -ne 0 ]; then
+    echo "  artifacts kept at $WORK"
+  else
+    rm -rf "$WORK"
+  fi
+}
+trap cleanup EXIT
 
 command -v "$ERE" >/dev/null || { echo "erebus CLI not found at $ERE"; exit 2; }
 command -v python3 >/dev/null || { echo "python3 required"; exit 2; }
+python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' \
+  "$SCRIPT_DIR/chaos_mutators.py"
 
-echo "── [1/7] building encrypted bundle in $WORK"
-APP="$WORK/app"
-mkdir -p "$APP"
-cat > "$APP/app.py" <<'PY'
-print("chaos-target-ok")
-PY
-"$ERE" build "$APP" --encrypt --isolation none -o "$WORK/target.erebus" >/dev/null 2>&1
-
-echo "── [2/7] extracting key hex for leak detection"
-KEY_HEX=$("$ERE" inspect "$WORK/target.erebus" --json | python3 -c \
-  "import json,sys; print(json.load(sys.stdin)['meta']['crypto']['encryption_key_hex'])")
-
-FAILURES=0
-check() { # check <label> <exit_code>
-  if [ "$2" -ne 0 ]; then echo "  ✗ $1"; FAILURES=$((FAILURES+1)); else echo "  ✓ $1"; fi
+check() { # check <label> <count-of-violations>
+  if [ "$2" -ne 0 ]; then
+    echo "  ✗ $1 ($2)"
+    FAILURES=$((FAILURES+1))
+  else
+    echo "  ✓ $1"
+  fi
 }
 
-echo "── [3/7] byte-flip monkey ($ITER iterations)"
-python3 - "$WORK/target.erebus" "$ITER" "$KEY_HEX" > "$WORK/corpus.log" <<'PY'
-import random, subprocess, sys, os
-target, n, key_hex = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-blob = open(target, 'rb').read()
-random.seed(0xC0FFEE)
-leak = closed = runs = 0
-for i in range(n):
-    data = bytearray(blob)
-    mode = random.choice(['flip', 'flip', 'flip', 'truncate', 'zero-region', 'swap-nibble'])
-    if mode == 'flip':
-        for _ in range(random.randint(1, 8)):
-            data[random.randrange(len(data))] ^= 1 << random.randrange(8)
-    elif mode == 'truncate':
-        data = data[:random.randrange(1, len(data))]
-    elif mode == 'zero-region':
-        off = random.randrange(len(data) // 4, len(data) - 1)
-        ln = min(random.randint(16, 4096), len(data) - off - 1)
-        data[off:off+ln] = b'\x00' * ln
-    else:  # swap-nibble
-        for _ in range(random.randint(1, 4)):
-            idx = random.randrange(len(data))
-            data[idx] = ((data[idx] >> 4) ^ 0xF & 0xF) << 4 | ((data[idx] & 0xF) ^ 0xF)
-    path = f'/tmp/erebus-chaos-case-{i}'
-    open(path, 'wb').write(data)
-    os.chmod(path, 0o755)
-    r = subprocess.run([path], capture_output=True, text=True, timeout=60)
-    runs += 1
-    if r.returncode == 0:
-        closed += 1
-        print(f'FAIL-CLOSED-VIOLATION case={i} mode={mode}')
-    if key_hex.lower() in r.stderr.lower():
-        leak += 1
-        print(f'KEY-LEAK case={i} mode={mode}')
-    os.unlink(path)
-print(f'SUMMARY runs={runs} exit0_on_corrupt={closed} leaks={leak}')
-PY
-check "corrupted files always fail closed" $?
-check "no encryption-key leakage in stderr" $?
+echo "── [1/7] building signed encrypted bundle in $WORK"
+APP="$WORK/app"
+mkdir -p "$APP"
+printf 'print("chaos-target-ok")\n' > "$APP/app.py"
+if ! "$ERE" build "$APP" --encrypt --isolation none -o "$WORK/target.erebus" >/dev/null 2>&1; then
+  echo "  ✗ bundle build failed"
+  exit 2
+fi
 
-echo "── [4/7] SIGKILL monkey (20 kills with varied delays)"
+echo "── [2/7] signing target and extracting key hex"
+if ! "$ERE" keygen --key-dir "$WORK/keys" >/dev/null 2>&1; then
+  echo "  ✗ keygen failed"
+  exit 2
+fi
+KEY=$(find "$WORK/keys" -name '*.key' -print | head -1)
+[ -n "$KEY" ] || { echo "  ✗ no signing key generated"; exit 2; }
+cp "$WORK/keys"/*.pub "$ERE_TRUSTED_DIR/"
+if ! "$ERE" sign "$WORK/target.erebus" --key "$KEY" --quiet --no-input >/dev/null 2>&1; then
+  echo "  ✗ signing failed"
+  exit 2
+fi
+KEY_HEX=$("$ERE" inspect "$WORK/target.erebus" --json | python3 -c \
+  "import json,sys; print(json.load(sys.stdin)['meta']['crypto']['encryption_key_hex'])")
+[ -n "$KEY_HEX" ] || { echo "  ✗ no key hex to check for leaks"; exit 2; }
+
+echo "── [3/7] building SISR bundle"
+if ! "$ERE" build "$APP" --enable-sisr -o "$WORK/sisr.erebus" >/dev/null 2>&1; then
+  echo "  ✗ SISR bundle build failed"
+  exit 2
+fi
+
+echo "── [4/7] mutation monkeys ($ITER iterations, seed $SEED)"
+python3 - "$SCRIPT_DIR" "$WORK" "$ITER" "$KEY_HEX" "$((SEED))" > "$WORK/harness.log" 2>&1 <<'PY'
+import os
+import random
+import sys
+
+helper_dir, work, n_str, key_hex, seed = sys.argv[1:]
+sys.path.insert(0, helper_dir)
+from chaos_mutators import check_corrupt, fields, report, run_case, write_case
+
+ctx = {"cases": os.path.join(work, "cases"),
+       "findings": os.path.join(work, "findings"),
+       "seed": int(seed)}
+n = int(n_str)
+blob = open(os.path.join(work, "target.erebus"), "rb").read()
+layout = fields(blob)
+
+# Positive control: one flipped bit in the authenticated region must be
+# rejected, otherwise a broken oracle could pass the whole run vacuously.
+bad = bytearray(blob)
+bad[layout["signed_start"] + 17] ^= 0x01
+data = bytes(bad)
+path = write_case(ctx, "canary", 0, data)
+result = run_case(path, data, ctx, "canary", 0, key_hex)
+if result is None or result.returncode == 0:
+    report(ctx, "canary", 0, data, "CANARY-FAIL")
+os.unlink(path)
+print("SUMMARY phase=canary runs=1")
+
+KINDS = ("walk", "flip", "interesting", "arith", "block-del",
+         "block-dup", "zero", "nibble", "truncate")
+check_corrupt(ctx, "byteflip", blob, n, KINDS, key_hex, 1)
+check_corrupt(ctx, "footer-magic", blob, 4, ("magic",), key_hex, 2)
+check_corrupt(ctx, "metadata", blob, n, ("meta",), key_hex, 3)
+
+# SISR bundles are unsigned at rest. Keep their mutants inside the payload
+# region so a legitimate v2 layout is not misreported as fail-open.
+sisr = open(os.path.join(work, "sisr.erebus"), "rb").read()
+if sisr[-4:] != (0xBEEF_CAFE).to_bytes(4, "little"):
+    print("SISR-FOOTER-MISSING")
+else:
+    check_corrupt(ctx, "sisr", sisr, n,
+                  ("flip", "zero", "block-del", "nibble", "truncate"),
+                  None, 4)
+
+invalid = {
+    "empty": b"",
+    "one-byte": b"E",
+    "header-only": blob[:16],
+    "footer-only": blob[-92:],
+    "garbage": bytes(random.Random(ctx["seed"] + 5).randrange(256) for _ in range(4096)),
+}
+for i, (name, data) in enumerate(invalid.items()):
+    path = write_case(ctx, "invalid", i, data)
+    result = run_case(path, data, ctx, "invalid", i, key_hex)
+    if result is not None and result.returncode == 0:
+        report(ctx, "invalid", i, data, "FAIL-CLOSED-VIOLATION", name)
+    os.unlink(path)
+print(f"SUMMARY phase=invalid runs={len(invalid)}")
+PY
+
+grep '^SUMMARY' "$WORK/harness.log" || true
+grep -E 'VIOLATION|KEY-LEAK|SISR-FOOTER-MISSING' "$WORK/harness.log" || true
+check "known-bad canary was rejected" \
+  "$(grep -c 'CANARY-FAIL' "$WORK/harness.log" || true)"
+check "mutated bundles always fail closed" \
+  "$(grep -c 'FAIL-CLOSED-VIOLATION phase=byteflip' "$WORK/harness.log" || true)"
+check "footer magic corruption never produces a false positive" \
+  "$(grep -c 'FAIL-CLOSED-VIOLATION phase=footer-magic' "$WORK/harness.log" || true)"
+check "metadata tampering always fails closed" \
+  "$(grep -c 'FAIL-CLOSED-VIOLATION phase=metadata' "$WORK/harness.log" || true)"
+check "SISR corruption always fails closed" \
+  "$(grep -c 'FAIL-CLOSED-VIOLATION phase=sisr' "$WORK/harness.log" || true)"
+check "SISR bundle was built with a valid footer" \
+  "$(grep -c 'SISR-FOOTER-MISSING' "$WORK/harness.log" || true)"
+check "invalid inputs are rejected" \
+  "$(grep -c 'FAIL-CLOSED-VIOLATION phase=invalid' "$WORK/harness.log" || true)"
+check "no panic, core dump or timeout" \
+  "$(grep -cE 'PANIC-VIOLATION|TIMEOUT-VIOLATION' "$WORK/harness.log" || true)"
+check "no encryption-key leakage" \
+  "$(grep -c 'KEY-LEAK' "$WORK/harness.log" || true)"
+check "every fuzz phase executed cases" \
+  "$(grep -c 'SUMMARY .* runs=0' "$WORK/harness.log" || true)"
+check "no mutant was a byte-identical no-op" \
+  "$(grep -c 'NOOP-MUTANT' "$WORK/harness.log" || true)"
+
+echo "── [5/7] SIGKILL monkey (15 kills) + concurrent runs"
 kill_violations=0
 for delay_ms in 5 15 30 50 80 100 150 200 300 400 500 600 700 900 1000; do
   chmod +x "$WORK/target.erebus"
@@ -97,85 +191,36 @@ for delay_ms in 5 15 30 50 80 100 150 200 300 400 500 600 700 900 1000; do
 done
 check "cache self-heals after SIGKILL at every stage" "$kill_violations"
 
-echo "── [5/7] SISR chunk corruption monkey ($ITER iterations)"
-# Build a SISR-enabled bundle first
-python3 - "$WORK/target.erebus" "$ITER" > "$WORK/sisr_corpus.log" <<'PY'
-import random, subprocess, sys, os, json
-target, n = sys.argv[1], int(sys.argv[2])
-blob = open(target, 'rb').read()
-# Parse footer to find SISR section
-footer_magic = blob[-4:]
-if footer_magic != b'\xca\xfe\xbe\xef':
-    print("No SISR footer magic, skipping SISR test")
-    sys.exit(0)
-random.seed(0xBEEFCAFE)
-leak = closed = runs = 0
-for i in range(n):
-    data = bytearray(blob)
-    # Corrupt chunk hashes in the SISR manifest
-    # Truncate the chunk table
-    off = random.randrange(20, len(data) // 2)
-    data = data[:off]
-    path = f'/tmp/erebus-chaos-sisr-case-{i}'
-    open(path, 'wb').write(data)
-    os.chmod(path, 0o755)
-    r = subprocess.run([path], capture_output=True, text=True, timeout=60)
-    runs += 1
-    if r.returncode == 0:
-        closed += 1
-        print(f'FAIL-CLOSED-VIOLATION SISR case={i}')
-    os.unlink(path)
-print(f'SUMMARY SISR runs={runs} exit0_on_corrupt={closed}')
-PY
-check "SISR chunk corruption always fails closed" $?
+pids=()
+for _ in 1 2 3; do
+  "$WORK/target.erebus" > /dev/null 2>&1 &
+  pids+=("$!")
+done
+concurrent=0
+for pid in "${pids[@]}"; do
+  if wait "$pid" 2>/dev/null; then :; else concurrent=$((concurrent+1)); fi
+done
+check "concurrent runs keep the cache consistent" "$concurrent"
 
-echo "── [6/7] metadata tampering monkey ($ITER iterations)"
-python3 - "$WORK/target.erebus" "$ITER" "$KEY_HEX" > "$WORK/meta_tamper.log" <<'PY'
-import random, subprocess, sys, os, json
-target, n, key_hex = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-blob = open(target, 'rb').read()
-random.seed(0xBADF00D)
-leak = closed = runs = 0
-for i in range(n):
-    data = bytearray(blob)
-    # Corrupt metadata JSON in the middle of the file
-    meta_start = random.randrange(64, len(data) // 2)
-    meta_len = random.randint(8, 256)
-    corrupt_len = random.randint(4, meta_len + 4)
-    # Replace metadata with garbage
-    data[meta_start:meta_start+corrupt_len] = b'{"tampered": true, " garbage'
-    path = f'/tmp/erebus-chaos-metacase-{i}'
-    open(path, 'wb').write(data)
-    os.chmod(path, 0o755)
-    r = subprocess.run([path], capture_output=True, text=True, timeout=60)
-    runs += 1
-    if r.returncode == 0:
-        closed += 1
-        print(f'FAIL-CLOSED-VIOLATION metadata case={i}')
-    if key_hex.lower() in r.stderr.lower():
-        leak += 1
-        print(f'KEY-LEAK metadata case={i}')
-    os.unlink(path)
-print(f'SUMMARY meta runs={runs} exit0_on_corrupt={closed} leaks={leak}')
-PY
-check "metadata tampering always fails closed" $?
-check "no encryption-key leakage in metadata tamper" $?
-
-echo "── [7/7] happy path sanity"
+echo "── [6/7] happy path sanity"
 if "$WORK/target.erebus" 2>"$WORK/happy.err" | grep -q chaos-target-ok; then
   check "untampered bundle still works" 0
 else
   check "untampered bundle still works" 1
 fi
-if grep -qi "panicked\|core dumped" "$WORK/happy.err"; then
-  check "no panic noise on clean stderr" 1
+check "no panic noise on clean stderr" \
+  "$(grep -ciE 'panicked|core dumped' "$WORK/happy.err" || true)"
+if grep -qiF "$KEY_HEX" "$WORK/happy.err"; then
+  check "no key leak on happy path" 1
 else
-  check "no panic noise on clean stderr" 0
+  check "no key leak on happy path" 0
 fi
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then
-  echo "CHAOS VERDICT: SURVIVED ($ITER corruptions + SIGKILLs + SISR + metadata tamper)"
+  ABORTED=0
+  echo "CHAOS VERDICT: SURVIVED ($ITER mutants + 4 footer-magic + 15 SIGKILLs + SISR + metadata; seed $SEED)"
+  echo "note: bounded evidence for this seed, not proof of absence"
 else
   echo "CHAOS VERDICT: $FAILURES CHECK(S) FAILED — see log above"
   exit 1
