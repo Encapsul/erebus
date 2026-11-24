@@ -31,7 +31,8 @@ pub const ATTESTATION_SPEC_VERSION: &str = "2.0";
 
 /// Spec 2.1 = 2.0 + additive fields: tool fields of `execution.request`
 /// (`tool_calls`, `tools_offered`, `tool_history`, `tool_results` and their
-/// `_incomplete` flags), `stdin_hash`, `egress`, `stop`, and `approval`.
+/// `_incomplete` flags), `stdin_hash`, `egress`, `stop`, `approval`, and
+/// `heartbeat`.
 /// Written only on receipts that carry one of them: verifiers predating 2.1
 /// rebuild the statement without them and report `TAMPERED`, every other
 /// receipt stays readable by them.
@@ -158,6 +159,11 @@ pub struct ExecutionInfo {
     /// with `verify_approval` / `verify-attest --approver-key`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<Approval>,
+    /// Spec 2.1: liveness proof emitted by an attesting `serve`. Consecutive
+    /// heartbeats bound a time window: an auditor can see where the service
+    /// was alive and how many attested calls happened in each window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heartbeat: Option<HeartbeatInfo>,
 }
 
 /// Spec 2.1: facts of a graceful (or forced) stop, signed into the trail.
@@ -173,6 +179,17 @@ pub struct StopInfo {
     /// within the wait). Omitted when false so 2.0-shaped stops stay lean.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub kill_timeout: bool,
+}
+
+/// Spec 2.1: a signed liveness tick from an attesting `serve`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeartbeatInfo {
+    /// 1-based sequence within this serve session (gaps are detectable).
+    pub sequence: u64,
+    /// Nominal seconds between ticks, as configured by the operator.
+    pub interval_secs: u64,
+    /// Attested calls since the previous tick of this session.
+    pub calls_since_previous: u64,
 }
 
 /// Spec 2.1: a human decision signed with an approver key.
@@ -279,6 +296,7 @@ pub struct ExecutionCapture {
     pub egress: Option<EgressPolicy>,
     pub stop: Option<StopInfo>,
     pub approval: Option<Approval>,
+    pub heartbeat: Option<HeartbeatInfo>,
     /// Override `execution.attested_at` (tests and incident windows). `None`
     /// means "now". Not itself a signed field name — the value lands in
     /// `ExecutionInfo::attested_at`.
@@ -542,6 +560,7 @@ impl AttestationTemplate {
             egress: capture.egress.clone(),
             stop: capture.stop.clone(),
             approval: capture.approval.clone(),
+            heartbeat: capture.heartbeat,
             machine_id: signers.machine.map(MachineIdentity::machine_id),
         };
 
@@ -592,6 +611,7 @@ fn spec_version_for(execution: &ExecutionInfo) -> &'static str {
         || execution.egress.is_some()
         || execution.stop.is_some()
         || execution.approval.is_some()
+        || execution.heartbeat.is_some()
     {
         ATTESTATION_SPEC_VERSION_TOOL_CALLS
     } else {
@@ -778,6 +798,9 @@ pub fn build_statement(
     }
     if let Some(a) = &execution.approval {
         predicate["execution"]["approval"] = serde_json::json!(a);
+    }
+    if let Some(h) = &execution.heartbeat {
+        predicate["execution"]["heartbeat"] = serde_json::json!(h);
     }
     InTotoStatement {
         statement_type: INTOTO_STATEMENT_TYPE.to_string(),
@@ -1475,6 +1498,7 @@ mod tests {
                 egress: None,
                 stop: None,
                 approval: None,
+                heartbeat: None,
             },
         )
     }
@@ -2347,6 +2371,39 @@ mod tests {
         assert_eq!(signed["kill_timeout"], true);
         assert_eq!(att.execution.stop.as_ref(), Some(&stop));
         verify_attestation(&att, &[key.verifying_key()]).unwrap();
+    }
+
+    #[test]
+    fn heartbeat_is_signed_and_cannot_be_edited() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bundle_path, _, _) = write_bundle(dir.path());
+        let key = test_key();
+        let template = AttestationTemplate::from_bundle(&bundle_path).unwrap();
+        let beat = HeartbeatInfo {
+            sequence: 7,
+            interval_secs: 30,
+            calls_since_previous: 3,
+        };
+        let att = template
+            .attest(
+                &key,
+                &ExecutionCapture {
+                    heartbeat: Some(beat),
+                    ..ExecutionCapture::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(att.spec_version, "2.1");
+        assert_eq!(att.execution.heartbeat, Some(beat));
+        verify_attestation(&att, &[key.verifying_key()]).unwrap();
+
+        let mut forged = att.clone();
+        forged.execution.heartbeat = Some(HeartbeatInfo {
+            sequence: 8,
+            ..beat
+        });
+        let err = check_consistency(&forged).unwrap_err().to_string();
+        assert!(err.contains("TAMPERED"), "{err}");
     }
 
     #[test]

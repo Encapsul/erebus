@@ -470,6 +470,7 @@ mod tests {
                 egress: None,
                 stop: None,
                 approval: None,
+                heartbeat: None,
             },
             statement: crate::intoto::InTotoStatement {
                 statement_type: crate::intoto::INTOTO_STATEMENT_TYPE.to_string(),

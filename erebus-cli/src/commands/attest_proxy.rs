@@ -18,14 +18,14 @@
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::SigningKey;
 use erebus_core::attest::{
-    append_receipt, AttestationTemplate, ExecutionCapture, RequestInfo, StopInfo,
+    append_receipt, AttestationTemplate, ExecutionCapture, HeartbeatInfo, RequestInfo, StopInfo,
 };
 use erebus_core::attest_log::AttestationLog;
 use erebus_core::tool_calls::{ToolCallExtractor, ToolCallReport};
@@ -54,6 +54,12 @@ pub struct CallRecorder {
     expected_output_hash: Option<String>,
     /// Appends read the trail head then advance it: serialize them.
     lock: Mutex<()>,
+    /// Attested calls in this session; heartbeat receipts report deltas.
+    calls: AtomicU64,
+    /// Call count at the previous heartbeat.
+    heartbeat_calls: AtomicU64,
+    /// 1-based heartbeat sequence in this session.
+    heartbeats: AtomicU64,
 }
 
 /// What sits behind the proxy.
@@ -96,6 +102,9 @@ impl CallRecorder {
             mode: ProxyMode::Engine,
             expected_output_hash: None,
             lock: Mutex::new(()),
+            calls: AtomicU64::new(0),
+            heartbeat_calls: AtomicU64::new(0),
+            heartbeats: AtomicU64::new(0),
         }
     }
 
@@ -173,6 +182,32 @@ impl CallRecorder {
                 }
                 .with_request_tools(&call.request_tools),
             ),
+            ..ExecutionCapture::default()
+        };
+        let (_, path) = append_receipt(&self.template, &self.key, &self.log, &capture)?;
+        if let Some(publisher) = &self.publisher {
+            publisher.publish(&path)?;
+        }
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        Ok(path)
+    }
+
+    /// Append a signed heartbeat proving the attesting service was alive.
+    /// The signed delta lets an auditor spot a traffic/receipt mismatch.
+    pub fn record_heartbeat(&self, interval_secs: u64) -> Result<PathBuf> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("call recorder lock poisoned"))?;
+        let total = self.calls.load(Ordering::Relaxed);
+        let since = total.saturating_sub(self.heartbeat_calls.swap(total, Ordering::Relaxed));
+        let beat = HeartbeatInfo {
+            sequence: self.heartbeats.fetch_add(1, Ordering::Relaxed) + 1,
+            interval_secs,
+            calls_since_previous: since,
+        };
+        let capture = ExecutionCapture {
+            heartbeat: Some(beat),
             ..ExecutionCapture::default()
         };
         let (_, path) = append_receipt(&self.template, &self.key, &self.log, &capture)?;

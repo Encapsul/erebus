@@ -23,6 +23,9 @@ use erebus_core::attest::StopInfo;
 /// on CPU with multi-GB models is measured in minutes.
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// Default liveness tick for attesting `serve` sessions.
+const DEFAULT_HEARTBEAT_SECS: u64 = 60;
+
 #[derive(Args)]
 pub struct ServeArgs {
     /// Path to the .erebus bundle embedding a GGUF model
@@ -74,6 +77,10 @@ pub struct ServeArgs {
         requires = "attest_key"
     )]
     pub attest_log: Option<PathBuf>,
+
+    /// Signed liveness receipts every N seconds (default: 60 with --attest-key)
+    #[arg(long, value_name = "SECS", requires = "attest_key")]
+    pub heartbeat_interval: Option<u64>,
 
     /// Publish every inference receipt to the registry transparency log.
     /// Failed publications remain local and are retried on the next start.
@@ -556,6 +563,10 @@ pub fn run(args: ServeArgs) -> Result<()> {
     // the trail must not claim a served session that never became ready.
     wait_healthy(&eng.base_url, &mut eng.child, &stop)?;
 
+    let heartbeat = recorder.as_ref().map(|rec| {
+        let interval = args.heartbeat_interval.unwrap_or(DEFAULT_HEARTBEAT_SECS);
+        spawn_heartbeat(Arc::clone(rec), interval, Arc::clone(&stop.flag))
+    });
     let mut public_url = eng.base_url.clone();
     let recorder_for_stop = recorder.clone();
     if let Some(rec) = recorder {
@@ -564,6 +575,9 @@ pub fn run(args: ServeArgs) -> Result<()> {
     print_banner(&public_url, Path::new(&eng.model_label));
 
     let status = wait_engine(&mut eng.child, &stop)?;
+    if let Some(handle) = heartbeat {
+        let _ = handle.join();
+    }
     if stop.signaled() {
         maybe_record_stop(recorder_for_stop.as_ref(), &stop);
     }
@@ -595,6 +609,30 @@ fn maybe_record_stop(recorder: Option<&Arc<CallRecorder>>, stop: &StopSignals) {
         Ok(path) => eprintln!("[erebus] stop receipt → {}", path.display()),
         Err(e) => eprintln!("[erebus] stop receipt failed: {e:#}"),
     }
+}
+
+/// Emit signed liveness ticks while the attesting proxy is up. Wake often so
+/// a SIGTERM tears the thread down promptly; only elapsed whole intervals
+/// count as heartbeats. Ticks that fail to append are reported, never fatal.
+fn spawn_heartbeat(
+    rec: Arc<CallRecorder>,
+    interval_secs: u64,
+    stop: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let period = Duration::from_secs(interval_secs.max(1));
+        let mut last = Instant::now();
+        while !stop.load(Ordering::SeqCst) {
+            if last.elapsed() >= period {
+                if let Err(e) = rec.record_heartbeat(interval_secs.max(1)) {
+                    eprintln!("[erebus] heartbeat receipt failed: {e:#}");
+                }
+                last = Instant::now();
+            } else {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+    })
 }
 
 /// Where the engine binds. With `--attest-key` it hides on a loopback port

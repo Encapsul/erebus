@@ -343,6 +343,68 @@ fn stop_receipt_closes_chain_after_sigterm() {
     assert!(out.status.success(), "{stderr}");
 }
 
+/// P0-4: an attesting serve emits signed liveness ticks. A gap between
+/// heartbeats, or a tick that misses observed traffic, is auditable.
+#[test]
+fn heartbeat_receipts_chain_and_count_calls() {
+    let dir = tempdir().unwrap();
+    let bundle = make_bundle(dir.path());
+    let (key, trusted) = keygen(dir.path());
+    let trail = dir.path().join("trail");
+    let port = free_port();
+    let mut cmd = serve_attest_only(&bundle, port, &key, &trail);
+    cmd.args(["--heartbeat-interval", "1"]);
+    let mut child = cmd
+        .env("XDG_CACHE_HOME", dir.path().join("cache"))
+        .env("ERE_MACHINE_DIR", dir.path().join("no-machine"))
+        .spawn()
+        .unwrap();
+    wait_ready(port, &mut child);
+
+    let body = r#"{"model":"local","messages":[{"role":"user","content":"hi"}]}"#;
+    assert!(post_chat(port, body).starts_with("HTTP/1.1 200"));
+    std::thread::sleep(Duration::from_secs(3));
+
+    let status = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while child.try_wait().ok().flatten().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "serve did not exit after SIGTERM"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let heartbeats: Vec<serde_json::Value> = trail_receipts(&trail)
+        .iter()
+        .filter_map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).ok())
+        .filter_map(|att: serde_json::Value| {
+            att.pointer("/statement/predicate/execution/heartbeat")
+                .cloned()
+        })
+        .collect();
+    assert!(heartbeats.len() >= 2, "got {} heartbeats", heartbeats.len());
+    assert_eq!(heartbeats[0]["sequence"], 1);
+    assert_eq!(heartbeats[0]["interval_secs"], 1);
+    assert_eq!(heartbeats[1]["sequence"], 2);
+    let counted: u64 = heartbeats
+        .iter()
+        .filter_map(|beat| beat["calls_since_previous"].as_u64())
+        .sum();
+    assert!(counted >= 1, "heartbeats missed the attested call");
+
+    let out = verify_chain(&trail, &trusted, &bundle);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// `erebus serve` behind the attesting proxy, publishing every receipt.
 fn serve_command(
     bundle: &Path,
