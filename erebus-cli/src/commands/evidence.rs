@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use clap::{Args, Subcommand};
 use ed25519_dalek::VerifyingKey;
-use erebus_core::attest::{key_fingerprint, Attestation};
+use erebus_core::attest::{key_fingerprint, Attestation, ExecutionInfo, HeartbeatInfo};
 use erebus_core::attest_log::{AttestationLog, HEAD_FILE};
 use erebus_core::log_proof::LogProof;
 use erebus_core::paths::trusted_keys_dir;
@@ -22,8 +22,11 @@ use std::path::{Path, PathBuf};
 use super::verify_attest as va;
 
 /// Pack format identifier; bump on any layout or manifest change.
-pub const SPEC: &str = "erebus-evidence/1";
+pub const SPEC: &str = "erebus-evidence/2";
+/// Packs made before coverage reporting; still verifiable, without coverage.
+const LEGACY_SPEC: &str = "erebus-evidence/1";
 const MANIFEST: &str = "MANIFEST.json";
+const COVERAGE: &str = "COVERAGE.json";
 /// Bundles with embedded weights reach several GB; anything beyond is hostile.
 const MAX_ENTRY_BYTES: u64 = 16 << 30;
 
@@ -161,6 +164,34 @@ struct Tally {
     operator_keys: BTreeSet<String>,
 }
 
+/// Coverage derived only from the signed receipts in this trail. It is
+/// re-derived by `verify-evidence`; a packed copy that disagrees is tampering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Coverage {
+    /// ISO 8601 bounds of the receipts examined.
+    from: String,
+    to: String,
+    /// Inference calls attested by the gateway (`execution.request`).
+    gateway_calls: u64,
+    /// Signed liveness ticks and the sequence interval they cover.
+    heartbeats: Heartbeats,
+    /// Call deltas signed by those ticks (may precede a window's first receipt).
+    calls_in_heartbeats: u64,
+    /// Launcher-attested executions with no gateway request: runs outside it.
+    outside_gateway: Vec<String>,
+    /// Sequence gaps or call-count mismatches, in signed order.
+    gaps: Vec<String>,
+    /// True only when no gap and no run outside the gateway was found.
+    complete: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct Heartbeats {
+    count: u64,
+    first_sequence: Option<u64>,
+    last_sequence: Option<u64>,
+}
+
 /// Keys a pack is checked against: operator keys sign receipts; registry
 /// (log) keys certify machines and checkpoints. The two sets must be disjoint.
 struct Keys {
@@ -174,6 +205,116 @@ type Entries = Vec<(String, Vec<u8>)>;
 pub fn run(args: EvidenceArgs) -> Result<()> {
     match args.command {
         EvidenceCommand::Export(a) => export(&a),
+    }
+}
+
+// ── coverage ────────────────────────────────────────────────────────────
+
+/// Coverage is a view of signed execution facts, never an independent traffic
+/// measurement: traffic that produced no receipt is invisible here.
+fn coverage(executions: &[ExecutionInfo]) -> Result<Coverage> {
+    let first = executions.first().context("no receipts")?;
+    let last = executions.last().context("no receipts")?;
+    let mut state = CoverageState::default();
+    for e in executions {
+        state.observe(e);
+    }
+    Ok(state.finish(&first.attested_at, &last.attested_at))
+}
+
+fn executions(receipts: &Receipts) -> Result<Vec<ExecutionInfo>> {
+    receipts
+        .iter()
+        .map(|(path, _)| {
+            let att: Attestation = serde_json::from_slice(&std::fs::read(path)?)?;
+            Ok(att.execution)
+        })
+        .collect()
+}
+
+fn manifest_receipts(dir: &Path, m: &Manifest) -> Receipts {
+    m.receipts
+        .iter()
+        .map(|r| (dir.join(&r.receipt), r.proof.as_ref().map(|p| dir.join(p))))
+        .collect()
+}
+
+/// A launcher-attested execution that never passed the attesting proxy.
+fn outside_gateway(e: &ExecutionInfo) -> bool {
+    e.request.is_none()
+        && e.heartbeat.is_none()
+        && e.stop.is_none()
+        && (e.rootfs_root.is_some()
+            || e.exit_code.is_some()
+            || e.input_hash.is_some()
+            || e.output_hash.is_some())
+}
+
+#[derive(Default)]
+struct CoverageState {
+    gateway_calls: u64,
+    since_beat: u64,
+    prev_seq: Option<u64>,
+    beats: Heartbeats,
+    calls_in_heartbeats: u64,
+    outside: Vec<String>,
+    gaps: Vec<String>,
+}
+
+impl CoverageState {
+    fn observe(&mut self, e: &ExecutionInfo) {
+        if e.request.is_some() {
+            self.gateway_calls += 1;
+            self.since_beat += 1;
+        }
+        if let Some(h) = &e.heartbeat {
+            self.tick(h);
+        }
+        if outside_gateway(e) {
+            self.outside.push(e.attested_at.clone());
+        }
+    }
+
+    /// Only consecutive ticks bound a window: the first tick of a window may
+    /// count calls before it, so its delta cannot be checked against the pack.
+    fn tick(&mut self, h: &HeartbeatInfo) {
+        if let Some(p) = self.prev_seq {
+            if p.saturating_add(1) == h.sequence && self.since_beat != h.calls_since_previous {
+                self.gaps.push(format!(
+                    "heartbeat {} counts {} call(s), trail has {}",
+                    h.sequence, h.calls_since_previous, self.since_beat
+                ));
+            } else if p.saturating_add(1) != h.sequence {
+                self.gaps
+                    .push(format!("heartbeat sequence {p} -> {}", h.sequence));
+            }
+        }
+        self.calls_in_heartbeats += h.calls_since_previous;
+        self.beats.count += 1;
+        self.beats.first_sequence.get_or_insert(h.sequence);
+        self.beats.last_sequence = Some(h.sequence);
+        self.prev_seq = Some(h.sequence);
+        self.since_beat = 0;
+    }
+
+    fn finish(mut self, from: &str, to: &str) -> Coverage {
+        if self.beats.count > 0 && self.since_beat > 0 {
+            self.gaps.push(format!(
+                "{} gateway call(s) after the last heartbeat",
+                self.since_beat
+            ));
+        }
+        let complete = self.gaps.is_empty() && self.outside.is_empty();
+        Coverage {
+            from: from.to_string(),
+            to: to.to_string(),
+            gateway_calls: self.gateway_calls,
+            heartbeats: self.beats,
+            calls_in_heartbeats: self.calls_in_heartbeats,
+            gaps: self.gaps,
+            outside_gateway: self.outside,
+            complete,
+        }
     }
 }
 
@@ -195,7 +336,9 @@ fn export(args: &ExportArgs) -> Result<()> {
         .context("refusing to export evidence that does not verify")?;
     let receipts = filter_window(&all, args.since.as_deref(), args.until.as_deref())?;
     let (_, tally) = verify_trail(&trail, &receipts, &keys, &sha256)?;
-    let mut entries = pack_entries(&receipts, &keys.operator, &log_keys, &tally)?;
+    let cov = coverage(&executions(&receipts)?)?;
+    let mut entries = pack_entries(&receipts, &keys.operator, &log_keys, &tally, &cov)?;
+    entries.push((COVERAGE.to_string(), serde_json::to_vec_pretty(&cov)?));
     if args.since.is_some() || args.until.is_some() {
         entries.push(("CLAIM.json".into(), claim_bytes(args, &receipts)?));
     }
@@ -340,6 +483,7 @@ fn pack_entries(
     operator: &[VerifyingKey],
     log_keys: &[VerifyingKey],
     tally: &Tally,
+    cov: &Coverage,
 ) -> Result<Entries> {
     let mut out = Entries::new();
     for (receipt, proof) in receipts {
@@ -356,7 +500,7 @@ fn pack_entries(
         .filter(|k| tally.operator_keys.contains(&hex::encode(k.as_bytes())));
     key_entries("keys/operator", used, &mut out);
     key_entries("keys/registry", log_keys.iter(), &mut out);
-    out.push(("README.txt".to_string(), readme(tally).into_bytes()));
+    out.push(("README.txt".to_string(), readme(tally, cov).into_bytes()));
     Ok(out)
 }
 
@@ -676,10 +820,11 @@ fn write_zip(
     Ok(())
 }
 
-fn readme(tally: &Tally) -> String {
+fn readme(tally: &Tally, cov: &Coverage) -> String {
     format!(
         "erebus evidence pack ({SPEC})\n\n\
-         {} execution receipt(s), {} transparency-log proof(s), {} RFC 3161 token(s).\n\n\
+         {} execution receipt(s), {} transparency-log proof(s), {} RFC 3161 token(s).\n\
+         Coverage: {} gateway call(s), {} heartbeat(s), {} run(s) outside gateway; complete={}.\n\n\
          Verify everything offline (no network, no account):\n  \
          erebus verify-evidence <this-pack>.zip --bundle <bundle file> \\\n    \
          --operator-key <operator public key hex> --log-key <registry /log/key hex>\n\n\
@@ -689,6 +834,7 @@ fn readme(tally: &Tally) -> String {
          Layout\n  \
          trail/          receipts byte-for-byte (+ .proof.json, HEAD); each receipt names\n                  \
          the previous one's hash, so reordering or deleting inside the trail breaks it\n  \
+         COVERAGE.json   derived from the signed receipts; verify-evidence re-derives it\n  \
          keys/operator/  public keys that signed the receipts (.pub raw, .pem SPKI)\n  \
          keys/registry/  transparency-log key: signs checkpoints and machine certificates\n  \
          anchors/        RFC 3161 responses (.tsr) and the checkpoint bytes they cover\n  \
@@ -703,10 +849,18 @@ fn readme(tally: &Tally) -> String {
          What this proves: which exact bundle ran, on which enrolled machine, when, with\n\
          which input/output digests, and that the record was not edited afterwards.\n\
          It does not prove the computation was correct, nor reveal plaintext.\n\
+         Coverage is computed from receipts only: traffic that never produced a receipt\n\
+         is invisible here, so this pack is not proof that every run was captured.\n\
          Deletion of the newest receipts is detected by the transparency log (its\n\
          signed tree only grows), not by this pack alone. MANIFEST.json is an index,\n\
          not a signature: trust comes from the signatures inside the files.\n",
-        tally.receipts, tally.proofs, tally.anchors
+        tally.receipts,
+        tally.proofs,
+        tally.anchors,
+        cov.gateway_calls,
+        cov.heartbeats.count,
+        cov.outside_gateway.len(),
+        cov.complete
     )
 }
 
@@ -720,8 +874,8 @@ pub fn run_verify(args: VerifyEvidenceArgs) -> Result<()> {
     )
     .context("failed to parse MANIFEST.json")?;
     anyhow::ensure!(
-        manifest.spec == SPEC,
-        "unsupported evidence pack spec {:?} (this erebus reads {SPEC})",
+        manifest.spec == SPEC || manifest.spec == LEGACY_SPEC,
+        "unsupported evidence pack spec {:?} (this erebus reads {SPEC} or {LEGACY_SPEC})",
         manifest.spec
     );
     let report = check_files(dir.path(), &manifest, &names)
@@ -814,7 +968,21 @@ fn verify_unpacked(
             "TAMPERED: trail HEAD differs from the manifest"
         );
     }
-    let mut report = report_json(m, &tally, bundle_checked);
+    let cov = if m.spec == LEGACY_SPEC {
+        None
+    } else {
+        let packed: Coverage = serde_json::from_slice(
+            &std::fs::read(dir.join(COVERAGE)).context("pack has no COVERAGE.json")?,
+        )
+        .context("failed to parse COVERAGE.json")?;
+        let derived = coverage(&executions(&manifest_receipts(dir, m))?)?;
+        anyhow::ensure!(
+            packed == derived,
+            "TAMPERED: COVERAGE.json does not match the signed receipts"
+        );
+        Some(packed)
+    };
+    let mut report = report_json(m, &tally, bundle_checked, cov.as_ref())?;
     report["keys"] = key_ids;
     Ok(report)
 }
@@ -929,8 +1097,13 @@ fn verify_row(
     Ok(())
 }
 
-fn report_json(m: &Manifest, t: &Tally, bundle_checked: bool) -> serde_json::Value {
-    serde_json::json!({
+fn report_json(
+    m: &Manifest,
+    t: &Tally,
+    bundle_checked: bool,
+    cov: Option<&Coverage>,
+) -> Result<serde_json::Value> {
+    let mut report = serde_json::json!({
         "verified": true,
         "spec": m.spec,
         "created_at": m.created_at,
@@ -942,7 +1115,11 @@ fn report_json(m: &Manifest, t: &Tally, bundle_checked: bool) -> serde_json::Val
         "log_proofs": t.proofs,
         "tsa_anchors": t.anchors,
         "files": m.files.len(),
-    })
+    });
+    if let Some(cov) = cov {
+        report["coverage"] = serde_json::to_value(cov)?;
+    }
+    Ok(report)
 }
 
 fn print_keys(k: &serde_json::Value) {
@@ -969,6 +1146,26 @@ fn print_keys(k: &serde_json::Value) {
             "  warning: keys come from the pack itself; confirm them with the operator and \
              registry out of band, then pass --operator-key / --log-key"
         );
+    }
+}
+
+fn print_coverage(c: &serde_json::Value) {
+    let h = &c["heartbeats"];
+    let seq = |k: &str| {
+        h[k].as_u64()
+            .map_or_else(|| "-".to_string(), |v| v.to_string())
+    };
+    eprintln!(
+        "  coverage:   {} gateway call(s), {} heartbeat(s) seq {}..{}, {} run(s) outside gateway, complete={}",
+        c["gateway_calls"].as_u64().unwrap_or(0),
+        h["count"].as_u64().unwrap_or(0),
+        seq("first_sequence"),
+        seq("last_sequence"),
+        c["outside_gateway"].as_array().map_or(0, Vec::len),
+        c["complete"].as_bool().unwrap_or(false)
+    );
+    for gap in c["gaps"].as_array().into_iter().flatten() {
+        eprintln!("  gap:        {}", gap.as_str().unwrap_or("?"));
     }
 }
 
@@ -1006,6 +1203,9 @@ fn print_report(r: &serde_json::Value) {
         "  files:      {} hashed — none missing, none extra",
         n("files")
     );
+    if let Some(c) = r.get("coverage") {
+        print_coverage(c);
+    }
     print_keys(&r["keys"]);
     if n("tsa_anchors") > 0 {
         eprintln!(
@@ -1038,6 +1238,101 @@ fn sha256_hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
+    use erebus_core::attest::RequestInfo;
+
+    fn exec(at: &str, call: bool, beat: Option<HeartbeatInfo>, direct: bool) -> ExecutionInfo {
+        ExecutionInfo {
+            attested_at: at.to_string(),
+            machine_id_hash: String::new(),
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+            input_hash: None,
+            output_hash: None,
+            exit_code: direct.then_some(0),
+            prev_attestation_hash: None,
+            request: call.then(|| RequestInfo {
+                method: "POST".to_string(),
+                path: "/v1/chat/completions".to_string(),
+                ..RequestInfo::default()
+            }),
+            rootfs_root: None,
+            machine_id: None,
+            stdin_hash: None,
+            egress: None,
+            stop: None,
+            approval: None,
+            heartbeat: beat,
+        }
+    }
+
+    #[test]
+    fn coverage_flags_outside_gateway_runs_and_sequence_gaps() {
+        let all = vec![
+            exec("t1", true, None, false),
+            exec(
+                "t2",
+                false,
+                Some(HeartbeatInfo {
+                    sequence: 1,
+                    interval_secs: 60,
+                    calls_since_previous: 1,
+                }),
+                false,
+            ),
+            exec("t3", false, None, true),
+            exec(
+                "t4",
+                false,
+                Some(HeartbeatInfo {
+                    sequence: 3,
+                    interval_secs: 60,
+                    calls_since_previous: 0,
+                }),
+                false,
+            ),
+        ];
+        let c = coverage(&all).unwrap();
+        assert_eq!(c.from, "t1");
+        assert_eq!(c.to, "t4");
+        assert_eq!(c.gateway_calls, 1);
+        assert_eq!(c.heartbeats.count, 2);
+        assert_eq!(c.outside_gateway, vec!["t3".to_string()]);
+        assert!(c.gaps.iter().any(|g| g.contains("sequence 1 -> 3")));
+        assert!(!c.complete);
+    }
+
+    #[test]
+    fn coverage_is_complete_when_ticks_match_gateway_calls() {
+        let all = vec![
+            exec("t1", true, None, false),
+            exec(
+                "t2",
+                false,
+                Some(HeartbeatInfo {
+                    sequence: 1,
+                    interval_secs: 60,
+                    calls_since_previous: 1,
+                }),
+                false,
+            ),
+            exec("t3", true, None, false),
+            exec(
+                "t4",
+                false,
+                Some(HeartbeatInfo {
+                    sequence: 2,
+                    interval_secs: 60,
+                    calls_since_previous: 1,
+                }),
+                false,
+            ),
+        ];
+        let c = coverage(&all).unwrap();
+        assert!(c.gaps.is_empty());
+        assert!(c.outside_gateway.is_empty());
+        assert_eq!(c.calls_in_heartbeats, 2);
+        assert!(c.complete);
+    }
 
     #[test]
     fn pins_refuse_a_shared_operator_and_registry_key() {
