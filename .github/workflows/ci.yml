@@ -64,6 +64,10 @@ jobs:
         timeout-minutes: 10
         run: python3 scripts/test_trust_center.py
 
+      - name: Test logical retention
+        timeout-minutes: 10
+        run: python3 scripts/test_retention.py
+
       # P0-6: an auditor's kit verifies a real pack offline, with pinned keys
       # and stock cosign, and refuses a doctored copy. No account, no registry.
       - name: Auditor kit offline proof

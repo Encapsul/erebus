@@ -144,6 +144,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_index()
         if path == "/admin/gc":
             return self._admin_gc()
+        if path == "/admin/retention":
+            return self._admin_retention_get()
         if path == "/admin/scan":
             return self._admin_scan()
         if path == "/webhooks" and self.command == "GET":
@@ -270,6 +272,32 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(trust_result, status)
         self.store.record_audit(user, "backup_restore", f"{len(restored)} packages")
         return self.send_json({"restored": restored, "trust_center": trust_result})
+
+    def _admin_retention_get(self):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        if not self.store.is_admin(user):
+            return self.send_json({"error": "admin role required"}, 403)
+        return self.send_json(self.store.retention.as_dict())
+
+    def _admin_retention_post(self, raw: bytes | None):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        if not self.store.is_admin(user):
+            return self.send_json({"error": "admin role required"}, 403)
+        payload = self._read_json(raw)
+        if payload is None:
+            return self.send_json({"error": "invalid json"}, 400)
+        try:
+            policy = self.store.retention.update(payload, user, self.store.lock)
+        except ValueError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        keys = ("default_days", "rules", "legal_hold")
+        target = json.dumps({k: policy[k] for k in keys}, sort_keys=True)
+        self.store.record_audit(user, "retention_policy_update", target)
+        return self.send_json(policy)
 
     def _send_index(self):
         body = self.store.index()
@@ -792,6 +820,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/admin/restore":
             body = self.read_body(100_000_000)
             return self._admin_restore(body)
+        if path == "/admin/retention":
+            body = self.read_body(65536)
+            return self._admin_retention_post(body)
         if path == "/webhooks/github":
             body = self.read_body(65536)
             return self._provider_webhook("github", body)

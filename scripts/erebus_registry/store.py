@@ -21,6 +21,7 @@ from erebus_registry.artifacts import (
     verify_integrity,
 )
 from erebus_registry.ed25519 import _ed25519_verify
+from erebus_registry.retention import RetentionPolicy
 from erebus_registry.tlog import TransparencyLog, load_or_create_log_key
 from erebus_registry.trust_center import TrustCenter
 from erebus_registry.util import (
@@ -66,6 +67,8 @@ class Store:
         self.stats_path = os.path.join(root, "stats.json")
         self.waitlist_path = os.path.join(root, "waitlist.txt")
         self.orgs_path = os.path.join(root, "orgs.json")
+        self.retention_path = os.path.join(root, "retention.json")
+        self.retention = RetentionPolicy(self.retention_path)
         self.audit_dir = os.path.join(root, "audit")
         os.makedirs(self.audit_dir, exist_ok=True)
         self.quota_bytes = quota_bytes

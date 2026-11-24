@@ -159,10 +159,14 @@ backup/restore.
   exact receipt bytes.
 - `verified` means the receipt's signature, chain link and log inclusion
   re-check from stored bytes. It does not claim every execution was captured.
-  Retention policy and control mapping are not implemented.
+  Logical retention hides receipts from trust-center views after a server-side
+  `ingested_at` window, with admin legal hold; it does not purge proof bytes.
+  Control mapping is not implemented.
 - Automated acceptance is green: 1,000 receipts, no-account verification,
-  export, tamper rejection and restore (`scripts/test_trust_center.py`).
-  Design-partner proof remains a P0-5 deliverable, not a shipped claim.
+  export, tamper rejection and restore (`scripts/test_trust_center.py`), plus
+  expiry hiding, legal hold, chain continuity and policy restore
+  (`scripts/test_retention.py`). Design-partner proof remains a P0-5
+  deliverable, not a shipped claim.
 
 #### P0-3 — Integration without repackaging
 
@@ -297,7 +301,7 @@ deployment** now. A hosted trust center is a later tier and is not shipped.
 | Tier | Price hypothesis | Includes |
 |---|---|---|
 | Free | €0 | public packages, local receipts, self-hosted registry, evidence export, `auditor/verify_pack.py` |
-| Air-Gapped Evidence Deployment — sell now | **$25k/yr** | one deployment inside one perimeter (one agent family): self-hosted trust center, auditor handoff, SSO/SLA/retention as needed. Fixed annual invoice or PO; no seat count or usage meter |
+| Air-Gapped Evidence Deployment — sell now | **$25k/yr** | one deployment inside one perimeter (one agent family): self-hosted trust center, logical retention, auditor handoff, existing registry auth; SSO/SLA scoped separately. Fixed annual invoice or PO; no seat count or usage meter |
 | Team — hosted, not shipped | $1.5k/mo billed annually | hosted trust center, private receipts, verification links, evidence packs, RBAC |
 | Enterprise+ | per protected agent/node | fleet identity, coverage monitoring, full history — not priced yet |
 

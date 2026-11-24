@@ -25,7 +25,7 @@ what was executed and tamper evidence for the record of it.
 |---|---|---|
 | The computation was *faithful*: output really is `f(input, weights)` | Proving this needs hardware enclaves (TEE attestation) or zkML, 100–1000× the cost of the inference; nobody runs it on production LLMs | Roadmap option: run inside a confidential VM and embed the TEE quote in the receipt. Not planned before a customer asks. |
 | The agent did the *right* thing — correct, safe, within policy | That is a judgement about semantics, made *before* deployment by evaluations and guardrails. erebus records what happened; it does not grade it. | Your eval suite; the receipt then proves the graded version is the one that ran. |
-| The *plaintext* of inputs and outputs | Receipts carry digests, not content. The operator keeps the data; the digest proves that what they hand the auditor is what was hashed at run time. | Retention is the operator's job; `erebus audit` bundles receipts + evidence. |
+| The *plaintext* of inputs and outputs | Receipts carry digests, not content. The operator keeps the data; the digest proves that what they hand the auditor is what was hashed at run time. | The self-hosted trust center can hide receipts under a logical retention policy, but does not purge their bytes; `erebus audit` bundles receipts + evidence. |
 | A host with root compromised | The machine key is a software key in `~/.local/share/erebus/machine/machine.key` (0600). Root can copy it. | TPM2-bound key and quote (roadmap, optional per fleet). |
 | That **every** run was captured | A receipt proves a run happened; an operator can choose not to route traffic through erebus. | Signed launch policy requiring a verified receipt for the exact artifact, attested gateway (`erebus serve --attest-key`), independent traffic/receipt monitor, heartbeat receipts and `COVERAGE.json` in every pack — see [Coverage is not completeness](#coverage-is-not-completeness). |
 | The RFC 3161 token is cryptographically valid | erebus parses the TSTInfo structurally: the imprint must be `messageImprint`, and the displayed time is that TSTInfo's `genTime` (never the unsigned JSON hint) | `openssl ts -verify` against the TSA chain, documented in the spec |
@@ -99,9 +99,11 @@ signed by the pinned log key. `missing` means no stored/logged receipt;
 `failed` means one of those checks did not pass.
 
 The hosted trust center is **not shipped** and remains the paid surface. The
-self-hosted MVP does not map receipts to controls, enforce retention, or claim
-that every execution was captured. It accepts receipts that an agent or gateway
-actually posted; the separate completeness story is the attested gateway,
+self-hosted MVP does not map receipts to controls, physically purge receipts, or
+claim that every execution was captured. Its retention policy hides receipts from
+trust-center views after a server-side `ingested_at` window; legal hold overrides
+expiry and the proof bytes stay intact. It accepts receipts that an agent or
+gateway actually posted; the separate completeness story is the attested gateway,
 signed launch policy, heartbeat receipts, `COVERAGE.json`, `erebus monitor` and
 their shared limitation described above. See
 [Self-hosted trust center (MVP)](../guides/self-hosted-trust-center.md).

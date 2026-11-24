@@ -2,8 +2,9 @@
 
 This is the **self-hosted** trust center: a thin product surface on the existing
 stdlib registry. It is not a hosted SaaS, and the hosted trust center remains
-unshipped and paid. There is no control mapping and no retention policy engine
-yet. The registry already owns users, orgs, tokens, the Merkle transparency log,
+unshipped and paid. There is no control mapping. Logical retention ships: an
+admin can hide receipts from trust-center views without deleting proof bytes.
+The registry already owns users, orgs, tokens, the Merkle transparency log,
 signed checkpoints, inclusion proofs, the audit trail and admin backup/restore;
 the trust center adds projects, API keys, receipt intake, status, search, share
 links and evidence export on top of those primitives.
@@ -118,18 +119,43 @@ erebus verify-attest receipts/<id>.json \
   --proof-file proofs/<id>.proof.json --log-key <log public key hex>
 ```
 
+## Logical retention
+
+Admin users listed in `ERE_ADMIN_USERS` can read and replace the policy at
+`<root>/retention.json` through `/admin/retention`:
+
+```bash
+curl -sS http://localhost:8787/admin/retention \
+  -H 'Authorization: Bearer <admin token>'
+
+curl -sS -X POST http://localhost:8787/admin/retention \
+  -H 'Authorization: Bearer <admin token>' -H 'Content-Type: application/json' \
+  -d '{"default_days":365,"rules":[{"project":"alice/pilot","days":30}],
+       "legal_hold":{"projects":[],"receipts":[]}}'
+```
+
+The default policy is a no-op (`default_days: null`, no rules, no holds). Days
+are counted from the server-side `ingested_at`, not the signed `attested_at`.
+`default_days: 0` hides receipts on the next read; a project rule overrides the
+default; a legal hold on the project or receipt overrides expiry. Expired
+receipts disappear from list/search, direct get, evidence export, share links
+and public evidence packs. Their SQLite bytes, Merkle proofs, project chain
+HEAD, backups and offline verification are unchanged. Every policy change is
+audited. This is logical retention, not physical purge.
+
 ## Backup and restore
 
 `GET /admin/backup` (admin token only) returns the registry manifest with a
-`trust_center` object: project/key/receipt/share state plus the exact receipt
-bytes. `POST /admin/restore` accepts that manifest. Restore re-appends receipts
-to the transparency log, so run it on a fresh registry state with the **same
-`log.key`** and the same `ERE_ADMIN_USERS`. Keep `log.key` and `users.json`
-outside the export; the manifest says so explicitly. Package blobs are backed
-up separately by the existing `/admin/backup` flow.
+`trust_center` object: project/key/receipt/share state, the retention policy and
+the exact receipt bytes. `POST /admin/restore` accepts that manifest. Restore
+re-appends receipts to the transparency log and applies the policy if the backup
+contains one, so run it on a fresh registry state with the **same `log.key`** and
+the same `ERE_ADMIN_USERS`. Keep `log.key` and `users.json` outside the export;
+the manifest says so explicitly. Package blobs are backed up separately by the
+existing `/admin/backup` flow.
 
 This is an MVP restore path, not a full disaster-recovery or high-availability
-story: there is no replication quorum, no retention enforcement, and no hosted
+story: there is no replication quorum, no physical retention purge, and no hosted
 operator on call.
 
 ## Limits of the MVP

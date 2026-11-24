@@ -361,13 +361,18 @@ class TrustCenter:
         meta = self.state["receipts"].get(receipt_id)
         if not meta or meta["project"] != project_id:
             return 404, {"error": "receipt not found"}
+        if self.store.retention.expired(meta):
+            return 404, {"error": "receipt not found"}
         return 200, self.receipt_response(receipt_id, base_url)
 
     def query(self, project_id: str, filters: dict, limit: int,
               skip: int) -> tuple[int, list[dict]]:
         if not self.project(project_id):
             return 0, []
-        rows = [r for r in self.state["receipts"].values() if r["project"] == project_id]
+        rows = [
+            r for r in self.state["receipts"].values()
+            if r["project"] == project_id and not self.store.retention.expired(r)
+        ]
         if filters.get("id"):
             rows = [r for r in rows if r["id"] == filters["id"]]
         for key in ("bundle", "machine"):
@@ -393,6 +398,8 @@ class TrustCenter:
         meta = self.state["receipts"].get(receipt_id)
         if not meta or self.role(actor, meta["project"]) is None:
             return 403, {"error": "project access denied"}
+        if self.store.retention.expired(meta):
+            return 404, {"error": "receipt not found"}
         token = secrets.token_urlsafe(24)
         with self.lock:
             self.state["shares"][receipt_id] = {
@@ -413,7 +420,9 @@ class TrustCenter:
 
     def public_view(self, receipt_id: str, token: str | None) -> dict | None:
         meta = self.state["receipts"].get(receipt_id)
-        if not meta or not self.shared(receipt_id, token):
+        if not meta or self.store.retention.expired(meta):
+            return None
+        if not self.shared(receipt_id, token):
             return None
         response = self.receipt_response(receipt_id, "")
         project = self.project(meta["project"])
@@ -495,12 +504,17 @@ class TrustCenter:
     def status_page(self) -> dict:
         counts = {"verified": 0, "missing": 0, "failed": 0}
         with self.lock:
-            for receipt_id in self.state["receipts"]:
-                counts[self.status(receipt_id)] += 1
+            visible = [
+                r for r in self.state["receipts"].values()
+                if not self.store.retention.expired(r)
+            ]
+            for meta in visible:
+                counts[self.status(meta["id"])] += 1
             return {
                 "status": "operational", "products": "self-hosted trust center MVP",
                 "projects": len(self.state["projects"]),
-                "receipts": len(self.state["receipts"]),
+                "receipts": len(visible),
+                "retention_hidden": len(self.state["receipts"]) - len(visible),
                 "log_size": self.store.log.size(), "log_origin": self.store.log.origin,
                 "counts": counts, "generated_at": _now(),
             }
@@ -518,6 +532,7 @@ class TrustCenter:
             return {
                 "kind": "erebus-trust-center-backup/1",
                 "generated_at": _now(), "state": self.state, "receipts": receipts,
+                "retention": self.store.retention.as_dict(),
                 "note": "Keep the registry log.key and users.json outside this export.",
             }
 
@@ -527,6 +542,13 @@ class TrustCenter:
         state = payload.get("state") or {}
         if not all(k in state for k in ("projects", "receipts", "shares")):
             return 400, {"error": "backup state is incomplete"}
+        policy = payload.get("retention")
+        policy_data = None
+        if policy is not None:
+            try:
+                policy_data = self.store.retention.validate(policy)
+            except ValueError as exc:
+                return 400, {"error": f"invalid retention policy: {exc}"}
         entries = payload.get("receipts") or []
         restored = 0
         for entry in entries:
@@ -543,5 +565,13 @@ class TrustCenter:
         with self.lock:
             self.state = state
             self._save()
+            if policy_data is not None:
+                self.store.retention.save(policy_data)
         self.store.record_audit("admin", "trust_restore", f"{restored} receipts")
-        return 200, {"restored": restored, "projects": len(state["projects"])}
+        if policy_data is not None:
+            self.store.record_audit(
+                "admin", "retention_policy_restore", f"version={policy_data['version']}")
+        return 200, {
+            "restored": restored, "projects": len(state["projects"]),
+            "retention": policy_data is not None,
+        }

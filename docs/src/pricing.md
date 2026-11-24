@@ -15,7 +15,7 @@ We have no paid pilots, no LOIs and no production customers.
 | Tier | Price hypothesis | Includes |
 |---|---|---|
 | Free | €0 | public packages, local receipts, self-hosted registry, evidence export, `auditor/verify_pack.py` |
-| Air-Gapped Evidence Deployment, sell now | **$25k/yr** | one deployment inside one perimeter (one agent family): self-hosted trust center, auditor handoff, SSO/SLA/retention as needed. Fixed annual invoice or PO; no seat count or usage meter |
+| Air-Gapped Evidence Deployment, sell now | **$25k/yr** | one deployment inside one perimeter (one agent family): self-hosted trust center, logical retention, auditor handoff, existing registry auth; SSO/SLA scoped separately. Fixed annual invoice or PO; no seat count or usage meter |
 | Team, hosted and not shipped | $1.5k/mo billed annually | hosted trust center, private receipts, verification links, evidence packs, RBAC |
 | Enterprise+ | per protected agent/node | fleet identity, coverage monitoring, full history; not priced yet |
 
