@@ -11,20 +11,21 @@
 
 **The trust center for AI agents.**
 
-AI agents now act in environments their vendor does not control: customer
-sites, edge fleets, factories, vehicles, air-gapped networks. The buyer,
-auditor or regulator asks a simple question: *what exactly ran, where, when,
-and what did it do?* Application logs and tracing dashboards cannot answer it:
-the operator can edit them.
+AI agents run on machines their vendor does not control: customer sites, edge
+fleets, factories, vehicles, air-gapped networks. The buyer, auditor or
+regulator asks which version ran, where and when, and what it did. Application
+logs and tracing dashboards cannot answer that question for the buyer. The
+operator can edit them.
 
-erebus produces a signed, hash-chained, externally anchored receipt for every
-agent run. The receipt binds the exact bundle and model weights, the enrolled
-machine, the time, the inputs, outputs and tool calls. It verifies offline
-with `erebus` or stock `cosign`; the auditor needs no account, no network and
-no trust in the operator.
+erebus signs a receipt for each run. The signed statement binds the bundle and
+model-weight digests, the enrolled machine, the time, the input, output and
+tool-call digests, and the previous receipt hash. A verifier checks it offline
+with `erebus` or stock `cosign`. The verifier needs no account, no network call
+to us and no trust in the operator's copy of the record.
 
-We are building the trust center on top of that proof chain: the place where
-an AI vendor publishes evidence and a regulated buyer verifies it.
+The proof chain ships. erebus is also the trust center built on it: the place
+where an AI vendor publishes evidence and a regulated buyer verifies it. The
+shipped MVP is self-hosted. The hosted service is not shipped.
 
 ## What we are building
 
@@ -49,6 +50,15 @@ administration, critical infrastructure, financial services and industrial
 edge. The buyer is the vendor's CISO, compliance lead or CTO. The economic
 buyer is the regulated customer or auditor who requires evidence.
 
+**Lead wedge: on-prem / air-gapped edge.** Defense, public administration,
+critical infrastructure and industrial buyers often forbid a vendor
+call-home. Their acceptance path must stay inside the perimeter: self-hosted
+registry, one evidence zip, public keys pinned out of band, `verify-evidence`
+or `cosign`, and the [auditor kit](auditor/README.md). Several vendors already
+claim Ed25519 and hash chains. Our paid scope is the buyer's ability to verify
+locally, with no erebus account and no hosted service. The hosted trust center
+is not shipped.
+
 Not for: hobbyist developers, inference hosting, or teams that only need
 application logs. erebus records digests, not prompts or model outputs.
 
@@ -56,14 +66,19 @@ application logs. erebus records digests, not prompts or model outputs.
 
 - Agents are moving from chat to actions: tool calls, approvals and data
   access now need a record.
-- Enterprise procurement already asks "which model/version ran, on which
-  machine, with what input and output?" — and the vendor's logs are not
-  evidence the buyer controls.
+- Enterprise procurement already asks which model version ran, on which
+  machine, with what input and output. The vendor's logs are not evidence the
+  buyer controls.
 - The standards are mature: DSSE, in-toto, Ed25519, Merkle transparency logs,
   RFC 3161 and `cosign` interop.
 - The EU AI Act high-risk obligations are staggered (Annex III from December
   2027, Annex I from August 2028). We sell the current procurement and audit
   pain, not a single deadline.
+- YC's [Winter 2027 RFS, "AI for the Air-Gapped Economy"](https://www.ycombinator.com/rfs)
+  names defense contractors, banks, hospitals and nuclear plants that keep AI
+  behind walls with no internet, and says that is slower to sell but where the
+  largest budgets and most defensible companies are. Our offline verification
+  path already fits that constraint; hosted SaaS is not required.
 
 ## Install
 
@@ -98,10 +113,9 @@ See [Python SDK](docs/src/guides/python-sdk.md) for the trust boundaries.
 
 ## What an auditor gets
 
-Today, "what did the agent do?" is answered with application logs the operator
-can edit, or with a tracing SaaS the operator controls. erebus answers it with
-evidence that neither the operator, nor the machine, nor erebus itself can
-silently rewrite:
+The usual answer is application logs the operator can edit, or a tracing SaaS
+the operator controls. erebus answers with signed receipts. Changing a receipt
+breaks its signature, its chain link and its log inclusion:
 
 | Question | Application logs | Tracing / observability SaaS | erebus receipt |
 |---|---|---|---|
@@ -112,7 +126,7 @@ silently rewrite:
 | Can I verify it without trusting the vendor? | — | ❌ | ✅ offline, with public keys; or with `cosign verify-blob-attestation` |
 | Does it survive the vendor disappearing? | — | ❌ | ✅ proof files are self-contained |
 
-## Prove what ran — current CLI
+## Prove what ran with the CLI
 
 ```bash
 erebus keygen --key-dir keys                      # operator key (+ <fp>.pem for cosign)
@@ -168,11 +182,15 @@ erebus verify-evidence evidence.zip --bundle agent.erebus \
 
 The pack holds the receipts, inclusion proofs, signed checkpoints, RFC 3161
 responses with the exact checkpoint bytes they cover (`openssl ts -verify`
-passes on the pilot's freetsa.org tokens), DSSE envelopes (for `cosign`) and
-only the public keys that signed them — which the auditor pins, obtained out
-of band. Editing, deleting or adding any file, a key other than the pinned
-ones, or another bundle is refused. Walkthrough:
-[Auditing an erebus trail](docs/src/guides/audit.md).
+passes on the pilot's freetsa.org tokens), DSSE envelopes for `cosign`, and the
+public keys that signed them. The auditor pins those keys out of band. Editing,
+deleting or adding any file, a key other than the pinned ones, or another bundle
+is refused. The [auditor kit](auditor/README.md) wraps the hand-off in one
+offline command (`verify_pack.py`: pinned keys, checked bundle, one inclusion
+proof per receipt, `cosign`, optional TSA check) and is proven in CI against a
+real pack. Walkthrough: [Auditing an erebus trail](docs/src/guides/audit.md).
+The written third-party confirmation is still pending. The kit is tooling, not
+T4 evidence.
 
 What a receipt proves, layer by layer ([spec](docs/src/spec/attestation.md)):
 
@@ -188,11 +206,12 @@ Every value a verifier prints is read from the **signed** statement, never from
 the human-readable copies. Legacy 1.x receipts stay verifiable.
 
 The boundary is [What erebus proves — and what it does not](docs/src/concepts/proof.md).
-Pricing for the hosted trail is [in the book](docs/src/pricing.md).
+Pricing, including the air-gapped deployment tier, is
+[in the book](docs/src/pricing.md).
 
 ## The 90-day product plan
 
-The proof chain is not the bottleneck anymore. Adoption is.
+Adoption is now the bottleneck.
 
 | Weeks | Focus | Done when |
 |---|---|---|
@@ -205,19 +224,23 @@ The proof chain is not the bottleneck anymore. Adoption is.
 The full plan, frozen surfaces and acceptance criteria are in
 [`ROADMAP.md`](ROADMAP.md).
 
-## Status — honest, as of 2026-11-24
+## Status, 2026-11-24
 
 - **Proof chain: complete.** Hardened verifier, hash-chained trail, attesting
   proxy, warm-cache re-verification, Merkle transparency log with RFC 3161
   anchoring, machine identity, DSSE/in-toto with `cosign` interop.
 - **Evidence export: works.** One zip, offline verification, pinned keys.
+- **Auditor kit: ships.** `auditor/verify_pack.py` re-runs `verify-evidence`
+  with pinned keys, checks `cosign` and optional RFC 3161 tokens, and is
+  proven offline against a real pack in CI. It is tooling, not T4.
 - **Internal pilot: running, not complete.** No production customers yet.
 - **Self-hosted trust center MVP: ships.** Projects, API keys, receipt status,
   search, share links, evidence export, status page and tested backup/restore.
 - **Hosted trust center: not shipped.** It remains the paid surface and the
   current product milestone.
 - **Next proof point:** one design partner with a paid pilot and one external
-  auditor verification.
+  auditor verification. The [T4 request brief](auditor/T4-request.md) is ready;
+  the written confirmation is still missing.
 
 The proof chain badge above is the [`proof.yml`](.github/workflows/proof.yml)
 workflow: on every commit and every day, a fresh Linux runner builds erebus
@@ -227,10 +250,10 @@ means every one of those checks passed *today*, not once on a laptop.
 
 ## How it works
 
-The receipts are only as good as the thing that produces them, so erebus is
-also the runtime: it packages an agent — code, runtime, dependencies, model
-weights, engine configuration — into a single self-contained, sandboxed
-binary that verifies itself before it runs.
+A receipt is only as good as the thing that produces it. erebus is also the
+runtime: it packages the agent's code, runtime, dependencies, model weights and
+engine configuration into one sandboxed binary that verifies itself before it
+runs.
 
 ### Quick start
 
@@ -252,7 +275,7 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
   -d '{"model":"agent","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-### Build — declaratively
+### Declarative build
 
 ```yaml
 # Agentfile.yaml — CLI flags override this file
@@ -274,16 +297,15 @@ erebus build . --universal -o agent.erebus  # → 4 platform slices in one file
 
 Legacy `.erebus.toml` still works. Precedence: **CLI > Agentfile > detection**.
 One `--universal` file carries **4 native platform slices** (linux-x64,
-linux-arm64, macos-arm64, windows-x64) behind a POSIX-shell polyglot loader —
-the same 59 MB artifact runs natively on all four
-([validated](benchmarks/universal.md) on real Linux, qemu-arm64 and Windows
-under Wine).
+linux-arm64, macos-arm64, windows-x64) behind a POSIX-shell polyglot loader.
+The same 59 MB artifact runs natively on all four. That was validated on real
+Linux, qemu-arm64 and Windows under Wine ([numbers](benchmarks/universal.md)).
 
 ### Run anywhere
 
 The stub verifies its own SHA-256, extracts into a content-addressed cache,
 records a Merkle manifest of the rootfs (`rootfs.merkle`, re-checked on every
-warm start — any drift triggers re-extraction and the root is signed into the
+warm start; any drift triggers re-extraction and the root is signed into the
 receipt), exports GPU facts (`ERE_GPU`, `ERE_VRAM_MB`, `ERE_NGL`) and execs the
 entrypoint inside Linux namespaces + seccomp/Landlock. GPU offload is
 auto-tuned at launch: `nvidia-smi` probe → ROCm `/dev/kfd` → Metal; pins
@@ -307,12 +329,12 @@ erebus resolves the engine from the model format and launches it for you:
 
 Missing engine on the target? If `ERE_REGISTRY` points at your registry,
 `serve` transparently downloads `<engine>-<platform>.pack.tar.gz`, verifies its
-SHA-256 sidecar and caches it — no llama.cpp install needed. Offline hosts can
-pre-seed it with `erebus layer push llama-server.tar.gz --name runtime/llama-server`.
-Measured on CPU: TinyLlama Q4_K_M cold-start < 45 s, warm completions ≈ 5 s —
-full numbers in [benchmarks/serve.md](benchmarks/serve.md).
+SHA-256 sidecar and caches it. No llama.cpp install is needed. Offline hosts
+can pre-seed it with `erebus layer push llama-server.tar.gz --name runtime/llama-server`.
+Measured on CPU: TinyLlama Q4_K_M cold-start < 45 s, warm completions ≈ 5 s.
+Full numbers are in [benchmarks/serve.md](benchmarks/serve.md).
 
-### Your own registry — packages and transparency log
+### Your own registry
 
 ```bash
 python3 scripts/registry_server.py --dir ~/erebus-registry --host 0.0.0.0 --port 8787 \
@@ -325,14 +347,16 @@ erebus attest agent.erebus --push # receipt → Merkle log, proof stored next to
 
 Stdlib-only Python, no dependencies: `scripts/registry_server.py` plus its
 proof-core package `scripts/erebus_registry/` (Ed25519, Merkle tree, RFC 3161,
-transparency log — byte formats pinned by tests on both the Python and Rust
-sides). Packages, accounts and quotas (HTTP 402 when exceeded, never silent
-throttling), private packages, machine enrollment (`/machines/enroll`), and a
-**SQLite Merkle transparency log** (RFC 6962) with Ed25519-signed checkpoints,
-O(log n) inclusion/consistency proofs (`/log/*`) and RFC 3161 anchoring. Hardened against traversal, bad filenames,
-tampered indexes; chaos-tested — concurrent same-name uploads leave one atomic
-winner, replace-during-read never serves truncated blobs, SIGKILL mid-publish
-loses no acknowledged receipt ([battery](benchmarks/security.md)).
+transparency log. Byte formats are pinned by tests on both the Python and Rust
+sides). It provides packages, accounts and quotas (HTTP 402 when exceeded,
+never silent throttling), private packages, machine enrollment
+(`/machines/enroll`), and a **SQLite Merkle transparency log** (RFC 6962) with
+Ed25519-signed checkpoints, O(log n) inclusion and consistency proofs
+(`/log/*`), and RFC 3161 anchoring. Traversal, bad filenames and tampered
+indexes are refused. Chaos tests show that concurrent same-name uploads leave
+one atomic winner, replace-during-read never serves truncated blobs, and
+SIGKILL mid-publish loses no acknowledged receipt
+([battery](benchmarks/security.md)).
 
 ### Update without re-shipping gigabytes
 
@@ -423,7 +447,7 @@ health_port = 8000
   (CVE-2023-48022 mitigated; ed25519-dalek ≥ 2.1 with `zeroize`)
 - **SHA-256 integrity** over payload ‖ metadata at every launch; warm-cache
   rootfs re-verified against a Merkle manifest (`rootfs.merkle`)
-- **`--encrypt` is obfuscation only** — the AES-256-GCM key lives in the file's
+- **`--encrypt` is obfuscation only.** The AES-256-GCM key lives in the file's
   metadata by design; use signing for authenticity. Mutually exclusive with SISR.
 - **Isolation**: Linux namespaces + seccomp/Landlock; macOS App Sandbox;
   Windows process isolation. Secrets never baked silently (`.env` rejected unless
@@ -453,7 +477,7 @@ cargo test --workspace         # 650+ tests (+ scripts/test_transparency_log.py,
 | Crate | Purpose |
 |-------|---------|
 | `erebus-core` | Attestation (`attest`, `attest_log`, `dsse`, `jcs`, `merkle`, `log_proof`, `machine`, `rootfs_merkle`), format, compression, detection, encryption, inference-engine resolution, SISR, CAS |
-| `erebus-stub` | Self-extracting launcher (ELF / Mach-O / PE32+) — the only crate with `unsafe` |
+| `erebus-stub` | Self-extracting launcher (ELF / Mach-O / PE32+), the only crate with `unsafe` |
 | `erebus-cli` | Everything you type: attest, verify-attest, enroll, build, serve, … |
 
 Before contributing: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
@@ -462,4 +486,4 @@ Before contributing: `cargo fmt --check`, `cargo clippy --all-targets -- -D warn
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

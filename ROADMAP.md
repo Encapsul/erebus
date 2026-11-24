@@ -66,6 +66,14 @@ The first wedge is not "all AI agents". It is **one AI vendor, one regulated
 buyer, one evidence pack that the buyer's auditor accepts**. Expand only after
 that works.
 
+Deployment lead: **on-prem / air-gapped edge**. Defense, public administration,
+critical infrastructure and industrial buyers often forbid a call-home, so the
+acceptance path must run inside their perimeter: self-hosted registry, evidence
+zip, keys pinned out of band, `verify-evidence` / `cosign` and the `auditor/`
+kit (no account, no network, no hosted service). This is a buyer/deployment
+wedge, not a crypto claim — the signed-receipt category is crowded. Hosted
+trust center remains unshipped.
+
 ### 1.3 Proof levels — keep the boundary honest
 
 | Level | Claim | Status |
@@ -198,6 +206,12 @@ This is the biggest audit objection and must be a first-class product claim.
 - written confirmation that the pack is sufficient;
 - Acceptance: T4 evidence in the repo or a public write-up, with no erebus
   account and no network access.
+- Status: the `auditor/` kit ships. `verify_pack.py` requires pinned keys,
+  `verify-evidence` with a checked bundle and an inclusion proof per receipt,
+  and checks the DSSE envelope with `cosign` and the RFC 3161 token with
+  `openssl` when those tools are present. The offline proof runs in CI via
+  `evidence_e2e.rs` (valid pack accepted, doctored pack refused). The **written
+  third-party confirmation is still missing** — this is not T4 evidence yet.
 
 ### 3.3 Existing pilot gates
 
@@ -275,18 +289,32 @@ The demo must not depend on a repo clone or a local Rust toolchain.
 
 ## 6. Business model
 
-Client **and** server stay MIT forever. We monetize the **hosted trust
-center** and the enterprise operation around it.
+Client **and** server stay MIT forever. We sell the **air-gapped evidence
+deployment** now. A hosted trust center is a later tier and is not shipped.
 
 | Tier | Price hypothesis | Includes |
 |---|---|---|
-| Free | €0 | public packages, local receipts, self-hosted registry |
-| Team | $500–2k/mo | hosted trust center, private receipts, verification links, evidence packs, RBAC |
-| Enterprise | $25k–100k/yr | air-gapped mirror, offline verifier, SSO, SLA, retention, compliance reports, external audit support |
-| Enterprise+ | per protected agent/node | fleet identity, coverage monitoring, full history |
+| Free | €0 | public packages, local receipts, self-hosted registry, evidence export, `auditor/verify_pack.py` |
+| Air-Gapped Evidence Deployment — sell now | **$25k/yr** | one deployment inside one perimeter (one agent family): self-hosted trust center, auditor handoff, SSO/SLA/retention as needed. Fixed annual invoice or PO; no seat count or usage meter |
+| Team — hosted, not shipped | $1.5k/mo billed annually | hosted trust center, private receipts, verification links, evidence packs, RBAC |
+| Enterprise+ | per protected agent/node | fleet identity, coverage monitoring, full history — not priced yet |
 
-These are hypotheses, not validated prices. The pilot must test willingness to
-pay; do not anchor the company on the current $29/$99 developer tiers.
+Verification stays free. Paywalling the verifier or the auditor kit would break
+the trust claim. We do not charge per receipt or per token: value does not
+scale with tokens, and per-receipt pricing would reward under-capture, the
+exact audit objection we exist to close.
+
+These are hypotheses, not validated prices. Public anchors on 2026-11-24:
+AgentAudit Starter £24k/yr, Centurian Compliance-Anchor $25k+ monthly entry
+point, APIR AUD 99/agent/month, SealedRun free and open source. Vendor-published
+numbers, not realized prices. No paid pilots, no LOIs and no production
+customers. Do not anchor the company on the current $29/$99 developer tiers.
+
+**First paid pilot offer, not yet sold:** $12k fixed, 14 days, credited in full
+against the first $25k year if an LOI is signed within 30 days. Deliverables:
+one evidence zip with out-of-band pinned keys, a `verify_pack.py` run, an
+explicit coverage statement, the buyer's written evidence checklist, and a
+readout with receipts/day, verification latency and evidence bytes per call.
 
 **Bottom-up math:** 50 AI vendors × $30k = $1.5M ARR; 500 × $30k = $15M ARR.
 The first milestone is one paid pilot, not a pricing page.

@@ -10,6 +10,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command as StdCommand;
 use std::time::Duration;
 use tempfile::tempdir;
 
@@ -168,6 +169,42 @@ fn refused(pack: &Path, needle: &str) {
         .stderr(predicate::str::contains(needle));
 }
 
+/// P0-6: the third-party kit must succeed with only a pack, a bundle and
+/// keys obtained out of band. It runs the same checks an auditor would run.
+fn auditor_kit(pack: &Path, bundle: &Path, operator: &str, log: &str) -> std::process::Output {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root");
+    StdCommand::new("python3")
+        .arg(root.join("auditor/verify_pack.py"))
+        .arg(pack)
+        .args(["--bundle", bundle.to_str().unwrap()])
+        .args(["--operator-key", operator, "--log-key", log])
+        .args(["--erebus", env!("CARGO_BIN_EXE_erebus")])
+        .output()
+        .expect("run auditor kit")
+}
+
+fn kit_accepts(pack: &Path, bundle: &Path, operator: &str, log: &str) {
+    let out = auditor_kit(pack, bundle, operator, log);
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.status.success(),
+        "auditor kit refused a valid pack: {text}"
+    );
+    assert!(text.contains("EVIDENCE PACK OK"), "{text}");
+    assert!(text.contains("cosign:"), "{text}");
+    // CI installs cosign; when it is present the kit must really use it.
+    if StdCommand::new("cosign").arg("version").output().is_ok() {
+        assert!(text.contains("cosign: Verified OK"), "{text}");
+    }
+    eprintln!("{text}"); // --nocapture shows the auditor's exact output in CI
+}
+
 #[test]
 fn evidence_pack_verifies_offline_and_refuses_every_doctored_copy() {
     if std::process::Command::new("python3")
@@ -286,6 +323,7 @@ fn evidence_pack_verifies_offline_and_refuses_every_doctored_copy() {
     let op_hex = key.file_stem().unwrap().to_str().unwrap().to_string();
     assert_eq!(report["keys"]["operator_public_keys"][0], op_hex.as_str());
     pinned(&op_hex, &log_key).assert().success();
+    kit_accepts(&pack, &bundle, &op_hex, &log_key);
     let stranger = format!("sha256:{}", "ab".repeat(32));
     pinned(&stranger, &log_key)
         .assert()
@@ -316,6 +354,12 @@ fn evidence_pack_verifies_offline_and_refuses_every_doctored_copy() {
         &[],
     );
     refused(&bad, "hash mismatch");
+    let kit = auditor_kit(&bad, &bundle, &op_hex, &log_key);
+    assert!(
+        !kit.status.success(),
+        "auditor kit accepted a doctored pack"
+    );
+    assert!(String::from_utf8_lossy(&kit.stderr).contains("AUDIT FAILED"));
 
     // 2. Same edit, with MANIFEST.json re-hashed to match: the index is not
     //    a trust root, the receipt's own signature and log leaf still refuse.

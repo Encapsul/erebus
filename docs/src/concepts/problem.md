@@ -1,4 +1,4 @@
-# The Problem
+# The evidence question
 
 ## "Prove what ran"
 
@@ -9,10 +9,10 @@ a Python server, a few tools and a configuration. An auditor asks:
 > exactly the version you validated in July, what it was given and what it
 > answered — and that this record was not edited since."
 
-Today the honest answer is a set of application logs and a tracing
-dashboard. Both are controlled by the operator being audited: they can be
-edited, filtered or regenerated, and neither ties the log line to the exact
-bytes that executed or to a specific machine.
+Today the answer is a set of application logs and a tracing dashboard. The
+operator being audited controls both: they can be edited, filtered or
+regenerated. Neither ties the log line to the exact bytes that executed or to
+a specific machine.
 
 ## Why the usual tools do not answer it
 
@@ -34,19 +34,19 @@ itself. See [Comparison](../comparison.md) for the full picture.
 
 ## Why it matters now
 
-- **Enterprise procurement** — buyers already ask which model/version ran,
-  on which machine, with what input and output; the vendor's dashboard is not
+- **Enterprise procurement:** buyers already ask which model/version ran,
+  on which machine, with what input and output. The vendor's dashboard is not
   evidence the buyer controls.
-- **EU AI Act** — high-risk systems must automatically record events over
+- **EU AI Act:** high-risk systems must automatically record events over
   their lifetime (Art. 12), and providers and deployers must keep those logs
-  (Art. 19, Art. 26); the high-risk obligations are staggered to December
+  (Art. 19, Art. 26). The high-risk obligations are staggered to December
   2027 (Annex III) and August 2028 (Annex I). erebus gives the compliance team
   evidence for these logs; it is not a certification.
-- **SOC 2 / ISO 27001** — auditors ask for evidence of software integrity
+- **SOC 2 / ISO 27001:** auditors ask for evidence of software integrity
   and change control on deployed systems.
-- **Public procurement and defense** — air-gapped deployments must be
+- **Public procurement and defense:** air-gapped deployments must be
   verifiable without calling a vendor.
-- **Vehicles and industry** — UNECE R156 requires traceability of software
+- **Vehicles and industry:** UNECE R156 requires traceability of software
   updates on embedded systems.
 
 ## The erebus answer

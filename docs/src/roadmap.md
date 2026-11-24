@@ -10,8 +10,10 @@ externally anchored receipt for every agent run, plus the place where an AI
 vendor publishes evidence and a regulated buyer verifies it offline.
 
 The proof chain is complete. The self-hosted trust center MVP now exists as a
-product surface on the stdlib registry. The next milestone is adoption: one
-ICP, one design partner, one paid pilot and a hosted trust center (not shipped).
+product surface on the stdlib registry. The next milestone is adoption in one
+constrained deployment: an **on-prem / air-gapped edge** agent whose buyer's
+auditor verifies a pack locally, with no account and no call-home. Hosted trust
+center is not shipped.
 
 ## Priorities are strict
 
@@ -22,7 +24,7 @@ ICP, one design partner, one paid pilot and a hosted trust center (not shipped).
 | **P0-3** | Integration without repackaging: attested proxy, Python/Node SDK, MCP, one framework | partial: proxy + MCP + Python SDK shipped; Node SDK and one framework next |
 | **P0-4** | Completeness: attested gateway, signed policy, heartbeat/coverage report, monitor | features shipped; pilot proof of coverage still pending |
 | **P0-5** | Design partner pilot: 14 days, zero strict failures, one case study, one LOI/paid pilot | next |
-| **P0-6** | External verification: an auditor verifies a trail with public keys and `verify-evidence` / `cosign` | next |
+| **P0-6** | External verification: an auditor verifies a trail with public keys and `verify-evidence` / `cosign` | auditor kit ships with offline CI proof; written third-party confirmation pending |
 
 The proof chain (P0 from 2026-09-17) is closed and stays green in CI. Do not
 reopen it; do not add breadth beside it.
@@ -51,6 +53,9 @@ product. A change to a frozen surface must name the P0 item it unblocks.
 
 ## Business model
 
-MIT client and server, forever. Paid: the hosted trust center, anchored proof
-trail, fleet features and air-gapped enterprise support. Pricing hypotheses
-are on the [Pricing](./pricing.md) page; validate them with the pilot.
+MIT client and server, forever. The verifier and auditor kit stay free. Paid
+now: one air-gapped deployment per year at a $25k price hypothesis. Paid later,
+once hosted exists: a $1.5k/month team tier billed annually. A $12k, 14-day
+pilot offer is credited against the first year if an LOI follows within 30
+days. None of these prices has been accepted by a customer. Details and
+competitor anchors are on the [Pricing](./pricing.md) page.

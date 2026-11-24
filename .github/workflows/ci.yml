@@ -64,6 +64,14 @@ jobs:
         timeout-minutes: 10
         run: python3 scripts/test_trust_center.py
 
+      # P0-6: an auditor's kit verifies a real pack offline, with pinned keys
+      # and stock cosign, and refuses a doctored copy. No account, no registry.
+      - name: Auditor kit offline proof
+        timeout-minutes: 10
+        run: >-
+          cargo test -p erebus-cli --test evidence_e2e
+          -- --exact evidence_pack_verifies_offline_and_refuses_every_doctored_copy --nocapture
+
       - name: Run tests
         env:
           ERE_PYTHON: /tmp/erebus-sdk-venv/bin/python

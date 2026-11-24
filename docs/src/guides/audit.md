@@ -15,9 +15,9 @@ on that: everything below is re-checked on your machine.
 
 ## 1. Get the two keys through another channel
 
-The pack carries the public keys that signed it. On their own they prove
-nothing — anyone can generate keys and sign a fabricated trail. Before
-opening the pack, obtain:
+The pack carries the public keys that signed it. Those keys prove nothing on
+their own. Anyone can generate keys and sign a fabricated trail. Before opening
+the pack, obtain:
 
 | Key | Who gives it to you | What it looks like |
 |---|---|---|
@@ -49,6 +49,25 @@ OK: evidence pack verified (erebus-evidence/1)
 
 `--json` prints the same report for your own tooling. Any failure exits
 with code 2 and names the file and the check that failed (`TAMPERED: …`).
+
+If you would rather run one script than the steps below, the repository ships
+an [auditor kit](../../../auditor/README.md). From the repo root:
+
+```bash
+python3 auditor/verify_pack.py evidence.zip \
+  --bundle agent.erebus \
+  --operator-key <operator hex or sha256:fingerprint> \
+  --log-key <registry log key hex> \
+  --tsa-ca cacert.pem            # optional; CA chain obtained out of band
+# EVIDENCE PACK OK — confirm the pinned keys out of band
+```
+
+It fails closed unless the keys are pinned, the bundle file is checked, every
+receipt has an inclusion proof, and `verify-evidence` reports `verified`. Where
+`cosign` and `openssl` are installed it also verifies the DSSE envelope and
+the RFC 3161 tokens; otherwise it prints `SKIP` with the reason. The same
+script is run in CI against a real pack and a doctored copy. It is tooling,
+not third-party confirmation. No auditor has signed off on the pack yet.
 
 What each line established, and how:
 

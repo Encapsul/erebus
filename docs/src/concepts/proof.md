@@ -16,8 +16,8 @@ trusts nobody — not the operator, not the machine, not erebus — establish:
 | 4 | **With what, producing what** — for a served model, one receipt per inference call with the SHA-256 of the request and response bodies; for a batch run, the launch arguments, piped stdin, stdout/stderr digests and exit code (capture on Linux isolation ≥ 2 and macOS) | `execution.input_hash`, `execution.stdin_hash`, `execution.output_hash`, `execution.exit_code`, `execution.request` |
 | 5 | **That the trail is intact** — no receipt was deleted, reordered or edited afterwards | `execution.prev_attestation_hash` chain (`verify-attest --chain`) contradicted by the public log if anything changes |
 
-In one sentence: **a flight recorder for AI agents** — non-repudiation of
-what was executed, and tamper evidence for the record of it.
+In one sentence: a flight recorder for AI agents. It gives non-repudiation of
+what was executed and tamper evidence for the record of it.
 
 ## What a receipt does not establish
 
@@ -124,8 +124,9 @@ And the buyer asks for exactly this. High-risk obligations under the EU AI Act
 are about record-keeping and traceability (logging, Art. 12; obligations of
 providers and deployers, Art. 19 and Art. 26), not about a mathematical proof
 of correctness. SOC 2 and ISO 42001 are the same shape: show that the record
-exists, is complete, and could not have been altered. Selling level-2 proof
-would be selling something nobody requires and nobody can afford.
+exists, is complete, and could not have been altered. Proving the computation
+itself would need TEE attestation or zkML at 100–1000× the cost of inference.
+That is outside this product's boundary.
 
 ## The three questions every buyer (and every investor) asks
 
@@ -146,8 +147,7 @@ would be selling something nobody requires and nobody can afford.
    neutrality of the log is the product; the launcher is how we get the
    signature at the only point the operator cannot bypass.
 
-## The one-sentence answer to "and if the agent lies?"
+## If the agent lies
 
-> We do not judge the agent. We make it impossible to lie about what it did —
-> the way Certificate Transparency made it impossible to issue a certificate
-> in secret.
+> We do not judge the agent. We make it impossible to lie about what it did.
+> Certificate Transparency made it impossible to issue a certificate in secret.
