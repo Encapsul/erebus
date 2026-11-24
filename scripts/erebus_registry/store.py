@@ -22,6 +22,7 @@ from erebus_registry.artifacts import (
 )
 from erebus_registry.ed25519 import _ed25519_verify
 from erebus_registry.tlog import TransparencyLog, load_or_create_log_key
+from erebus_registry.trust_center import TrustCenter
 from erebus_registry.util import (
     CHUNK,
     EREBUS_MAGIC,
@@ -85,6 +86,9 @@ class Store:
         self.integrity_path = os.path.join(root, "integrity.json")
         self.integrity = self._load(self.integrity_path, {})
         self.users = self._load(self.users_path, {})
+        self.trust_path = os.path.join(root, "trust_center.json")
+        # The trust center reuses this store's lock, log and audit trail.
+        self.trust = TrustCenter(self)
 
     # ---- json helpers -----------------------------------------------------
     @staticmethod
@@ -588,6 +592,14 @@ class Store:
         proof["checkpoint"] = checkpoint
         proof["anchor"] = anchor if anchor and anchor["size"] == checkpoint["size"] else None
         return proof
+
+    def attestation_body(self, att_id: str) -> bytes | None:
+        """Exact bytes of one stored receipt, for trust-center verification."""
+        with self.log.lock:
+            row = self.log.conn.execute(
+                "SELECT body FROM attestations WHERE id = ?", (att_id,)
+            ).fetchone()
+        return bytes(row[0]) if row else None
 
     def query_attestations(self, owner: str, filters: dict, limit: int, skip: int) -> tuple[int, list[dict]]:
         """Chronological page of <owner>'s attestations matching AND-ed filters.

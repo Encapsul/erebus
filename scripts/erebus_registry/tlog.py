@@ -11,7 +11,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-from .ed25519 import _ed25519_public_key, _ed25519_sign, _ed_point_decode
+from .ed25519 import _ed25519_public_key, _ed25519_sign_fast, _ed_point_decode
 from .merkle import _MerkleTree, _mt_leaf, _mt_verify_inclusion
 from .tsa import tsa_build_request, tsa_parse_response
 
@@ -218,7 +218,7 @@ class TransparencyLog:
             size = len(self.tree)
             root = self.tree.root()
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        sig = _ed25519_sign(self.seed, self.checkpoint_bytes(size, root, ts))
+        sig = _ed25519_sign_fast(self.seed, self.checkpoint_bytes(size, root, ts))
         return {
             "origin": self.origin,
             "size": size,
@@ -350,7 +350,7 @@ class TransparencyLog:
                 return json.loads(row[1]), True
             issued_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
             storage = key_storage if key_storage == "tpm2" else "software"
-            sig = _ed25519_sign(
+            sig = _ed25519_sign_fast(
                 self.seed, self.cert_bytes(
                     machine_id, pub_hex, owner, registry, issued_at, storage))
             cert = {

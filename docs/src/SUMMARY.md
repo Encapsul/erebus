@@ -14,6 +14,7 @@
 
 - [Quickstart](./guides/quickstart.md)
 - [Auditing an erebus trail](./guides/audit.md)
+- [Self-hosted trust center (MVP)](./guides/self-hosted-trust-center.md)
 - [Python](./guides/python.md)
 - [Python SDK](./guides/python-sdk.md)
 - [Native Binary](./guides/binary.md)

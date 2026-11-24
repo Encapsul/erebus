@@ -44,8 +44,8 @@ offline.
 | Layer | Surface | Job | State |
 |---|---|---|---|
 | **Capture** | launcher, attested proxy, SDK | bind the receipt to the bytes and the machine that actually ran | launcher + proxy + Python SDK exist; Node SDK and one framework next |
-| **Prove** | receipts, transparency log, evidence pack | make the record independently verifiable | proof chain exists; hosted log MVP next |
-| **Consume** | trust center, verification links, control mapping | let a buyer or auditor accept the evidence without a CLI | not shipped |
+| **Prove** | receipts, transparency log, evidence pack | make the record independently verifiable | proof chain exists; self-hosted trust center anchors receipts in it |
+| **Consume** | trust center, verification links, control mapping | let a buyer or auditor accept the evidence without a CLI | self-hosted MVP ships; hosted SaaS and control mapping not shipped |
 
 The launcher is the high-assurance capture path. The proxy and SDK exist so a
 team can adopt receipts without repackaging its agent. The trust center is the
@@ -134,16 +134,27 @@ developer path, not a product path.
 
 #### P0-2 — Trust center MVP
 
-The hosted product is the paid surface. The registry is infrastructure, not a
-trust center.
+The hosted product is the paid surface and is still not shipped. The shipped
+MVP is self-hosted: it runs on the stdlib registry and reuses its users, orgs,
+tokens, Merkle log, signed checkpoints, inclusion proofs, audit trail and admin
+backup/restore.
 
-- org, project, API key, log origin;
-- receipt ingestion, search and status (`verified`, `missing`, `failed`);
-- public verification link for a receipt or evidence pack;
-- evidence export in one click;
-- retention, backups, status page and a minimal audit log.
-- Acceptance: one design partner uploads 1,000 receipts; a buyer verifies a
-  link without an erebus account; restore from backup is tested.
+- org/project, API key, pinned log origin;
+- spec 2.x DSSE/JCS receipt ingestion with pinned-key signature, project chain
+  and Merkle inclusion checks; search and status (`verified`, `missing`,
+  `failed`);
+- capability verification link for a receipt (HTML or JSON) and a one-receipt
+  evidence pack, no erebus account required;
+- project evidence zip with receipts, inclusion proofs, signed checkpoints and
+  a manifest carrying the pinned keys;
+- status page and audit events; backup/restore includes trust-center state and
+  exact receipt bytes.
+- `verified` means the receipt's signature, chain link and log inclusion
+  re-check from stored bytes. It does not claim every execution was captured.
+  Retention policy and control mapping are not implemented.
+- Automated acceptance is green: 1,000 receipts, no-account verification,
+  export, tamper rejection and restore (`scripts/test_trust_center.py`).
+  Design-partner proof remains a P0-5 deliverable, not a shipped claim.
 
 #### P0-3 — Integration without repackaging
 

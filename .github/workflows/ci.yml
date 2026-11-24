@@ -60,6 +60,10 @@ jobs:
       - name: Test Python SDK
         run: /tmp/erebus-sdk-venv/bin/python -m pytest -q sdk/python/tests
 
+      - name: Test self-hosted trust center
+        timeout-minutes: 10
+        run: python3 scripts/test_trust_center.py
+
       - name: Run tests
         env:
           ERE_PYTHON: /tmp/erebus-sdk-venv/bin/python

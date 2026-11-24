@@ -90,6 +90,81 @@ def _ed25519_verify(public_key: bytes, message: bytes, signature: bytes) -> bool
     return _ed_scalarmult(_ED_B, s) == _ed_add(r, _ed_scalarmult(a, k))
 
 
+def _ed_extended(point):
+    x, y = point
+    return x, y, 1, x * y % _ED_P
+
+
+def _ed_add_ext(p, q):
+    """Extended Edwards addition (a = -1); no inversion per addition."""
+    x1, y1, z1, t1 = p
+    x2, y2, z2, t2 = q
+    aa = (y1 - x1) * (y2 - x2) % _ED_P
+    bb = (y1 + x1) * (y2 + x2) % _ED_P
+    cc = t1 * 2 * _ED_D * t2 % _ED_P
+    dd = z1 * 2 * z2 % _ED_P
+    e, f = (bb - aa) % _ED_P, (dd - cc) % _ED_P
+    g, h = (dd + cc) % _ED_P, (bb + aa) % _ED_P
+    return e * f % _ED_P, g * h % _ED_P, f * g % _ED_P, e * h % _ED_P
+
+
+def _ed_mul_ext(point, scalar):
+    acc = (0, 1, 1, 0)
+    while scalar:
+        if scalar & 1:
+            acc = _ed_add_ext(acc, point)
+        point = _ed_add_ext(point, point)
+        scalar >>= 1
+    return acc
+
+
+def _ed_equal_ext(p, q) -> bool:
+    return (p[0] * q[2] % _ED_P == q[0] * p[2] % _ED_P
+            and p[1] * q[2] % _ED_P == q[1] * p[2] % _ED_P)
+
+
+def _ed_encode_ext(p) -> bytes:
+    x, y, z, _ = p
+    inv = pow(z, _ED_P - 2, _ED_P)
+    return _ed_point_encode((x * inv % _ED_P, y * inv % _ED_P))
+
+
+def _ed25519_verify_fast(public_key: bytes, message: bytes, signature: bytes) -> bool:
+    """Same check as `_ed25519_verify`, using extended coordinates.
+
+    No inversion per point addition, so a 1,000-receipt ingest stays
+    interactive. Trust-center tests assert equivalence with the slow verifier
+    and with a tampered signature; do not use it without those tests.
+    """
+    if len(public_key) != 32 or len(signature) != 64:
+        return False
+    s = int.from_bytes(signature[32:], "little")
+    if s >= _ED_L:
+        return False
+    a = _ed_point_decode(public_key)
+    r = _ed_point_decode(signature[:32])
+    if a is None or r is None:
+        return False
+    k = int.from_bytes(
+        hashlib.sha512(signature[:32] + public_key + message).digest(), "little"
+    ) % _ED_L
+    return _ed_equal_ext(
+        _ed_mul_ext(_ed_extended(_ED_B), s),
+        _ed_add_ext(_ed_extended(r), _ed_mul_ext(_ed_extended(a), k)),
+    )
+
+
+def _ed25519_sign_fast(seed: bytes, message: bytes) -> bytes:
+    """Deterministic Ed25519 signature identical to `_ed25519_sign`, but fast."""
+    h = hashlib.sha512(seed).digest()
+    a = int.from_bytes(h[:32], "little") & ((1 << 254) - 8) | (1 << 254)
+    r = int.from_bytes(hashlib.sha512(h[32:] + message).digest(), "little") % _ED_L
+    r_enc = _ed_encode_ext(_ed_mul_ext(_ed_extended(_ED_B), r))
+    pub = _ed_encode_ext(_ed_mul_ext(_ed_extended(_ED_B), a))
+    k = int.from_bytes(hashlib.sha512(r_enc + pub + message).digest(), "little") % _ED_L
+    return r_enc + ((r + k * a) % _ED_L).to_bytes(32, "little")
+
+
 def _ed_point_encode(p) -> bytes:
     """Compress an Edwards point to 32 bytes (RFC 8032 §5.1.2)."""
     x, y = p

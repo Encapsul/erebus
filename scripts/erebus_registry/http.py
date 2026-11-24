@@ -95,6 +95,23 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/health":
             return self.send_json({"status": "ok"})
+        if path == "/trust/status":
+            return self.send_json(self.store.trust.status_page())
+        if path == "/trust/projects":
+            return self._trust_projects()
+        if path == "/trust/receipts":
+            return self._trust_receipts()
+        if path == "/trust/evidence":
+            return self._trust_evidence()
+        m = re.match(r"^/trust/receipts/([^/]+)$", path)
+        if m:
+            return self._trust_receipt(urllib.parse.unquote(m.group(1)))
+        m = re.match(r"^/verify/([^/]+)$", path)
+        if m:
+            return self._public_verify(urllib.parse.unquote(m.group(1)))
+        m = re.match(r"^/public/evidence/([^/]+)$", path)
+        if m:
+            return self._public_evidence(urllib.parse.unquote(m.group(1)))
         if path == "/sla":
             return self._sla()
         if path == "/auth/sso/config":
@@ -138,8 +155,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._webhook_remove(urllib.parse.unquote(path[len("/webhooks/"):]))
         if path == "/admin/backup":
             return self._admin_backup()
-        if path == "/admin/restore" and self.command == "POST":
-            return self._admin_restore(self.read_body())
         if path == "/" or path == "/ui":
             body = LANDING.format().encode()
             self.send_response(200)
@@ -208,6 +223,7 @@ class Handler(BaseHTTPRequestHandler):
         manifest = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "packages": [],
+            "trust_center": self.store.trust.backup(),
         }
         for name in sorted(os.listdir(self.store.pkg_dir)):
             if not name.endswith(".erebus"):
@@ -247,8 +263,13 @@ class Handler(BaseHTTPRequestHandler):
             meta = entry.get("meta", {})
             self.store.set_meta(fname, meta.get("owner"), bool(meta.get("private")), bool(meta.get("deleted")), meta.get("deleted_at"))
             restored.append(fname)
+        trust_result = {"restored": 0}
+        if payload.get("trust_center"):
+            status, trust_result = self.store.trust.restore(payload["trust_center"])
+            if status != 200:
+                return self.send_json(trust_result, status)
         self.store.record_audit(user, "backup_restore", f"{len(restored)} packages")
-        return self.send_json({"restored": restored})
+        return self.send_json({"restored": restored, "trust_center": trust_result})
 
     def _send_index(self):
         body = self.store.index()
@@ -260,6 +281,148 @@ class Handler(BaseHTTPRequestHandler):
 
     def _authorized_user(self) -> str | None:
         return self.store.authenticate(self.headers.get("Authorization", ""))
+
+    # ---- self-hosted trust center ----------------------------------------
+    def _query(self) -> dict[str, str]:
+        query = self.path.split("?", 1)[1] if "?" in self.path else ""
+        return {k: v[0] for k, v in urllib.parse.parse_qs(query).items()}
+
+    def _trust_context(self) -> tuple[str, str] | None:
+        api = self.store.trust.authenticate_api_key(
+            self.headers.get("Authorization", ""))
+        if api:
+            return api[0], api[1]
+        user = self._authorized_user()
+        project = self._query().get("project", "")
+        if user and project and self.store.trust.role(user, project):
+            return user, project
+        return None
+
+    def _trust_projects(self):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        return self.send_json({"projects": self.store.trust.projects_of(user)})
+
+    def _trust_project_create(self, raw: bytes | None):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        payload = self._read_json(raw) or {}
+        keys = payload.get("trusted_keys")
+        if keys is None and payload.get("trusted_key"):
+            keys = [payload["trusted_key"]]
+        ok, detail, project = self.store.trust.create_project(
+            user, str(payload.get("org") or ""), str(payload.get("name") or ""),
+            keys if isinstance(keys, list) else [])
+        if not ok:
+            return self.send_json({"error": detail}, 400)
+        return self.send_json({"id": detail, "project": project,
+                               "origin": project["log_origin"]}, 201)
+
+    def _trust_key_create(self, project_id: str, raw: bytes | None):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        payload = self._read_json(raw) or {}
+        ok, token, key_id = self.store.trust.create_api_key(
+            user, project_id, str(payload.get("label") or ""))
+        if not ok:
+            return self.send_json({"error": token}, 403)
+        return self.send_json({"key_id": key_id, "token": token,
+                               "note": "shown once; use as Bearer tc:<token>"}, 201)
+
+    def _trust_key_revoke(self, project_id: str, key_id: str):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        if not self.store.trust.revoke_api_key(user, project_id, key_id):
+            return self.send_json({"error": "key not found or access denied"}, 404)
+        return self.send_json({"revoked": key_id})
+
+    def _trust_ingest(self, raw: bytes | None):
+        api = self.store.trust.authenticate_api_key(
+            self.headers.get("Authorization", ""))
+        if not api:
+            return self.send_json({"error": "project API key required"}, 401)
+        if raw is None:
+            return self.send_json({"error": "body too large"}, 413)
+        code, body = self.store.trust.ingest(api[0], api[1], raw, self._public_base_url())
+        return self.send_json(body, code)
+
+    def _trust_receipts(self):
+        context = self._trust_context()
+        if not context:
+            return self.send_json({"error": "project access denied"}, 401)
+        query = self._query()
+        try:
+            limit = min(int(query.get("limit", "100")), 1000)
+            skip = max(0, int(query.get("skip", "0")))
+        except ValueError:
+            return self.send_json({"error": "limit/skip must be integers"}, 400)
+        filters = {k: query[k] for k in
+                   ("id", "bundle", "machine", "status", "since", "until") if k in query}
+        total, page = self.store.trust.query(context[1], filters, limit, skip)
+        return self.send_json({"project": context[1], "total": total, "receipts": page})
+
+    def _trust_receipt(self, receipt_id: str):
+        context = self._trust_context()
+        if not context:
+            return self.send_json({"error": "project access denied"}, 401)
+        code, body = self.store.trust.get(
+            context[0], context[1], receipt_id, self._public_base_url())
+        return self.send_json(body, code)
+
+    def _trust_evidence(self):
+        context = self._trust_context()
+        if not context:
+            return self.send_json({"error": "project access denied"}, 401)
+        query = self._query()
+        filters = {k: query[k] for k in ("id", "bundle", "status", "since", "until")
+                   if k in query}
+        _, data = self.store.trust.export(
+            context[1], self._public_base_url(), filters)
+        return self._send_zip(f"erebus-evidence-{context[1].replace('/', '-')}.zip", data)
+
+    def _trust_share(self, receipt_id: str):
+        user = self._authorized_user()
+        if not user:
+            return self.send_json({"error": "authentication required"}, 401)
+        code, body = self.store.trust.create_share(
+            user, receipt_id, self._public_base_url())
+        return self.send_json(body, code)
+
+    def _public_verify(self, receipt_id: str):
+        token = self._query().get("token")
+        view = self.store.trust.public_view(receipt_id, token)
+        if view is None:
+            return self.send_json({"error": "invalid verification link"}, 404)
+        if self._query().get("format") == "json":
+            return self.send_json(view)
+        body = self.store.trust.public_html(
+            receipt_id, view, token or "", self._public_base_url())
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _public_evidence(self, receipt_id: str):
+        token = self._query().get("token")
+        view = self.store.trust.public_view(receipt_id, token)
+        if view is None:
+            return self.send_json({"error": "invalid verification link"}, 404)
+        _, data = self.store.trust.export(
+            view["project"], self._public_base_url(), {"id": receipt_id})
+        return self._send_zip(f"erebus-evidence-{receipt_id}.zip", data)
+
+    def _send_zip(self, filename: str, data: bytes):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     # ---- SSO handlers ---------------------------------------------------
     def _sla(self):
@@ -626,6 +789,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._mcp_upload()
         if path == "/billing/webhook":
             return self._billing_webhook()
+        if path == "/admin/restore":
+            body = self.read_body(100_000_000)
+            return self._admin_restore(body)
         if path == "/webhooks/github":
             body = self.read_body(65536)
             return self._provider_webhook("github", body)
@@ -648,6 +814,23 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/attestations":
             body = self.read_body(1_000_000)
             return self._attest_publish(body)
+        if path == "/trust/projects":
+            body = self.read_body(8192)
+            return self._trust_project_create(body)
+        m = re.match(r"^/trust/projects/(.+)/keys$", path)
+        if m:
+            body = self.read_body(2048)
+            return self._trust_key_create(urllib.parse.unquote(m.group(1)), body)
+        m = re.match(r"^/trust/projects/(.+)/keys/([^/]+)/revoke$", path)
+        if m:
+            return self._trust_key_revoke(
+                urllib.parse.unquote(m.group(1)), urllib.parse.unquote(m.group(2)))
+        if path == "/trust/receipts":
+            body = self.read_body(1_000_000)
+            return self._trust_ingest(body)
+        m = re.match(r"^/trust/receipts/([^/]+)/share$", path)
+        if m:
+            return self._trust_share(urllib.parse.unquote(m.group(1)))
         if path == "/log/anchor":
             return self._log_anchor()
         if path == "/machines/enroll":

@@ -9,17 +9,18 @@ erebus is the **trust center for AI agents**: a signed, hash-chained,
 externally anchored receipt for every agent run, plus the place where an AI
 vendor publishes evidence and a regulated buyer verifies it offline.
 
-The proof chain is complete. The next milestone is adoption: one ICP, one
-design partner, one paid pilot and a trust-center MVP.
+The proof chain is complete. The self-hosted trust center MVP now exists as a
+product surface on the stdlib registry. The next milestone is adoption: one
+ICP, one design partner, one paid pilot and a hosted trust center (not shipped).
 
 ## Priorities are strict
 
 | Priority | Theme | State |
 |---|---|---|
-| **P0-1** | Activation: install → `erebus demo` → first receipt → verification link in under 5 minutes | next |
-| **P0-2** | Trust-center MVP: org, API key, receipt search, public verification link, evidence export | next |
+| **P0-1** | Activation: install → `erebus demo` → first receipt → verification link in under 5 minutes | shipped; fresh-VM timing proof still pending |
+| **P0-2** | Trust-center MVP: org/project, API key, receipt search, public verification link, evidence export | self-hosted MVP shipped; hosted SaaS not shipped |
 | **P0-3** | Integration without repackaging: attested proxy, Python/Node SDK, MCP, one framework | partial: proxy + MCP + Python SDK shipped; Node SDK and one framework next |
-| **P0-4** | Completeness: attested gateway, signed policy, heartbeat/coverage report, monitor | next |
+| **P0-4** | Completeness: attested gateway, signed policy, heartbeat/coverage report, monitor | features shipped; pilot proof of coverage still pending |
 | **P0-5** | Design partner pilot: 14 days, zero strict failures, one case study, one LOI/paid pilot | next |
 | **P0-6** | External verification: an auditor verifies a trail with public keys and `verify-evidence` / `cosign` | next |
 

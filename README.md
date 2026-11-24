@@ -31,12 +31,16 @@ an AI vendor publishes evidence and a regulated buyer verifies it.
 | Layer | Product surface | What it answers | State |
 |---|---|---|---|
 | **Capture** | launcher, attested proxy, SDK | which code, model and machine produced this run? | launcher + proxy + Python SDK exist; Node SDK next |
-| **Prove** | receipts, transparency log, evidence pack | can a third party verify it offline? | proof chain exists; hosted log MVP next |
-| **Consume** | trust center, verification links, control mapping | can a buyer or auditor accept it without a CLI? | not shipped |
+| **Prove** | receipts, transparency log, evidence pack | can a third party verify it offline? | proof chain exists; self-hosted trust center anchors receipts in it |
+| **Consume** | trust center, verification links, control mapping | can a buyer or auditor accept it without a CLI? | self-hosted MVP ships; hosted SaaS and control mapping not shipped |
 
 The launcher is the high-assurance capture path. The proxy and SDK exist so
 teams can adopt receipts without repackaging their agent. The trust center is
-the product surface: search, verify, share and export evidence.
+the product surface: search, verify, share and export evidence. The shipped
+version is self-hosted on the stdlib registry; see the
+[self-hosted trust center guide](docs/src/guides/self-hosted-trust-center.md).
+`verified` there means pinned-key signature + project chain + Merkle inclusion,
+not proof that every run was captured.
 
 ## Who it is for
 
@@ -208,7 +212,10 @@ The full plan, frozen surfaces and acceptance criteria are in
   anchoring, machine identity, DSSE/in-toto with `cosign` interop.
 - **Evidence export: works.** One zip, offline verification, pinned keys.
 - **Internal pilot: running, not complete.** No production customers yet.
-- **Hosted trust center: not shipped.** This is the current product milestone.
+- **Self-hosted trust center MVP: ships.** Projects, API keys, receipt status,
+  search, share links, evidence export, status page and tested backup/restore.
+- **Hosted trust center: not shipped.** It remains the paid surface and the
+  current product milestone.
 - **Next proof point:** one design partner with a paid pilot and one external
   auditor verification.
 

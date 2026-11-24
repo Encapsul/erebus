@@ -87,6 +87,25 @@ machine co-signature, and a process that skips the decorator produces no
 receipt. Use it for adoption without repackaging; use the launcher or attested
 gateway when capture must be enforced outside the agent process.
 
+## Self-hosted trust center status
+
+The self-hosted trust center MVP is a product surface on the stdlib registry,
+not a hosted service. It stores receipts under projects that pin operator
+public keys, issues project API keys, and exposes search, status, share links
+and evidence export. A receipt is labelled `verified` only when all three
+checks re-run from the stored bytes: the DSSE/JCS spec 2.x signature under a
+pinned key, the project chain link, and Merkle inclusion under a checkpoint
+signed by the pinned log key. `missing` means no stored/logged receipt;
+`failed` means one of those checks did not pass.
+
+The hosted trust center is **not shipped** and remains the paid surface. The
+self-hosted MVP does not map receipts to controls, enforce retention, or claim
+that every execution was captured. It accepts receipts that an agent or gateway
+actually posted; the separate completeness story is the attested gateway,
+signed launch policy, heartbeat receipts, `COVERAGE.json`, `erebus monitor` and
+their shared limitation described above. See
+[Self-hosted trust center (MVP)](../guides/self-hosted-trust-center.md).
+
 ## Why this boundary is the right product, not a shortfall
 
 Every piece of trust infrastructure that actually changed an industry stops
