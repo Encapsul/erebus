@@ -61,6 +61,12 @@ enum Commands {
     ///   erebus build ./myapp --persist --env-file .env
     Build(Box<commands::build::BuildArgs>),
 
+    /// Build a tiny agent and verify a real receipt, offline
+    ///
+    /// Creates a Python app, a signing key, a signed bundle and a signed
+    /// receipt in a temp directory, then verifies the receipt locally.
+    Demo(commands::demo::DemoArgs),
+
     /// Execute a .erebus file
     Run(commands::run::RunArgs),
 
@@ -449,6 +455,7 @@ fn main() -> ExitCode {
         eprintln!("Usage: erebus <COMMAND> [OPTIONS]");
         eprintln!();
         eprintln!("Prove what ran:");
+        eprintln!("  demo             Build a tiny agent and verify a receipt in under 5 minutes");
         eprintln!("  keygen           Create an operator signing key");
         eprintln!("  enroll           Give this host a certified machine identity");
         eprintln!(
@@ -488,6 +495,7 @@ fn main() -> ExitCode {
 
     let result = match cli.command {
         Commands::Build(args) => commands::build::run(*args, effective_verbose),
+        Commands::Demo(args) => commands::demo::run(args),
         Commands::Init(args) => commands::init::run(args),
         Commands::Run(mut args) => {
             if cli.verbose {

@@ -1,5 +1,36 @@
 # Quickstart
 
+## First receipt in under 5 minutes
+
+With `erebus` installed and a launcher stub available (`erebus doctor`), one
+command runs the whole loop offline — no account, no registry, no hosted link:
+
+```bash
+erebus demo
+```
+
+It writes a tiny Python agent, a fresh Ed25519 key, a signed `demo.erebus` and
+a signed `demo.erebus.attest` into a new temp directory, runs the bundle,
+verifies the receipt against that exact bundle, and prints the paths plus the
+command to replay the verification:
+
+```text
+Agent:   /tmp/erebus-demo-…/app/app.py
+Bundle:  /tmp/erebus-demo-…/demo.erebus
+Receipt: /tmp/erebus-demo-…/demo.erebus.attest
+Key:     /tmp/erebus-demo-…/keys/<fingerprint>.key
+
+Verify it yourself:
+  erebus verify-attest … --trusted-dir … --bundle …
+
+OK: first receipt verified (12.3s)
+```
+
+The key is generated for this demo only: it is not your production identity.
+The receipt proves what ran in that directory; it is not yet an
+auditor-trusted, hosted attestation. For that path, see
+[Prove what ran](#6-prove-what-ran) below.
+
 ## Prerequisites
 
 - Linux x86_64

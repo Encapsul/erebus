@@ -12,6 +12,7 @@ pub mod build;
 pub mod chat;
 pub mod clean;
 pub mod dashboard;
+pub mod demo;
 pub mod doctor;
 pub mod engine;
 pub mod enroll;
