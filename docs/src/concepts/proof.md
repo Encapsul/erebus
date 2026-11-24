@@ -27,7 +27,7 @@ what was executed, and tamper evidence for the record of it.
 | The agent did the *right* thing — correct, safe, within policy | That is a judgement about semantics, made *before* deployment by evaluations and guardrails. erebus records what happened; it does not grade it. | Your eval suite; the receipt then proves the graded version is the one that ran. |
 | The *plaintext* of inputs and outputs | Receipts carry digests, not content. The operator keeps the data; the digest proves that what they hand the auditor is what was hashed at run time. | Retention is the operator's job; `erebus audit` bundles receipts + evidence. |
 | A host with root compromised | The machine key is a software key in `~/.local/share/erebus/machine/machine.key` (0600). Root can copy it. | TPM2-bound key and quote (roadmap, optional per fleet). |
-| That **every** run was captured | A receipt proves a run happened; an operator can choose not to route traffic through erebus. | Signed launch policy requiring a verified receipt for the exact artifact, attested gateway (`erebus serve --attest-key`), heartbeat receipts and `COVERAGE.json` in every pack — see [Coverage is not completeness](#coverage-is-not-completeness). |
+| That **every** run was captured | A receipt proves a run happened; an operator can choose not to route traffic through erebus. | Signed launch policy requiring a verified receipt for the exact artifact, attested gateway (`erebus serve --attest-key`), independent traffic/receipt monitor, heartbeat receipts and `COVERAGE.json` in every pack — see [Coverage is not completeness](#coverage-is-not-completeness). |
 | The RFC 3161 token is cryptographically valid | erebus parses the TSTInfo structurally: the imprint must be `messageImprint`, and the displayed time is that TSTInfo's `genTime` (never the unsigned JSON hint) | `openssl ts -verify` against the TSA chain, documented in the spec |
 | Compliance with a given regulation | Mapping receipts to EU AI Act record-keeping, SOC 2 or ISO 42001 is the compliance team's work | erebus gives that team evidence instead of screenshots |
 
@@ -48,9 +48,17 @@ packed copy that disagrees with the receipts is rejected. It reports:
 It does **not** mean every run was captured. An operator who never routes an
 agent through erebus leaves no signed trace for this report to count: the
 report can see a run that produced a receipt outside the gateway, not traffic
-that produced no receipt at all. An independent monitor comparing traffic with
-receipts is the remaining P0-4 work. Until it ships, do not present an evidence
-pack as proof of completeness.
+that produced no receipt at all.
+
+`erebus serve --attest-key` also writes a separate NDJSON traffic journal
+before it signs each receipt. `erebus monitor --traffic-log … --trail …`
+re-verifies the signed chain, then matches every journal entry to one receipt
+by its signed request digest. It flags both a call with no receipt and a
+receipt with no journal entry, and exits 2 when either appears. The monitor is
+a separate command reading a separate journal, so a receipt-write failure is
+visible; the journal and the receipts are still written by the same gateway
+process, and traffic that never reached that gateway is invisible to both.
+Do not present an evidence pack as proof of completeness.
 
 ## Launch policy: only attested artifacts run
 

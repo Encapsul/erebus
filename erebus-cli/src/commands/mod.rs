@@ -25,6 +25,7 @@ pub mod keygen;
 pub mod layer;
 pub mod lifecycle;
 pub mod mirror;
+pub mod monitor;
 pub mod policy;
 pub mod provenance;
 pub mod publish;

@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use erebus_core::attest::{
     append_receipt, AttestationTemplate, ExecutionCapture, HeartbeatInfo, RequestInfo, StopInfo,
@@ -60,6 +61,8 @@ pub struct CallRecorder {
     heartbeat_calls: AtomicU64,
     /// 1-based heartbeat sequence in this session.
     heartbeats: AtomicU64,
+    /// Independent traffic journal, written before any receipt is signed.
+    traffic_log: Option<Mutex<std::fs::File>>,
 }
 
 /// What sits behind the proxy.
@@ -105,6 +108,7 @@ impl CallRecorder {
             calls: AtomicU64::new(0),
             heartbeat_calls: AtomicU64::new(0),
             heartbeats: AtomicU64::new(0),
+            traffic_log: None,
         }
     }
 
@@ -121,6 +125,40 @@ impl CallRecorder {
     pub fn with_expected_output_hash(mut self, digest: Option<String>) -> Self {
         self.expected_output_hash = digest;
         self
+    }
+
+    /// Journal gateway traffic before attestation, so a receipt-write failure
+    /// leaves a trace the independent `erebus monitor` can flag.
+    pub fn with_traffic_log(mut self, path: &Path) -> Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .with_context(|| format!("traffic log {}", path.display()))?;
+        self.traffic_log = Some(Mutex::new(file));
+        Ok(self)
+    }
+
+    /// Append one NDJSON line for a recorded exchange. Flushed before the
+    /// receipt is written so a crash cannot hide the traffic it observed.
+    pub fn log_traffic(&self, call: &CallSummary) -> Result<()> {
+        let Some(log) = &self.traffic_log else {
+            return Ok(());
+        };
+        let line = serde_json::json!({
+            "observed_at": Utc::now().to_rfc3339(),
+            "method": call.method,
+            "path": call.path,
+            "request_hash": call.request_hash,
+            "status": call.status,
+        });
+        let mut file = log
+            .lock()
+            .map_err(|_| anyhow::anyhow!("traffic log lock poisoned"))?;
+        serde_json::to_writer(&mut *file, &line)?;
+        file.write_all(b"\n")?;
+        file.flush()?;
+        Ok(())
     }
 
     pub fn mode(&self) -> ProxyMode {
@@ -329,22 +367,30 @@ fn handle_connection(client: TcpStream, upstream: SocketAddr, recorder: &CallRec
         sent_head: false,
     };
     match relay.run(upstream, recorder.mode()) {
-        Ok(Some(call)) => match recorder.record(&call) {
-            Ok(path) => {
-                if std::env::var_os("ERE_VERBOSE").is_some() {
-                    eprintln!(
-                        "[erebus] attested {} {} → {}",
-                        call.method,
-                        call.path,
-                        path.display()
-                    );
-                }
+        Ok(Some(call)) => {
+            if let Err(e) = recorder.log_traffic(&call) {
+                eprintln!(
+                    "[erebus] proxy: traffic log NOT written for {} {}: {e:#}",
+                    call.method, call.path
+                );
             }
-            Err(e) => eprintln!(
-                "[erebus] proxy: receipt NOT written for {} {}: {e:#}",
-                call.method, call.path
-            ),
-        },
+            match recorder.record(&call) {
+                Ok(path) => {
+                    if std::env::var_os("ERE_VERBOSE").is_some() {
+                        eprintln!(
+                            "[erebus] attested {} {} → {}",
+                            call.method,
+                            call.path,
+                            path.display()
+                        );
+                    }
+                }
+                Err(e) => eprintln!(
+                    "[erebus] proxy: receipt NOT written for {} {}: {e:#}",
+                    call.method, call.path
+                ),
+            }
+        }
         Ok(None) => {}
         Err(e) => {
             eprintln!("[erebus] proxy: {e:#}");

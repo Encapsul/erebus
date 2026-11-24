@@ -145,6 +145,9 @@ enum Commands {
     /// Check a bundle against a launch policy
     Policy(commands::policy::PolicyArgs),
 
+    /// Compare gateway traffic with signed receipts and report gaps
+    Monitor(commands::monitor::MonitorArgs),
+
     /// Generate or verify a signed compliance audit report
     ///
     /// Aggregates attestations, SBOM, and integrity info into a single
@@ -528,6 +531,7 @@ fn main() -> ExitCode {
         Commands::Witness(args) => commands::witness::run(args),
         Commands::Provenance(args) => commands::provenance::run(args),
         Commands::Policy(args) => commands::policy::run(args),
+        Commands::Monitor(args) => commands::monitor::run(args),
         Commands::Audit(mut args) => {
             if cli.quiet {
                 args.quiet = true;

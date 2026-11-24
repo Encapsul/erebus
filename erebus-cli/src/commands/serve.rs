@@ -82,6 +82,10 @@ pub struct ServeArgs {
     #[arg(long, value_name = "SECS", requires = "attest_key")]
     pub heartbeat_interval: Option<u64>,
 
+    /// NDJSON traffic journal written before receipts; read by `erebus monitor`
+    #[arg(long, value_name = "FILE", requires = "attest_key")]
+    pub traffic_log: Option<PathBuf>,
+
     /// Publish every inference receipt to the registry transparency log.
     /// Failed publications remain local and are retried on the next start.
     #[arg(long, requires = "attest_key", requires = "registry")]
@@ -666,7 +670,14 @@ fn build_recorder(file: &Path, key_path: &Path, args: &ServeArgs) -> Result<Arc<
     let log = erebus_core::attest_log::AttestationLog::open(&dir)
         .with_context(|| format!("cannot open trail {}", dir.display()))?;
     eprintln!("[erebus] attesting proxy: receipts → {}", dir.display());
-    let mut recorder = CallRecorder::new(template, key, log.clone());
+    let traffic = args
+        .traffic_log
+        .clone()
+        .unwrap_or_else(|| default_serve_traffic(file));
+    let mut recorder = CallRecorder::new(template, key, log.clone())
+        .with_traffic_log(&traffic)
+        .with_context(|| format!("cannot open traffic log {}", traffic.display()))?;
+    eprintln!("[erebus] attesting proxy: traffic → {}", traffic.display());
     if args.push {
         let token = super::attest::resolve_token(args.token_file.as_deref())?;
         let registry = args
@@ -688,6 +699,13 @@ fn default_serve_trail(file: &Path) -> PathBuf {
     let mut receipt = file.as_os_str().to_owned();
     receipt.push(".attest");
     erebus_core::attest_log::default_log_dir(Path::new(&receipt))
+}
+
+/// Traffic journal next to the bundle, outside the signed trail directory.
+fn default_serve_traffic(file: &Path) -> PathBuf {
+    let mut name = file.as_os_str().to_owned();
+    name.push(".traffic.ndjson");
+    PathBuf::from(name)
 }
 
 /// Bind the public port and relay to the engine on a background thread.

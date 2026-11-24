@@ -405,6 +405,100 @@ fn heartbeat_receipts_chain_and_count_calls() {
     );
 }
 
+fn serve_attest_with_traffic(
+    bundle: &Path,
+    port: u16,
+    key: &Path,
+    trail: &Path,
+    traffic: &Path,
+) -> Command {
+    let mut cmd = serve_attest_only(bundle, port, key, trail);
+    cmd.args(["--traffic-log", traffic.to_str().unwrap()]);
+    cmd
+}
+
+fn stop_serve(child: &mut Child) {
+    let status = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while child.try_wait().ok().flatten().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "serve did not exit after SIGTERM"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn monitor_run(dir: &Path, trail: &Path, traffic: &Path, extra: &[&str]) -> std::process::Output {
+    let mut cmd = Command::new(erebus_bin());
+    cmd.args([
+        "monitor",
+        "--traffic-log",
+        traffic.to_str().unwrap(),
+        "--trail",
+        trail.to_str().unwrap(),
+        "--trusted-dir",
+        dir.join("keys").to_str().unwrap(),
+        "--json",
+    ]);
+    cmd.args(extra).env("NO_COLOR", "1").output().unwrap()
+}
+
+/// P0-4: the independent monitor reads the gateway's pre-receipt traffic
+/// journal, verifies the signed trail, and flags gaps in both directions.
+#[test]
+fn monitor_flags_gaps_between_gateway_traffic_and_receipts() {
+    let dir = tempdir().unwrap();
+    let bundle = make_bundle(dir.path());
+    let (key, trusted) = keygen(dir.path());
+    assert_eq!(trusted, dir.path().join("keys"));
+    let trail = dir.path().join("trail");
+    let traffic = dir.path().join("traffic.ndjson");
+    let port = free_port();
+    let mut child = serve_attest_with_traffic(&bundle, port, &key, &trail, &traffic)
+        .env("XDG_CACHE_HOME", dir.path().join("cache"))
+        .env("ERE_MACHINE_DIR", dir.path().join("no-machine"))
+        .spawn()
+        .unwrap();
+    wait_ready(port, &mut child);
+    let body = r#"{"model":"local","messages":[{"role":"user","content":"hi"}]}"#;
+    assert!(post_chat(port, body).starts_with("HTTP/1.1 200"));
+    stop_serve(&mut child);
+
+    let out = monitor_run(dir.path(), &trail, &traffic, &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["matched"], 1);
+    assert_eq!(report["healthy"], true);
+
+    let mut journal = std::fs::read_to_string(&traffic).unwrap();
+    journal.push_str("{\"observed_at\":\"2026-11-24T10:00:00Z\",\"method\":\"POST\",\"path\":\"/v1/chat/completions\",\"request_hash\":\"sha256:deadbeef\"}\n");
+    std::fs::write(&traffic, &journal).unwrap();
+    let out = monitor_run(dir.path(), &trail, &traffic, &[]);
+    assert_eq!(out.status.code(), Some(2));
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["missing_receipts"].as_array().unwrap().len(), 1);
+    assert_eq!(report["healthy"], false);
+
+    std::fs::write(&traffic, "").unwrap();
+    let out = monitor_run(dir.path(), &trail, &traffic, &["--no-fail"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["orphan_receipts"].as_array().unwrap().len(), 1);
+}
+
 /// `erebus serve` behind the attesting proxy, publishing every receipt.
 fn serve_command(
     bundle: &Path,
