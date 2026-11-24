@@ -342,3 +342,43 @@ fn experimental_commands_are_gated() {
         .failure()
         .stderr(predicate::str::contains("is experimental").not());
 }
+
+#[test]
+fn verify_all_finds_the_receipt_written_for_a_non_erebus_filename() {
+    let dir = tempdir().unwrap();
+    let bundle = make_bundle(dir.path());
+    let renamed = dir.path().join("renamed.bin");
+    std::fs::copy(&bundle, &renamed).unwrap();
+    let (key, trusted) = keygen(dir.path(), "keys");
+    sign(&renamed, &key);
+
+    // `attest` replaces the final extension, so this is where it actually
+    // writes the receipt for `renamed.bin` — not `renamed.bin.attest`.
+    let out = dir.path().join("renamed.erebus.attest");
+    attest(&renamed, &key, &out, &[]);
+
+    let v = verify_all_json(&renamed, &trusted, &[]);
+    assert_eq!(v["verified"], true);
+    assert_eq!(v["evidence"]["chain"]["verified"], true);
+}
+
+#[test]
+fn unsigned_bundle_is_never_a_green_gate() {
+    let dir = tempdir().unwrap();
+    let bundle = make_bundle(dir.path()); // assembled unsigned
+
+    let out = erebus()
+        .args(["verify", bundle.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["signed"], false);
+    assert_eq!(v["verified"], false);
+
+    erebus()
+        .args(["verify", bundle.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("file is not signed"));
+}

@@ -44,7 +44,8 @@ pub struct VerifyArgs {
     #[arg(long)]
     pub all: bool,
 
-    /// Receipt to verify with --all (default: `<file>.attest`)
+    /// Receipt to verify with --all (default: the path `erebus attest` writes
+    /// for <file>)
     #[arg(long, value_name = "FILE", requires = "all")]
     pub attest: Option<PathBuf>,
 
@@ -92,10 +93,10 @@ pub fn run(args: VerifyArgs) -> Result<()> {
     if !verdict.signed {
         if args.json {
             write_json_output(&verdict.report, args.output.as_deref())?;
-        } else {
-            eprintln!("file is not signed");
         }
-        return Ok(());
+        // Same invariant as a mismatched signature: a `verified:false` report
+        // must never be a green CI gate when the caller checks the exit code.
+        anyhow::bail!("file is not signed");
     }
     if !args.quiet {
         if let Some(k) = verdict.report.get("key").and_then(|v| v.as_str()) {
@@ -187,13 +188,12 @@ fn run_all(args: &VerifyArgs) -> Result<()> {
 }
 
 /// Receipt that `erebus attest <bundle>` writes by default.
+///
+/// Keep this identical to `attest`'s default output path: it replaces only the
+/// final extension, so `app.bin` is attested as `app.erebus.attest`, not
+/// `app.bin.attest`.
 fn receipt_path_for(bundle: &Path) -> PathBuf {
-    let mut name = bundle
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    name.push_str(".attest");
-    bundle.with_file_name(name)
+    bundle.with_extension("erebus.attest")
 }
 
 struct BundleVerdict {
