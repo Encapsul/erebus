@@ -21,7 +21,7 @@ center is not shipped.
 |---|---|---|
 | **P0-1** | Activation: install → `erebus demo` → first receipt → verification link in under 5 minutes | shipped; fresh-VM timing proof still pending |
 | **P0-2** | Trust-center MVP: org/project, API key, receipt search, public verification link, evidence export | self-hosted MVP shipped; hosted SaaS not shipped |
-| **P0-3** | Integration without repackaging: attested proxy, Python/Node SDK, MCP, one framework | partial: proxy + MCP + Python SDK shipped; Node SDK and one framework next |
+| **P0-3** | Integration without repackaging: attested proxy, Python/Node SDK, MCP, one framework | shipped: proxy + MCP + both SDKs + LangChain.js root chains |
 | **P0-4** | Completeness: attested gateway, signed policy, heartbeat/coverage report, monitor | features shipped; pilot proof of coverage still pending |
 | **P0-5** | Design partner pilot: 14 days, zero strict failures, one case study, one LOI/paid pilot | next |
 | **P0-6** | External verification: an auditor verifies a trail with public keys and `verify-evidence` / `cosign` | auditor kit ships with offline CI proof; written third-party confirmation pending |

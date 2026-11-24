@@ -43,7 +43,7 @@ offline.
 
 | Layer | Surface | Job | State |
 |---|---|---|---|
-| **Capture** | launcher, attested proxy, SDK | bind the receipt to the bytes and the machine that actually ran | launcher + proxy + Python SDK exist; Node SDK and one framework next |
+| **Capture** | launcher, attested proxy, SDK | bind the receipt to the bytes and the machine that actually ran | launcher + proxy + Python and Node SDKs + LangChain.js root chains ship |
 | **Prove** | receipts, transparency log, evidence pack | make the record independently verifiable | proof chain exists; self-hosted trust center anchors receipts in it |
 | **Consume** | trust center, verification links, control mapping | let a buyer or auditor accept the evidence without a CLI | self-hosted MVP ships; hosted SaaS and control mapping not shipped |
 
@@ -174,9 +174,11 @@ The launcher is the high-assurance path, not the only path.
 - one framework integration (LangChain, LlamaIndex, CrewAI or AutoGen);
 - Acceptance: a demo agent emits a receipt with three lines of code; the
   proxy emits one receipt per inference call; neither requires `erebus build`.
-- Status: proxy, MCP tool receipts and the Python SDK ship; the SDK writes
-  operator-only spec 2.0 trails verified by `verify-attest --chain`. Node SDK
-  and one framework integration remain.
+- Status: proxy, MCP tool receipts, both SDKs and the LangChain.js root-chain
+  handler ship. A mixed Python + Node trail verifies with
+  `verify-attest --chain`. SDK receipts use the operator key only: no bundle
+  digest, no machine co-signature and no `--strict` acceptance. In-process
+  adoption is not enforcement.
 
 #### P0-4 — Completeness: every run, not just the runs that opt in
 

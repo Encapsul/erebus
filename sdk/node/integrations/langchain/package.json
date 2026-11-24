@@ -1,0 +1,33 @@
+{
+  "name": "erebus-langchain",
+  "version": "0.1.0",
+  "description": "Root-chain execution receipts for LangChain.js via public callbacks",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/ErebusCallbackHandler.d.ts",
+      "import": "./dist/ErebusCallbackHandler.js"
+    }
+  },
+  "types": "./dist/ErebusCallbackHandler.d.ts",
+  "files": [
+    "dist"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "@langchain/core": "1.5.1",
+    "erebus-sdk": "0.1.0"
+  },
+  "devDependencies": {
+    "@langchain/core": "1.5.1",
+    "@types/node": "22.18.6",
+    "erebus-sdk": "file:../..",
+    "typescript": "5.9.2"
+  }
+}

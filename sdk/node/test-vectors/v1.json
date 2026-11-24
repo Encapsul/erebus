@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "note": "Shared by the node:test suite and the Python SDK parity test. Canonical strings contain the literal bytes JCS emits.",
+  "jcs": [
+    {
+      "name": "member_sort",
+      "value": { "b": 1, "a": 2 },
+      "canonical": "{\"a\":2,\"b\":1}"
+    },
+    {
+      "name": "utf16_sort",
+      "value": {
+        "\r": "Carriage Return",
+        "1": "One",
+        "\u0080": "Control",
+        "\u00f6": "Latin Small Letter O With Diaeresis",
+        "\u20ac": "Euro Sign",
+        "\ud83d\ude00": "Emoji: Grinning Face",
+        "\ufb33": "Hebrew Letter Dalet With Dagesh"
+      },
+      "canonical": "{\"\\r\":\"Carriage Return\",\"1\":\"One\",\"\u0080\":\"Control\",\"\u00f6\":\"Latin Small Letter O With Diaeresis\",\"\u20ac\":\"Euro Sign\",\"\ud83d\ude00\":\"Emoji: Grinning Face\",\"\ufb33\":\"Hebrew Letter Dalet With Dagesh\"}"
+    },
+    {
+      "name": "string_escapes",
+      "value": { "s": "\u0000\b\t\n\f\r\"\\é😀" },
+      "canonical": "{\"s\":\"\\u0000\\b\\t\\n\\f\\r\\\"\\\\é😀\"}"
+    },
+    {
+      "name": "literals_and_integers",
+      "value": [null, true, false, -1, 0, 9007199254740991],
+      "canonical": "[null,true,false,-1,0,9007199254740991]"
+    },
+    {
+      "name": "nested_objects",
+      "value": { "b": { "z": 1, "a": [{ "y": 2, "x": 3 }] }, "a": "s" },
+      "canonical": "{\"a\":\"s\",\"b\":{\"a\":[{\"x\":3,\"y\":2}],\"z\":1}}"
+    }
+  ],
+  "pae": [
+    {
+      "payloadType": "application/vnd.in-toto+json",
+      "payload": "abc",
+      "expected": "DSSEv1 28 application/vnd.in-toto+json 3 abc"
+    }
+  ],
+  "shape": {
+    "topLevelKeys": [
+      "spec_version",
+      "attestation_type",
+      "artifact",
+      "provenance",
+      "execution",
+      "statement",
+      "signature",
+      "envelope",
+      "machine"
+    ],
+    "executionKeys": [
+      "attested_at",
+      "machine_id_hash",
+      "os",
+      "arch",
+      "input_hash",
+      "output_hash",
+      "exit_code",
+      "prev_attestation_hash",
+      "request",
+      "rootfs_root",
+      "machine_id"
+    ],
+    "predicateKeys": ["builder", "author", "license", "layers", "execution", "artifact"],
+    "descriptorKeyOrder": ["kind", "name", "sdk"],
+    "descriptorSdk": "erebus-node-sdk 0.1.0",
+    "statementType": "https://in-toto.io/Statement/v1",
+    "predicateType": "https://erebus.dev/attestation/execution/v2",
+    "attestationType": "erebus-execution"
+  }
+}

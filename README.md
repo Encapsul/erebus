@@ -31,11 +31,11 @@ shipped MVP is self-hosted. The hosted service is not shipped.
 
 | Layer | Product surface | What it answers | State |
 |---|---|---|---|
-| **Capture** | launcher, attested proxy, SDK | which code, model and machine produced this run? | launcher + proxy + Python SDK exist; Node SDK next |
+| **Capture** | launcher, attested proxy, SDK | which code, model and machine produced this run? | launcher + proxy + Python and Node SDKs + LangChain.js root chains ship |
 | **Prove** | receipts, transparency log, evidence pack | can a third party verify it offline? | proof chain exists; self-hosted trust center anchors receipts in it |
 | **Consume** | trust center, verification links, control mapping | can a buyer or auditor accept it without a CLI? | self-hosted MVP ships; hosted SaaS and control mapping not shipped |
 
-The launcher is the high-assurance capture path. The proxy and SDK exist so
+The launcher is the high-assurance capture path. The proxy and SDKs exist so
 teams can adopt receipts without repackaging their agent. The trust center is
 the product surface: search, verify, share and export evidence. The shipped
 version is self-hosted on the stdlib registry; see the
@@ -109,7 +109,10 @@ def answer(question):
 
 Each call appends a spec 2.0 receipt verified by
 `erebus verify-attest --chain agent.attest.d --trusted-dir ~/.erebus/keys`.
-See [Python SDK](docs/src/guides/python-sdk.md) for the trust boundaries.
+See [Python SDK](docs/src/guides/python-sdk.md) and
+[Node SDK](docs/src/guides/node-sdk.md) for the trust boundaries. Both write
+operator-key-only receipts; neither supplies a bundle digest or machine
+co-signature.
 
 ## What an auditor gets
 

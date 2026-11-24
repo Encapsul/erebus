@@ -17,6 +17,7 @@
 - [Self-hosted trust center (MVP)](./guides/self-hosted-trust-center.md)
 - [Python](./guides/python.md)
 - [Python SDK](./guides/python-sdk.md)
+- [Node SDK](./guides/node-sdk.md)
 - [Native Binary](./guides/binary.md)
 - [Dependency Detection](./guides/dependencies.md)
 

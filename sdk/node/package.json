@@ -1,0 +1,31 @@
+{
+  "name": "erebus-sdk",
+  "version": "0.1.0",
+  "description": "Signed execution receipts for Node agents — no erebus build required",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "license": "MIT",
+  "workspaces": [
+    "integrations/langchain"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsc -p integrations/langchain/tsconfig.json",
+    "test": "npm run build && node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.6",
+    "typescript": "5.9.2"
+  }
+}

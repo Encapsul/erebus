@@ -22,7 +22,7 @@ shipped MVP is self-hosted. The hosted service is not shipped.
 
 | Layer | Product surface | What it answers | State |
 |---|---|---|---|
-| **Capture** | launcher, attested proxy, SDK | which code, model and machine produced this run? | launcher, proxy and Python SDK ship; Node SDK next |
+| **Capture** | launcher, attested proxy, SDK | which code, model and machine produced this run? | launcher, proxy, Python and Node SDKs, LangChain.js root chains ship |
 | **Prove** | receipts, transparency log, evidence pack | can a third party verify it offline? | proof chain ships; self-hosted trust center anchors receipts in it |
 | **Consume** | trust center, verification links, support for auditor review | can a buyer or auditor accept a pack without a CLI? | self-hosted MVP and auditor kit ship; hosted SaaS and control mapping do not |
 

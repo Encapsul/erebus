@@ -29,8 +29,9 @@ against the first $25k year if an Enterprise LOI is signed within 30 days. One
 real agent inside the buyer's perimeter. Deliverables: one evidence zip with
 out-of-band pinned keys, a `verify_pack.py` run, an explicit coverage statement,
 the buyer's written evidence checklist, and a readout with receipts/day,
-verification latency and bytes of evidence per call. Not included: hosted SaaS,
-control mapping, Node SDK/LangChain.js or any written auditor confirmation.
+verification latency and bytes of evidence per call. The Node SDK and
+LangChain.js handler ship; custom framework work is separate. Not included in
+the pilot fee: hosted SaaS, control mapping or any written auditor confirmation.
 
 The first milestone is one paid pilot, not a pricing page. A pilot should test
 whether the buyer pays for **evidence a customer or auditor accepts**, not
