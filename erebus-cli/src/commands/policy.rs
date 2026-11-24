@@ -40,11 +40,24 @@ pub fn check(args: &CheckArgs) -> Result<()> {
     let text = std::fs::read_to_string(&args.policy)
         .with_context(|| format!("failed to read {}", args.policy.display()))?;
     let policy = Policy::parse(&text)?;
-    policy::enforce(&args.bundle, &policy)?;
-    if !policy.signers.is_empty() {
-        let dir = args.trusted_dir.clone().unwrap_or_else(trusted_keys_dir);
+    let dir = args.trusted_dir.clone().unwrap_or_else(trusted_keys_dir);
+    let keys = if policy.require_receipt {
+        policy::load_trusted_keys(&dir)?
+    } else {
+        Vec::new()
+    };
+    policy::enforce(&args.bundle, &policy, &keys)?;
+    if policy.require_receipt || !policy.signers.is_empty() {
         let vk = super::verify::matching_key(&args.bundle, &dir)?;
-        let fp = key_fingerprint(&vk);
+        check_signer(&policy, &vk)?;
+    }
+    eprintln!("OK: policy {}", args.policy.display());
+    Ok(())
+}
+
+fn check_signer(policy: &Policy, vk: &ed25519_dalek::VerifyingKey) -> Result<()> {
+    if !policy.signers.is_empty() {
+        let fp = key_fingerprint(vk);
         let raw = hex::encode(vk.as_bytes());
         let allowed = policy.signers.iter().any(|s| {
             let s = s.trim().trim_start_matches("sha256:");
@@ -52,7 +65,6 @@ pub fn check(args: &CheckArgs) -> Result<()> {
         });
         anyhow::ensure!(allowed, "policy: signer {fp} is not in the allowlist");
     }
-    eprintln!("OK: policy {}", args.policy.display());
     Ok(())
 }
 

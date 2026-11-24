@@ -12,9 +12,13 @@
 //! require_receipt: true
 //! ```
 
-use std::path::Path;
+use ed25519_dalek::VerifyingKey;
+use std::path::{Path, PathBuf};
 
+use crate::attest::{check_bundle_matches, verify_attestation, Attestation};
+use crate::attest_log::AttestationLog;
 use crate::format::{self, Footer};
+use crate::paths::trusted_keys_dir;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Policy {
@@ -96,6 +100,11 @@ fn parse_bool(v: &str) -> Result<bool, anyhow::Error> {
 /// Refuse to launch when metadata carries a `launch_policy` the bundle breaks.
 /// No field means no policy: existing bundles keep launching.
 pub fn enforce_embedded(bundle: &Path) -> Result<(), anyhow::Error> {
+    enforce_embedded_at(bundle, &trusted_keys_dir())
+}
+
+/// Same check with an explicit trust root (CLI `--trusted-dir`, tests).
+pub fn enforce_embedded_at(bundle: &Path, trusted_dir: &Path) -> Result<(), anyhow::Error> {
     let meta = bundle_meta(bundle)?;
     let Some(text) = meta.get("launch_policy").and_then(|v| v.as_str()) else {
         return Ok(());
@@ -103,11 +112,25 @@ pub fn enforce_embedded(bundle: &Path) -> Result<(), anyhow::Error> {
     if text.is_empty() {
         return Ok(());
     }
-    enforce(bundle, &Policy::parse(text)?)
+    let policy = Policy::parse(text)?;
+    let keys = if policy.require_receipt {
+        load_trusted_keys(trusted_dir)?
+    } else {
+        Vec::new()
+    };
+    enforce(bundle, &policy, &keys)
 }
 
 /// Refuse to launch when the bundle breaks the policy.
-pub fn enforce(bundle: &Path, policy: &Policy) -> Result<(), anyhow::Error> {
+///
+/// `require_receipt` checks more than a file exists: the bundle must be signed
+/// and carry at least one receipt that verifies against `trusted_keys` and
+/// names these exact bundle bytes. An empty or foreign trail cannot unlock it.
+pub fn enforce(
+    bundle: &Path,
+    policy: &Policy,
+    trusted_keys: &[VerifyingKey],
+) -> Result<(), anyhow::Error> {
     let meta = bundle_meta(bundle)?;
     if !policy.signers.is_empty() {
         let mut f = std::fs::File::open(bundle)?;
@@ -124,10 +147,73 @@ pub fn enforce(bundle: &Path, policy: &Policy) -> Result<(), anyhow::Error> {
     if !policy.models.is_empty() {
         check_models(&meta, &policy.models)?;
     }
-    if policy.require_receipt && !receipt_present(bundle) {
-        anyhow::bail!("policy: require_receipt set and no receipt trail exists");
+    if policy.require_receipt {
+        require_signed_receipt(bundle, trusted_keys)?;
     }
     Ok(())
+}
+
+/// Public keys that may sign receipts, read from the same trust root as bundle
+/// signatures. Unreadable files are skipped: an empty result fails closed.
+pub fn load_trusted_keys(dir: &Path) -> Result<Vec<VerifyingKey>, anyhow::Error> {
+    let mut keys = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(keys),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().is_some_and(|ext| ext == "pub") {
+            let bytes = std::fs::read(&path)?;
+            if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                if let Ok(vk) = VerifyingKey::from_bytes(&arr) {
+                    keys.push(vk);
+                }
+            }
+        }
+    }
+    Ok(keys)
+}
+
+fn require_signed_receipt(bundle: &Path, keys: &[VerifyingKey]) -> Result<(), anyhow::Error> {
+    let bytes = std::fs::read(bundle)?;
+    let mut cursor = std::io::Cursor::new(&bytes);
+    anyhow::ensure!(
+        Footer::read_from(&mut cursor)?.is_signed(),
+        "policy: require_receipt set but the bundle is unsigned"
+    );
+    anyhow::ensure!(
+        !keys.is_empty(),
+        "policy: require_receipt needs a trusted key to verify receipts"
+    );
+    let trail = receipt_path(bundle, ".attest.d");
+    if trail.is_dir() {
+        let chain = AttestationLog::open(&trail)?.verify_chain(keys, Some(&bytes))?;
+        anyhow::ensure!(chain.count > 0, "policy: receipt trail has no receipts");
+        return Ok(());
+    }
+    verify_single_receipt(&receipt_path(bundle, ".attest"), keys, &bytes)
+}
+
+fn verify_single_receipt(
+    path: &Path,
+    keys: &[VerifyingKey],
+    bundle: &[u8],
+) -> Result<(), anyhow::Error> {
+    anyhow::ensure!(
+        path.is_file(),
+        "policy: require_receipt set and no receipt trail exists"
+    );
+    let att: Attestation = serde_json::from_slice(&std::fs::read(path)?)?;
+    verify_attestation(&att, keys)?;
+    check_bundle_matches(&att, bundle)
+}
+
+fn receipt_path(bundle: &Path, suffix: &str) -> PathBuf {
+    let mut name = bundle.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
 }
 
 fn check_models(meta: &serde_json::Value, allow: &[String]) -> Result<(), anyhow::Error> {
@@ -152,17 +238,6 @@ fn check_models(meta: &serde_json::Value, allow: &[String]) -> Result<(), anyhow
         }
     }
     Ok(())
-}
-
-fn receipt_present(bundle: &Path) -> bool {
-    let mut attest = bundle.as_os_str().to_owned();
-    attest.push(".attest");
-    if Path::new(&attest).is_file() {
-        return true;
-    }
-    let mut trail = bundle.as_os_str().to_owned();
-    trail.push(".attest.d");
-    Path::new(&trail).is_dir()
 }
 
 fn bundle_meta(bundle: &Path) -> Result<serde_json::Value, anyhow::Error> {
