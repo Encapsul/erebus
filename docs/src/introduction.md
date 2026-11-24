@@ -21,7 +21,7 @@ an AI vendor publishes evidence and a regulated buyer verifies it.
 
 | Layer | Product surface | What it answers | State |
 |---|---|---|---|
-| **Capture** | launcher, attested proxy, SDK | which code, model and machine produced this run? | launcher + proxy exist; SDK next |
+| **Capture** | launcher, attested proxy, SDK | which code, model and machine produced this run? | launcher + proxy + Python SDK exist; Node SDK next |
 | **Prove** | receipts, transparency log, evidence pack | can a third party verify it offline? | proof chain exists; hosted log MVP next |
 | **Consume** | trust center, verification links, control mapping | can a buyer or auditor accept it without a CLI? | not shipped |
 

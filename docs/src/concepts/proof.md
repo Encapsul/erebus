@@ -74,8 +74,18 @@ to start unless:
 
 An unsigned bundle, an empty or foreign trail, and a doctored receipt all fail
 closed. This gates *which artifact may run*; it does not make the launcher emit
-a receipt on every execution. A run still needs the attested gateway or an SDK
-to produce evidence, which is why coverage and the traffic monitor matter.
+a receipt on every execution. A run still needs the attested gateway or the
+Python SDK to produce evidence, which is why coverage and the traffic monitor
+matter.
+
+## Python SDK receipts
+
+The Python SDK signs JCS(canonical arguments) and JCS(canonical return value)
+with the operator key, writes a spec 2.0 DSSE/JCS trail, and is verified by the
+same `verify-attest --chain`. It does not bind a `.erebus` bundle or add a
+machine co-signature, and a process that skips the decorator produces no
+receipt. Use it for adoption without repackaging; use the launcher or attested
+gateway when capture must be enforced outside the agent process.
 
 ## Why this boundary is the right product, not a shortfall
 

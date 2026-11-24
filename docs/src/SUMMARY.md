@@ -15,6 +15,7 @@
 - [Quickstart](./guides/quickstart.md)
 - [Auditing an erebus trail](./guides/audit.md)
 - [Python](./guides/python.md)
+- [Python SDK](./guides/python-sdk.md)
 - [Native Binary](./guides/binary.md)
 - [Dependency Detection](./guides/dependencies.md)
 

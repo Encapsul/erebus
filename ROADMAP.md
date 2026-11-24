@@ -43,7 +43,7 @@ offline.
 
 | Layer | Surface | Job | State |
 |---|---|---|---|
-| **Capture** | launcher, attested proxy, SDK | bind the receipt to the bytes and the machine that actually ran | launcher + proxy exist; SDK next |
+| **Capture** | launcher, attested proxy, SDK | bind the receipt to the bytes and the machine that actually ran | launcher + proxy + Python SDK exist; Node SDK and one framework next |
 | **Prove** | receipts, transparency log, evidence pack | make the record independently verifiable | proof chain exists; hosted log MVP next |
 | **Consume** | trust center, verification links, control mapping | let a buyer or auditor accept the evidence without a CLI | not shipped |
 
@@ -155,6 +155,9 @@ The launcher is the high-assurance path, not the only path.
 - one framework integration (LangChain, LlamaIndex, CrewAI or AutoGen);
 - Acceptance: a demo agent emits a receipt with three lines of code; the
   proxy emits one receipt per inference call; neither requires `erebus build`.
+- Status: proxy, MCP tool receipts and the Python SDK ship; the SDK writes
+  operator-only spec 2.0 trails verified by `verify-attest --chain`. Node SDK
+  and one framework integration remain.
 
 #### P0-4 — Completeness: every run, not just the runs that opt in
 

@@ -28,7 +28,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools zstd pkg-config libssl-dev python3
+          sudo apt-get install -y musl-tools zstd pkg-config libssl-dev python3 python3-venv
 
       - name: Cache cargo
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -52,7 +52,17 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
+      - name: Install Python SDK test environment
+        run: |
+          python3 -m venv /tmp/erebus-sdk-venv
+          /tmp/erebus-sdk-venv/bin/pip install -e 'sdk/python[dev]'
+
+      - name: Test Python SDK
+        run: /tmp/erebus-sdk-venv/bin/python -m pytest -q sdk/python/tests
+
       - name: Run tests
+        env:
+          ERE_PYTHON: /tmp/erebus-sdk-venv/bin/python
         run: cargo test --workspace
 
       - name: Test CLI build (smoke test)
@@ -225,10 +235,16 @@ jobs:
       - name: Build native stub + CLI
         run: cargo build --release -p erebus-stub -p erebus-cli
 
+      - name: Install Python SDK test environment
+        run: |
+          python3 -m venv /tmp/erebus-sdk-venv
+          /tmp/erebus-sdk-venv/bin/pip install -e 'sdk/python[dev]'
+
       - name: Test erebus-core + erebus-cli
         env:
           # cargo test builds a debug CLI; the stub was built --release above.
           ERE_STUB_PATH: ${{ env.CARGO_TARGET_DIR }}/release/erebus-stub
+          ERE_PYTHON: /tmp/erebus-sdk-venv/bin/python
         run: cargo test -p erebus-core -p erebus-cli
 
       - name: macOS slice

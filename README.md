@@ -30,7 +30,7 @@ an AI vendor publishes evidence and a regulated buyer verifies it.
 
 | Layer | Product surface | What it answers | State |
 |---|---|---|---|
-| **Capture** | launcher, attested proxy, SDK | which code, model and machine produced this run? | launcher + proxy exist; SDK next |
+| **Capture** | launcher, attested proxy, SDK | which code, model and machine produced this run? | launcher + proxy + Python SDK exist; Node SDK next |
 | **Prove** | receipts, transparency log, evidence pack | can a third party verify it offline? | proof chain exists; hosted log MVP next |
 | **Consume** | trust center, verification links, control mapping | can a buyer or auditor accept it without a CLI? | not shipped |
 
@@ -70,6 +70,27 @@ erebus doctor
 
 The release install ships the CLI and the launcher. Building from source is
 only needed for development; see [Build from source](#build-from-source).
+
+### Python agent, no build step
+
+```bash
+pip install -e sdk/python
+erebus keygen --key-dir ~/.erebus/keys
+export ERE_ATTEST_KEY="$(ls ~/.erebus/keys/*.key | head -1)"
+export ERE_ATTEST_LOG="$PWD/agent.attest.d"
+```
+
+```python
+from erebus import attest
+
+@attest
+def answer(question):
+    return {"answer": question.upper()}
+```
+
+Each call appends a spec 2.0 receipt verified by
+`erebus verify-attest --chain agent.attest.d --trusted-dir ~/.erebus/keys`.
+See [Python SDK](docs/src/guides/python-sdk.md) for the trust boundaries.
 
 ## What an auditor gets
 

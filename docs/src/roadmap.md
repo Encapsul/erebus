@@ -18,7 +18,7 @@ design partner, one paid pilot and a trust-center MVP.
 |---|---|---|
 | **P0-1** | Activation: install → `erebus demo` → first receipt → verification link in under 5 minutes | next |
 | **P0-2** | Trust-center MVP: org, API key, receipt search, public verification link, evidence export | next |
-| **P0-3** | Integration without repackaging: attested proxy, Python/Node SDK, MCP, one framework | next |
+| **P0-3** | Integration without repackaging: attested proxy, Python/Node SDK, MCP, one framework | partial: proxy + MCP + Python SDK shipped; Node SDK and one framework next |
 | **P0-4** | Completeness: attested gateway, signed policy, heartbeat/coverage report, monitor | next |
 | **P0-5** | Design partner pilot: 14 days, zero strict failures, one case study, one LOI/paid pilot | next |
 | **P0-6** | External verification: an auditor verifies a trail with public keys and `verify-evidence` / `cosign` | next |
