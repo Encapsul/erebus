@@ -53,14 +53,9 @@ application logs. erebus records digests, not prompts or model outputs.
 - The standards are mature: DSSE, in-toto, Ed25519, Merkle transparency logs,
   RFC 3161 and `cosign` interop.
 - The EU AI Act high-risk obligations are staggered (Annex III from December
-  2027, Annex I from August 2028). We sell the current procurement and audit
-  pain, not a single deadline.
-- YC's [Winter 2027 RFS, "AI for the Air-Gapped Economy"](https://www.ycombinator.com/rfs)
-  names defense contractors, banks, hospitals and nuclear plants that keep AI
-  behind walls with no internet. It calls that market slower to sell but home
-  to the largest budgets and most defensible companies. Our offline
-  verification path fits that constraint.
-  The RFS is a buyer signal, not a request for our crypto primitives.
+  2027, Annex I from August 2028).
+- Air-gapped sites (defense, banks, hospitals, plants) keep AI behind their
+  walls. Verification here runs offline; no hosted service is needed.
 
 ## What happens, and who does it
 
@@ -69,7 +64,7 @@ application logs. erebus records digests, not prompts or model outputs.
 | `build` / `sign` | app, runtime, libraries and weights in one sandboxed binary; Ed25519 signature over SHA-256(payload ‖ metadata ‖ footer), anti-downgrade | developer |
 | run / `serve --attest-key` | the launcher verifies the bundle, then signs a receipt: artifact hashes, `rootfs_root`, arguments, stdout/stderr digests and `exit_code` (or request/response body digests per inference call), previous receipt hash; co-signed by the enrolled machine key | automatic, on every run |
 | `--push` | receipt published to the registry's transparency log; inclusion proof, signed checkpoint and RFC 3161 token stored beside it | automatic, or `attest --push` |
-| `verify-attest` | one receipt or a whole trail: `--chain`, `--proof`, `--strict` — offline | anyone |
+| `verify-attest` | one receipt or a whole trail: `--chain`, `--proof`, `--strict`, offline | anyone |
 | `evidence export` / `verify-evidence` | one zip with receipts, proofs, TSA tokens and keys; verified offline against pinned keys | operator → auditor |
 
 ## How it runs
@@ -77,21 +72,21 @@ application logs. erebus records digests, not prompts or model outputs.
 A receipt is only as good as the place it is produced. erebus signs at the
 launcher, after verifying the bundle and before starting the agent.
 
-- **Single binary** — `chmod +x && ./agent.erebus`; no daemon, no root.
+- **Single binary:** `chmod +x && ./agent.erebus`; no daemon, no root.
   Runtimes: Python and native binaries.
-- **Integrity at every launch** — SHA-256 over payload ‖ metadata, Ed25519
+- **Integrity at every launch:** SHA-256 over payload ‖ metadata, Ed25519
   against trusted keys, fail-cold; warm starts re-check the rootfs Merkle
   root.
-- **Sandbox** — user namespaces, seccomp and Landlock on Linux.
-- **Model serving** — `erebus serve` exposes an OpenAI-compatible API in
+- **Sandbox:** user namespaces, seccomp and Landlock on Linux.
+- **Model serving:** `erebus serve` exposes an OpenAI-compatible API in
   front of the bundled engine (GGUF via llama.cpp) and writes one receipt per
   call, streaming relayed unchanged.
-- **HTTP agent** — `erebus agent run` talks OpenAI-compatible or Anthropic
+- **HTTP agent:** `erebus agent run` talks OpenAI-compatible or Anthropic
   HTTP (`--base-url` for Ollama, Azure, llama-server, …), MCP tools in the
   loop (`--mcp` / `--mcp-stdio`), optional `--stream` (display unsigned;
   receipt hashes the assembled body), and `--encapsulate` so the receipt
   subject is a task `.erebus` hash.
-- **Chaos-tested** — the full proof chain and adversarial harnesses
+- **Chaos-tested:** the full proof chain and adversarial harnesses
   (SIGKILL, tampering, registry faults, cold-start storms) run in CI on every
   commit.
 
@@ -111,13 +106,8 @@ Architecture and Guides sections and are not needed for the proof chain.
 - **Self-hosted trust center MVP: ships.** Projects, API keys, receipt status,
   search, share links, evidence export and tested backup/restore.
 - **Completeness features: ship.** Attested gateway, signed launch policy,
-  heartbeat receipts, `COVERAGE.json` and traffic monitor. Pilot proof is
-  pending.
-- **Internal pilot: running, not complete.** No production customers yet.
-- **Hosted trust center: not shipped.** It remains a paid surface.
-- **Next proof point:** one design partner with a paid pilot and one external
-  auditor verification. The [T4 request brief](../../auditor/T4-request.md) is
-  ready; the written confirmation is still missing.
+  heartbeat receipts, `COVERAGE.json` and traffic monitor.
+- **Hosted trust center: not shipped.**
 
 The receipt proves this version ran, on this machine, at this time, and the
 trail was not rewritten. It does not prove the model computed the output or

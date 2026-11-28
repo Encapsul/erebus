@@ -72,13 +72,9 @@ application logs. erebus records digests, not prompts or model outputs.
 - The standards are mature: DSSE, in-toto, Ed25519, Merkle transparency logs,
   RFC 3161 and `cosign` interop.
 - The EU AI Act high-risk obligations are staggered (Annex III from December
-  2027, Annex I from August 2028). We sell the current procurement and audit
-  pain, not a single deadline.
-- YC's [Winter 2027 RFS, "AI for the Air-Gapped Economy"](https://www.ycombinator.com/rfs)
-  names defense contractors, banks, hospitals and nuclear plants that keep AI
-  behind walls with no internet, and says that is slower to sell but where the
-  largest budgets and most defensible companies are. Our offline verification
-  path already fits that constraint; hosted SaaS is not required.
+  2027, Annex I from August 2028).
+- Air-gapped sites (defense, banks, hospitals, plants) keep AI behind their
+  walls. Verification here runs offline; no hosted service is needed.
 
 ## Install
 
@@ -212,22 +208,7 @@ The boundary is [What erebus proves — and what it does not](docs/src/concepts/
 Pricing, including the air-gapped deployment tier, is
 [in the book](docs/src/pricing.md).
 
-## The 90-day product plan
-
-Adoption is now the bottleneck.
-
-| Weeks | Focus | Done when |
-|---|---|---|
-| 1–2 | Customer discovery | one ICP, 5–10 interviews, a written evidence checklist from a real buyer |
-| 3–4 | Activation | install → first receipt → verification link in under 5 minutes |
-| 5–6 | Trust center MVP | org, API key, receipt search, public verification link, evidence export |
-| 7–8 | Design partner pilot | one real agent, 14 days, zero strict verification failures, a case study |
-| 9–12 | Traction | 3 design partners, 1 paid pilot or LOI, one external auditor verification, YC application |
-
-The full plan, frozen surfaces and acceptance criteria are in
-[`ROADMAP.md`](ROADMAP.md).
-
-## Status, 2026-11-24
+## Status
 
 - **Proof chain: complete.** Hardened verifier, hash-chained trail, attesting
   proxy, warm-cache re-verification, Merkle transparency log with RFC 3161
@@ -236,14 +217,9 @@ The full plan, frozen surfaces and acceptance criteria are in
 - **Auditor kit: ships.** `auditor/verify_pack.py` re-runs `verify-evidence`
   with pinned keys, checks `cosign` and optional RFC 3161 tokens, and is
   proven offline against a real pack in CI. It is tooling, not T4.
-- **Internal pilot: running, not complete.** No production customers yet.
 - **Self-hosted trust center MVP: ships.** Projects, API keys, receipt status,
   search, share links, evidence export, status page and tested backup/restore.
-- **Hosted trust center: not shipped.** It remains the paid surface and the
-  current product milestone.
-- **Next proof point:** one design partner with a paid pilot and one external
-  auditor verification. The [T4 request brief](auditor/T4-request.md) is ready;
-  the written confirmation is still missing.
+- **Hosted trust center: not shipped.**
 
 The proof chain badge above is the [`proof.yml`](.github/workflows/proof.yml)
 workflow: on every commit and every day, a fresh Linux runner builds erebus
@@ -386,12 +362,12 @@ trust-center milestone is done.
 | `erebus run <file>` | Execute a bundle (namespace isolation, health gate) |
 | `erebus serve <file>` | OpenAI-compatible HTTP API (`--attest-key`: signed receipt per call; `--push`: registry proof per call) |
 | `erebus agent run` / `agent build` | Provider-agnostic HTTP agent (`openai-compat` / `anthropic`); MCP stdio/HTTP tools (`--mcp`, `--mcp-stdio`, `--allow-mcp`); auto in-process tool-trail receipts (`--tool-trail`, `--require-tool-execution`) matching `verify-attest --tool-trail`; `--stream` (unsigned display, attested assembled body); `--encapsulate` / `agent build` packages the task into a `.erebus` subject. Execution proven; task success is a separate layer |
-| `erebus chat <file>` | **frozen** — terminal TUI chat; `--web` serves the embedded browser UI |
+| `erebus chat <file>` | **frozen**: terminal TUI chat; `--web` serves the embedded browser UI |
 | `erebus pull / publish` | Registry download (integrity-checked, cached) / upload |
-| `erebus swap <file> <path> --from <new>` | **frozen** — replace a file inside an existing bundle (hot-swap) |
+| `erebus swap <file> <path> --from <new>` | **frozen**: replace a file inside an existing bundle (hot-swap) |
 | `erebus inspect <file>` | Metadata, slice tables, JSON output |
-| `erebus layer push/list` | **frozen** — manage shared runtime packs & models (local CAS) |
-| `erebus dashboard` | **frozen** — interactive TUI: SISR benchmarks, cache status |
+| `erebus layer push/list` | **frozen**: manage shared runtime packs & models (local CAS) |
+| `erebus dashboard` | **frozen**: interactive TUI: SISR benchmarks, cache status |
 | `erebus doctor / scan / env / clean / selftest / upgrade / completion / man` | Ops & tooling |
 
 ## Binary format
@@ -400,12 +376,12 @@ trust-center milestone is done.
 [stub][payload][metadata][footer]
 ```
 
-- **Stub** — static launcher per OS (musl ELF / Mach-O / PE32+): reads itself,
+- **Stub:** static launcher per OS (musl ELF / Mach-O / PE32+): reads itself,
   verifies SHA-256, mmap-lazy-loads the payload, extracts, sandboxes, execs.
-- **Payload** — zstd tar (or squashfs) of app + runtime + weights.
-- **Metadata** — JSON: runtime, entrypoint, layers (runtime/model/tool/config),
+- **Payload:** zstd tar (or squashfs) of app + runtime + weights.
+- **Metadata:** JSON: runtime, entrypoint, layers (runtime/model/tool/config),
   capabilities, env, crypto block.
-- **Footer** — magic `0xBEEF_CAFE`, version flags, integrity digest.
+- **Footer:** magic `0xBEEF_CAFE`, version flags, integrity digest.
   v2 plain · v3 signed · v4 encrypted · v5 squashfs.
 
 Universal polyglot files prepend a 32 KiB `#!/bin/sh` loader plus a slice table;

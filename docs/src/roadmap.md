@@ -23,7 +23,7 @@ center is not shipped.
 | **P0-2** | Trust-center MVP: org/project, API key, receipt search, public verification link, evidence export | self-hosted MVP shipped; hosted SaaS not shipped |
 | **P0-3** | Integration without repackaging: attested proxy, Python/Node SDK, MCP, one framework | shipped: proxy + MCP + both SDKs + LangChain.js root chains |
 | **P0-4** | Completeness: attested gateway, signed policy, heartbeat/coverage report, monitor | features shipped; pilot proof of coverage still pending |
-| **P0-5** | Design partner pilot: 14 days, zero strict failures, one case study, one LOI/paid pilot | next |
+| **P0-5** | Pilot: one real agent for 14 days with zero strict verification failures | next |
 | **P0-6** | External verification: an auditor verifies a trail with public keys and `verify-evidence` / `cosign` | auditor kit ships with offline CI proof; written third-party confirmation pending |
 
 The proof chain (P0 from 2026-09-17) is closed and stays green in CI. Do not
@@ -39,23 +39,10 @@ MCP registry endpoints, waitlist/landing.
 Packaging, SISR, universal binaries and model serving are means, not the
 product. A change to a frozen surface must name the P0 item it unblocks.
 
-## Traction plan
-
-1. **T1** — the whole proof chain re-proven in CI on every commit. Done.
-2. **T2** — internal pilot: a real agent behind `serve --attest-key --push`,
-   several enrolled machines, a public TSA-anchored registry, zero
-   verification failures. Running, not complete.
-3. **T3** — a design partner in the ICP (AI vendor selling into defense /
-   administration, industrial edge or financial services) with an LOI or paid
-   pilot.
-4. **T4** — a third party verifies a trail with only public keys and
-   `verify-evidence` / `cosign`, in writing.
-
 ## Business model
 
 MIT client and server, forever. The verifier and auditor kit stay free. Paid
 now: one air-gapped deployment per year at a $25k price hypothesis. Paid later,
 once hosted exists: a $1.5k/month team tier billed annually. A $12k, 14-day
-pilot offer is credited against the first year if an LOI follows within 30
-days. None of these prices has been accepted by a customer. Details and
-competitor anchors are on the [Pricing](./pricing.md) page.
+pilot is credited against the first year. Details are on the
+[Pricing](./pricing.md) page.

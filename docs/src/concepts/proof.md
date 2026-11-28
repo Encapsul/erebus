@@ -130,13 +130,12 @@ exists, is complete, and could not have been altered. Proving the computation
 itself would need TEE attestation or zkML at 100–1000× the cost of inference.
 That is outside this product's boundary.
 
-## The three questions every buyer (and every investor) asks
+## The three questions every buyer asks
 
 1. **Who needs this now?** Teams that deploy agents on machines they do not
    fully control and must answer to someone who does not trust them: defense
    and public administration (air-gapped by regulation), industrial edge,
-   AI vendors selling into regulated buyers. The answer must be a name, not a
-   sector — see the traction plan in `ROADMAP.md` §7.3.
+   AI vendors selling into regulated buyers.
 2. **Why now?** Agents are starting to act without a human in the loop, and
    the record-keeping obligations for high-risk AI systems are becoming
    enforceable. Logs the operator can edit were tolerated for chatbots; they

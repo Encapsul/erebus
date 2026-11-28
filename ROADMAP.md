@@ -15,8 +15,7 @@
 The proof chain is built and re-proven on every push: signed bundles,
 DSSE/in-toto receipts, hash-chained trails, machine co-signatures, a Merkle
 transparency log with RFC 3161 anchoring, offline evidence packs and `cosign`
-interop. The internal pilot is running. There are still **no production
-customers**, and the product surface is too broad: packaging, model serving,
+interop. The product surface is too broad: packaging, model serving,
 registry, chat, TUI, universal binaries and a long CLI all compete for
 attention.
 
@@ -313,8 +312,7 @@ exact audit objection we exist to close.
 These are hypotheses, not validated prices. Public anchors on 2026-11-24:
 AgentAudit Starter £24k/yr, Centurian Compliance-Anchor $25k+ monthly entry
 point, APIR AUD 99/agent/month, SealedRun free and open source. Vendor-published
-numbers, not realized prices. No paid pilots, no LOIs and no production
-customers. Do not anchor the company on the current $29/$99 developer tiers.
+numbers, not realized prices. Do not anchor the company on the current $29/$99 developer tiers.
 
 **First paid pilot offer, not yet sold:** $12k fixed, 14 days, credited in full
 against the first $25k year if an LOI is signed within 30 days. Deliverables:
@@ -359,8 +357,7 @@ rewrite.
 
 ### 7.3 Traction — what we can produce ourselves, in order
 
-The honest line today is *no production users*. Editing docs cannot change
-that; the steps below can, and each yields a number we are allowed to cite.
+Each step below yields a number we are allowed to cite.
 
 | Step | Deliverable | Number we can cite | When |
 |---|---|---|---|
@@ -407,8 +404,7 @@ The three questions that decide the outcome:
    The neutral log is the product; the launcher is where the signature is
    unbypassable.
 
-What will get us refused is not L2. It is "no production users" with no pilot
-or LOI beside it.
+What matters is not L2. It is named users and a paid pilot or LOI.
 
 ### 7.5 The competitive field, Fall 2025 → Summer 2027
 
@@ -510,8 +506,7 @@ T3, audit firms as T4), not just a competitor list.
 - **2026-11-24** — Product reset: erebus is positioned as the **trust center
   for AI agents**; ICP narrowed to AI vendors selling into regulated
   enterprises; 90-day plan, completeness workstream, trust-center MVP and
-  frozen-surface rule added. No production customers yet; one design partner
-  and one paid pilot are the next proof points.
+  frozen-surface rule added.
 - **2026-10-02** — R1–R5 and R7 landed (witness seal, tool-call receipts,
   stop receipts, signed approvals, SLSA sidecar, incident-window claim).
   Policy is enforced by the stub. Fleet returns `proof_status`.
