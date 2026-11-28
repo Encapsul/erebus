@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ROADMAP P1-5: the macOS slice, run for real on the host it targets.
+# the macOS slice, run for real on the host it targets.
 #
 # Builds a native Mach-O agent into a signed bundle with the native stub, then
 # checks launch, receipts, chain, tamper refusal, evidence export, output /

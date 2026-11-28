@@ -1,4 +1,4 @@
-//! SLSA v1 provenance for an erebus build (ROADMAP R5).
+//! SLSA v1 provenance for an erebus build.
 //!
 //! A bundle hash proves *a* binary ran, not *which source*. `erebus build --key`
 //! writes a DSSE envelope whose in-toto statement uses

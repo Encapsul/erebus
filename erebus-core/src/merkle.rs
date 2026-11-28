@@ -1,7 +1,7 @@
 //! RFC 6962 / RFC 9162 Merkle hash tree over SHA-256.
 //!
-//! Used twice: the rootfs manifest root (P0-4) and the registry transparency
-//! log (P0-5). The registry (`scripts/registry_server.py`) implements the same
+//! Used twice: the rootfs manifest root and the registry transparency
+//! log. The registry (`scripts/registry_server.py`) implements the same
 //! algorithms; both sides are pinned to the RFC 9162 test vectors so a proof
 //! produced by one is always accepted by the other.
 //!

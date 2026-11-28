@@ -1,4 +1,4 @@
-//! ROADMAP P0-4 acceptance: a launch policy that requires receipts only opens
+//! a launch policy that requires receipts only opens
 //! a signed bundle with a valid receipt for these exact bytes. Presence of a
 //! file, an empty trail, a doctored receipt and a foreign receipt are all
 //! refused. The launcher calls the same core function via `enforce_embedded_at`.

@@ -1,4 +1,4 @@
-//! End-to-end acceptance tests for the proof chain (ROADMAP P0-1 / P0-2):
+//! End-to-end acceptance tests for the proof chain:
 //! attest → verify-attest OK → tamper unsigned field → exit 2 → wrong bundle →
 //! exit 2 → chained trail → edit/delete a receipt → exit 2.
 
@@ -319,7 +319,7 @@ fn verify_attest_requires_receipt_or_chain() {
         .stderr(predicate::str::contains("required"));
 }
 
-/// ROADMAP R4: approve the bundle → attest --approval → verify-attest
+/// approve the bundle → attest --approval → verify-attest
 /// --approver-key; forged `approval.signature_hex` → exit 2 TAMPERED.
 #[test]
 fn approval_roundtrip_and_forged_signature_refused() {

@@ -81,7 +81,7 @@ class Store:
         self.allow_anon_uploads = allow_anon_uploads
         self.lock = threading.RLock()
         self._hash_cache: dict[str, tuple[float, str]] = {}
-        # Roadmap #13 integrity state: {fname: {"ok": bool, "detail": str,
+        # integrity state: {fname: {"ok": bool, "detail": str,
         # "ts": iso}}. Maintained by the periodic `scan_integrity_locked` pass
         # and read by `index()`/`/integrity`, so the public index never
         # re-hashes every blob on each hit. Corrupt blobs are excluded from
@@ -493,7 +493,7 @@ class Store:
 
     # ---- attestations -----------------------------------------------------
     def _migrate_attestation_jsonl(self) -> None:
-        """One-shot import of the pre-P0-5 JSONL journal into the Merkle log.
+        """One-shot import of the older JSONL journal into the Merkle log.
 
         The old journal stored re-serialized JSON, so imported leaves hash the
         canonical form (`sort_keys`) — older receipts get an inclusion proof

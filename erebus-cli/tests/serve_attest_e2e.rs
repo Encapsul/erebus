@@ -1,7 +1,7 @@
-//! ROADMAP P0-3 acceptance: `erebus serve --attest-key` is an attesting
+//! `erebus serve --attest-key` is an attesting
 //! reverse proxy. A fake `llama-server` (python http.server) is embedded in
 //! the bundle; 3 chat calls → 3 chained receipts → `verify-attest --chain`
-//! OK; a tampered receipt → TAMPERED. R2 acceptance: tool calls the engine
+//! OK; a tampered receipt → TAMPERED. tool calls the engine
 //! returns (JSON or SSE) are signed into the receipt and re-derived by an
 //! auditor from the plaintext response body.
 
@@ -276,7 +276,7 @@ fn serve_attest_only(bundle: &Path, port: u16, key: &Path, trail: &Path) -> Comm
     cmd
 }
 
-/// R3 acceptance: SIGTERM after a served call appends a stop receipt that
+/// SIGTERM after a served call appends a stop receipt that
 /// closes the chain (`reaped_at` ≥ `requested_at`, signal named).
 #[test]
 fn stop_receipt_closes_chain_after_sigterm() {
@@ -343,7 +343,7 @@ fn stop_receipt_closes_chain_after_sigterm() {
     assert!(out.status.success(), "{stderr}");
 }
 
-/// P0-4: an attesting serve emits signed liveness ticks. A gap between
+/// an attesting serve emits signed liveness ticks. A gap between
 /// heartbeats, or a tick that misses observed traffic, is auditable.
 #[test]
 fn heartbeat_receipts_chain_and_count_calls() {
@@ -448,7 +448,7 @@ fn monitor_run(dir: &Path, trail: &Path, traffic: &Path, extra: &[&str]) -> std:
     cmd.args(extra).env("NO_COLOR", "1").output().unwrap()
 }
 
-/// P0-4: the independent monitor reads the gateway's pre-receipt traffic
+/// the independent monitor reads the gateway's pre-receipt traffic
 /// journal, verifies the signed trail, and flags gaps in both directions.
 #[test]
 fn monitor_flags_gaps_between_gateway_traffic_and_receipts() {
@@ -698,7 +698,7 @@ fn response_body(raw: &str) -> &str {
     raw.split_once("\r\n\r\n").map_or("", |(_, body)| body)
 }
 
-/// R2 acceptance, end to end: a chat call returning two tool calls (JSON,
+/// a chat call returning two tool calls (JSON,
 /// then the same calls streamed as SSE) yields receipts whose signed
 /// predicate lists both; they are published and proven in the transparency
 /// log; an auditor holding the plaintext body re-derives the list offline;

@@ -1,4 +1,4 @@
-//! Incident-window claim (ROADMAP R7).
+//! Incident-window claim.
 //!
 //! Insurers price a window of receipts, not the whole trail. The signed claim
 //! names the window and the counts an auditor replays: receipts, model-digest

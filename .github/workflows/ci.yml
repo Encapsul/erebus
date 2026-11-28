@@ -68,7 +68,7 @@ jobs:
         timeout-minutes: 10
         run: python3 scripts/test_retention.py
 
-      # P0-6: an auditor's kit verifies a real pack offline, with pinned keys
+      # An auditor's kit verifies a real pack offline, with pinned keys
       # and stock cosign, and refuses a doctored copy. No account, no registry.
       - name: Auditor kit offline proof
         timeout-minutes: 10
@@ -230,7 +230,7 @@ jobs:
           fi
           echo "artifact OK: $T"
 
-  # ROADMAP P1-5: the macOS slice executed on real Apple Silicon, not only
+  # The macOS slice executed on real Apple Silicon, not only
   # cross-compiled. Native stub + CLI, the Rust suites, then
   # scripts/macos_slice.sh (launch, receipts, chain, tamper refusal, evidence).
   macos-arm64:
@@ -268,7 +268,7 @@ jobs:
           bash scripts/macos_slice.sh \
             "$CARGO_TARGET_DIR/release/erebus" "$CARGO_TARGET_DIR/release/erebus-stub"
 
-  # ROADMAP §3: a TPM2 primary, not the XOR stand-in. Two swtpm instances —
+  # A TPM2 primary, not the XOR stand-in. Two swtpm instances —
   # the blob sealed on A must fail to unseal on B. A skipped test is a failure
   # because the script sets ERE_SWTPM_TEST=1.
   tpm2-swtpm:
@@ -290,7 +290,7 @@ jobs:
       - name: Copied seal does not unseal on the second TPM
         run: bash scripts/test_tpm2_swtpm.sh
 
-  # ROADMAP §3: job kill-on-close plus an AppContainer that refuses a write
+  # Job kill-on-close plus an AppContainer that refuses a write
   # outside the payload directory. Cross-compiling the PE is not this test.
   windows-sandbox:
     name: Windows confinement

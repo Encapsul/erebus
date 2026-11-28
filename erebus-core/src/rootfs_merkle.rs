@@ -1,4 +1,4 @@
-//! Rootfs manifest with a Merkle root (ROADMAP P0-4).
+//! Rootfs manifest with a Merkle root.
 //!
 //! After a cold extraction the launcher records every extracted file
 //! (`path → sha256`, sorted) in `<cache_root>/rootfs.merkle` together with the

@@ -1,4 +1,4 @@
-//! Launch policy checked before exec (ROADMAP P2).
+//! Launch policy checked before exec.
 //!
 //! A short YAML subset — four keys, no anchors — so the stub and `erebus run`
 //! share one parser without a YAML crate:

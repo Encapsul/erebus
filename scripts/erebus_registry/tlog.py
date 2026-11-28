@@ -17,7 +17,7 @@ from .tsa import tsa_build_request, tsa_parse_response
 
 
 class TransparencyLog:
-    """Append-only Merkle log of execution receipts (ROADMAP P0-5).
+    """Append-only Merkle log of execution receipts.
 
     Storage is a single SQLite file (stdlib `sqlite3`, WAL mode): one row per
     receipt with the exact bytes the client posted, so the leaf hash

@@ -7,8 +7,6 @@ This file provides guidance to Claude Code when working with the erebus codebase
 erebus is the proof layer for AI execution: it packages an agent into a single
 self-extracting, sandboxed binary and emits a signed, hash-chained receipt of
 every execution. Runtimes detected: Python and native Binary only.
-**Read `ROADMAP.md` §0–§3 first** — priorities are strict (P0 proof chain),
-everything in §4 is frozen.
 
 ## Architecture
 

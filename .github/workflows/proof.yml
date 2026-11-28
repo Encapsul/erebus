@@ -4,7 +4,7 @@
 # workflow answers the question an auditor would ask: do the transparency log,
 # egress, and chaos batteries still hold on a fresh Linux host, with nothing
 # but the repository? The README badge points here, so the badge is only green
-# when every step is (ROADMAP P1-1 / T1).
+# when every step is.
 # The full local e2e demo harness is gitignored and is not run here.
 name: Proof chain
 

@@ -1,4 +1,4 @@
-//! P0-3 acceptance: the Node SDK and the Python SDK append to the same
+//! the Node SDK and the Python SDK append to the same
 //! hash-chained trail. `erebus verify-attest --chain` accepts the mixed trail
 //! and still refuses an edited receipt.
 

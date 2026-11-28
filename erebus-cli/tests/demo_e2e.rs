@@ -1,4 +1,4 @@
-//! P0-1 activation: `erebus demo` must produce a real, locally verifiable
+//! Activation: `erebus demo` must produce a real, locally verifiable
 //! receipt in one offline command.
 
 use assert_cmd::Command;

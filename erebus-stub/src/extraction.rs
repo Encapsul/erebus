@@ -161,7 +161,7 @@ pub fn record_rootfs_manifest(cache_root: &Path, rootfs: &Path) -> io::Result<St
     Ok(manifest.root_display())
 }
 
-/// Warm start gate (ROADMAP P0-4): re-hash the cached rootfs against its
+/// Warm start gate: re-hash the cached rootfs against its
 /// manifest. `Err(reason)` means the cache must be rebuilt from the verified
 /// bundle — a missing manifest (cache predating this check) counts too.
 pub fn rootfs_intact(cache_root: &Path, rootfs: &Path) -> Result<(), String> {
@@ -454,7 +454,7 @@ mod tests {
         assert!(cache_root.join("rootfs/app/app.py").is_file());
     }
 
-    /// P0-4 acceptance: a file edited after the cold start (same size, so
+    /// a file edited after the cold start (same size, so
     /// size/mtime heuristics would miss it) forces a re-extraction, after
     /// which the manifest root matches the pristine tree again.
     #[test]

@@ -1,4 +1,4 @@
-//! ROADMAP P0-4 acceptance: the evidence pack reports coverage derived from
+//! the evidence pack reports coverage derived from
 //! its signed receipts, a run that bypassed the attesting gateway is visible
 //! in that report, and editing the report is refused by `verify-evidence`.
 

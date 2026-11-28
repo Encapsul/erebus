@@ -1,4 +1,4 @@
-//! ROADMAP R1 — disconnected anchoring (DDIL) acceptance:
+//! disconnected anchoring (DDIL) acceptance:
 //! offline trail → witness seal → failed publish keeps seal → forged
 //! insertion refused → real registry sync → verify-attest --proof OK with
 //! witnessed-at then anchored-at.

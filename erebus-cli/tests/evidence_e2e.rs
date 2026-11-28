@@ -1,4 +1,4 @@
-//! End-to-end acceptance test for ROADMAP P1-2: `erebus evidence export`
+//! End-to-end acceptance test for `erebus evidence export`
 //! over a real trail (enrolled machine, receipts pushed to the real
 //! `scripts/registry_server.py`), then `erebus verify-evidence` **offline**
 //! (registry stopped), then every way an auditor could be handed a doctored
@@ -169,7 +169,7 @@ fn refused(pack: &Path, needle: &str) {
         .stderr(predicate::str::contains(needle));
 }
 
-/// P0-6: the third-party kit must succeed with only a pack, a bundle and
+/// the third-party kit must succeed with only a pack, a bundle and
 /// keys obtained out of band. It runs the same checks an auditor would run.
 fn auditor_kit(pack: &Path, bundle: &Path, operator: &str, log: &str) -> std::process::Output {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))

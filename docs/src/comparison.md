@@ -14,7 +14,7 @@ will use erebus alongside several of them.
 | With what input, producing what output? | text, editable | ✅ in a database | ❌ | ❌ | ✅ digests per run and per inference call |
 | Can the operator rewrite it afterwards? | yes | yes (their account) | n/a | n/a | ❌ hash chain, public log, external timestamp |
 | Verifiable offline by a third party? | ❌ | ❌ | ✅ | with vendor roots | ✅ `verify-evidence`, `cosign`, `openssl ts` |
-| Proves every run was captured? | only what was logged | only what was traced | n/a | only attested launches | ❌ P0-4 attested gateway and coverage report ship; pilot proof of coverage is pending |
+| Proves every run was captured? | only what was logged | only what was traced | n/a | only attested launches | ❌ attested gateway and coverage report ship; pilot proof of coverage is pending |
 | Proves the computation itself was faithful? | ❌ | ❌ | ❌ | partly (code identity, not semantics) | ❌ see [the boundary](./concepts/proof.md) |
 | Special hardware or cloud? | no | no | no | yes | no |
 
@@ -27,7 +27,7 @@ will use erebus alongside several of them.
   key cannot match against a root-compromised host. erebus can carry a TEE
   quote in a receipt later. Its machine key is a software key today.
 - **Sigstore / Rekor** is a public-good log with a large ecosystem. erebus
-  envelopes already verify with `cosign`. Rekor upload is on the roadmap.
+  envelopes already verify with `cosign`. Rekor upload is not built yet.
 
 ## The one-sentence answer
 

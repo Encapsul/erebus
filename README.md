@@ -188,8 +188,7 @@ is refused. The [auditor kit](auditor/README.md) wraps the hand-off in one
 offline command (`verify_pack.py`: pinned keys, checked bundle, one inclusion
 proof per receipt, `cosign`, optional TSA check) and is proven in CI against a
 real pack. Walkthrough: [Auditing an erebus trail](docs/src/guides/audit.md).
-The written third-party confirmation is still pending. The kit is tooling, not
-T4 evidence.
+The kit is tooling; no third party has signed off on it yet.
 
 What a receipt proves, layer by layer ([spec](docs/src/spec/attestation.md)):
 
@@ -205,8 +204,7 @@ Every value a verifier prints is read from the **signed** statement, never from
 the human-readable copies. Legacy 1.x receipts stay verifiable.
 
 The boundary is [What erebus proves — and what it does not](docs/src/concepts/proof.md).
-Pricing, including the air-gapped deployment tier, is
-[in the book](docs/src/pricing.md).
+For a deployment or a pilot, see [Pricing](docs/src/pricing.md).
 
 ## Status
 
@@ -216,7 +214,7 @@ Pricing, including the air-gapped deployment tier, is
 - **Evidence export: works.** One zip, offline verification, pinned keys.
 - **Auditor kit: ships.** `auditor/verify_pack.py` re-runs `verify-evidence`
   with pinned keys, checks `cosign` and optional RFC 3161 tokens, and is
-  proven offline against a real pack in CI. It is tooling, not T4.
+  proven offline against a real pack in CI.
 - **Self-hosted trust center MVP: ships.** Projects, API keys, receipt status,
   search, share links, evidence export, status page and tested backup/restore.
 - **Hosted trust center: not shipped.**
@@ -345,9 +343,8 @@ manifests verify fail-cold at boot.
 
 ## Command reference
 
-Commands marked **frozen** are hidden from the default `--help` and require
-`--experimental`; they keep their tests but receive no new features until the
-trust-center milestone is done.
+Commands marked **maintenance only** are hidden from the default `--help` and
+require `--experimental`; they keep their tests but receive no new features.
 
 | Command | Description |
 |---------|-------------|
@@ -362,12 +359,12 @@ trust-center milestone is done.
 | `erebus run <file>` | Execute a bundle (namespace isolation, health gate) |
 | `erebus serve <file>` | OpenAI-compatible HTTP API (`--attest-key`: signed receipt per call; `--push`: registry proof per call) |
 | `erebus agent run` / `agent build` | Provider-agnostic HTTP agent (`openai-compat` / `anthropic`); MCP stdio/HTTP tools (`--mcp`, `--mcp-stdio`, `--allow-mcp`); auto in-process tool-trail receipts (`--tool-trail`, `--require-tool-execution`) matching `verify-attest --tool-trail`; `--stream` (unsigned display, attested assembled body); `--encapsulate` / `agent build` packages the task into a `.erebus` subject. Execution proven; task success is a separate layer |
-| `erebus chat <file>` | **frozen**: terminal TUI chat; `--web` serves the embedded browser UI |
+| `erebus chat <file>` | **maintenance only**: terminal TUI chat; `--web` serves the embedded browser UI |
 | `erebus pull / publish` | Registry download (integrity-checked, cached) / upload |
-| `erebus swap <file> <path> --from <new>` | **frozen**: replace a file inside an existing bundle (hot-swap) |
+| `erebus swap <file> <path> --from <new>` | **maintenance only**: replace a file inside an existing bundle (hot-swap) |
 | `erebus inspect <file>` | Metadata, slice tables, JSON output |
-| `erebus layer push/list` | **frozen**: manage shared runtime packs & models (local CAS) |
-| `erebus dashboard` | **frozen**: interactive TUI: SISR benchmarks, cache status |
+| `erebus layer push/list` | **maintenance only**: manage shared runtime packs & models (local CAS) |
+| `erebus dashboard` | **maintenance only**: interactive TUI: SISR benchmarks, cache status |
 | `erebus doctor / scan / env / clean / selftest / upgrade / completion / man` | Ops & tooling |
 
 ## Binary format
@@ -433,7 +430,7 @@ health_port = 8000
   explicit); keys written `0600` atomically; secrets zeroized on drop
   ([audit](benchmarks/security.md)).
 - Known limits, stated plainly: the machine key is a software key (TPM2 quote
-  is roadmap, optional); Rekor upload is roadmap; the TSA token is checked
+  is not built yet, optional); Rekor upload is not built yet; the TSA token is checked
   structurally by erebus and cryptographically by `openssl ts -verify`.
 - `cargo audit`: clean (RC 0).
 
@@ -461,7 +458,7 @@ cargo test --workspace         # 650+ tests (+ scripts/test_transparency_log.py,
 
 Before contributing: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
 `cargo test --workspace`. Style: [CODE_STYLE.md](CODE_STYLE.md); ANSSI-Rust rules in
-[RULES.md](RULES.md). Product priorities: [ROADMAP.md](ROADMAP.md).
+[RULES.md](RULES.md).
 
 ## License
 

@@ -130,5 +130,4 @@ Entrypoint resolution in `detect.rs:resolve_entrypoint()`:
 - `CLAUDE.md` — Claude Code specific guidance (agents/commands/skills pattern).
 - `CODE_STYLE.md` — detailed style rules with rationale.
 - `RULES.md` — ANSSI-Rust rules (also in `.cursor/rules/` format).
-- `ROADMAP.md` — single source of truth: product state, business model, what's left.
 - `.opencode/` — agents, skills, and commands for OpenCode sessions.

@@ -1,4 +1,4 @@
-//! P0-3 acceptance: an unpackaged Python agent emits spec 2.0 receipts with
+//! an unpackaged Python agent emits spec 2.0 receipts with
 //! three lines (`from erebus import attest`, `@attest`, `def …`). The SDK
 //! writes the same DSSE/JCS bytes as the Rust writer, so `verify-attest
 //! --chain` accepts a real trail and refuses an edited receipt.

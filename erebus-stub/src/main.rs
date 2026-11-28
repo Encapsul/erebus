@@ -436,7 +436,7 @@ fn run() -> io::Result<()> {
     )?;
 
     // Reject crafted metadata with an unknown runtime before doing any
-    // extraction/update work (roadmap #40 — unknown runtime used to silently
+    // extraction/update work (— unknown runtime used to silently
     // map to bash). Validation goes through `effective_runtime()` so a binary
     // whose entrypoint lives in a layer is checked against THAT layer's
     // runtime, not the legacy flat field.
@@ -512,7 +512,7 @@ fn run() -> io::Result<()> {
         if src_valid {
             // The cache key only binds the *bundle*; the extracted tree can
             // still be edited on disk. Re-hash it against rootfs.merkle and
-            // rebuild from the verified bundle on any drift (P0-4).
+            // rebuild from the verified bundle on any drift.
             match extraction::rootfs_intact(&cache_root, &rootfs) {
                 Ok(()) => {
                     if verbose {
@@ -567,7 +567,7 @@ fn run() -> io::Result<()> {
     // avoiding a 2× memory spike at cold start.
     crypto::verify_sha256_parts(&payload, &meta_bytes, &footer.payload_sha256)?;
 
-    // At-rest authenticity for SISR binaries (roadmap #45): the embedded
+    // At-rest authenticity for SISR binaries: the embedded
     // delta manifest must carry a valid publisher signature and its chunk
     // table must bind every byte of the payload. Updates keep this property
     // because the engine carries over the remote manifest's verified
@@ -803,7 +803,7 @@ fn maybe_apply_sisr_update(
             &remote.manifest,
             &fetcher,
             // Carried into the rebuilt binary's SISR extension so the
-            // updated binary keeps its at-rest authenticity (roadmap #45).
+            // updated binary keeps its at-rest authenticity.
             &remote.signature,
         )
     })?;
@@ -1234,7 +1234,7 @@ fn remote_update(
             path,
             &remote.manifest,
             &fetcher,
-            // Publisher-signed link embedded in the rebuilt binary (roadmap #45).
+            // Publisher-signed link embedded in the rebuilt binary.
             &remote.signature,
         )?;
         eprintln!(

@@ -132,7 +132,7 @@ All notable changes to erebus are documented here.
   (entrypoint + arguments), not stdin, and `output_hash` needs Linux
   isolation ≥ 2; the spec claimed stdin. Quickstart trusted-keys path fixed.
 
-### Fixed (macOS, ROADMAP P1-5)
+### Fixed (macOS)
 
 - `--landlock` bundles are now confined by Seatbelt (`sandbox_init`), and
   the launch is refused if the profile cannot be installed. Before, the

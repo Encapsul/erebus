@@ -226,7 +226,7 @@ def verify_integrity(path: str) -> tuple[bool, str]:
     tamper that changes the payload OR the embedded lifecycle metadata breaks
     the digest. Because the lifecycle state lives inside the blob, a corrupted
     blob would otherwise "forget" its Trusted/Revoked/Quarantined state and
-    be served as Acquired — a hole in roadmap #8. `verify_integrity` closes it:
+    be served as Acquired — a hole. `verify_integrity` closes it:
     it is independent of the embedded state and fails closed on any mismatch.
 
     Returns (ok, detail). `ok=False` means the blob is corrupt (bit-rot or

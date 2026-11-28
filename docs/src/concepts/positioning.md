@@ -73,7 +73,7 @@ verifies them.
 A receipt proves a run happened. It does **not** prove that every run was
 captured: an operator can choose not to route traffic through erebus. That is
 the biggest audit objection. The attested gateway, signed launch policy,
-heartbeat receipts, `COVERAGE.json` and traffic monitor ship as P0-4 features,
+heartbeat receipts, `COVERAGE.json` and traffic monitor ship,
 but pilot proof of coverage is still pending. The evidence pack reports
 coverage explicitly. Do not imply completeness that the product cannot prove.
 
@@ -87,7 +87,5 @@ coverage explicitly. Do not imply completeness that the product cannot prove.
 
 ## Business model
 
-MIT client and server, forever. The verifier and auditor kit stay free. The
-sell-now paid scope is one air-gapped deployment per year; the hosted trust
-center is a later tier and is not shipped. Exact price hypotheses and the pilot
-offer are on the [pricing](../pricing.md) page.
+MIT client and server. For a deployment inside your perimeter or a pilot, see
+[Pricing](../pricing.md).

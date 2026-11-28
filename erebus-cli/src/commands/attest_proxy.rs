@@ -1022,7 +1022,7 @@ mod tests {
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
     }
 
-    /// R2 acceptance: a chat call returning two tool calls yields a receipt
+    /// a chat call returning two tool calls yields a receipt
     /// whose signed predicate lists both — JSON and chunked SSE agree — and
     /// editing a tool name breaks verification.
     #[test]

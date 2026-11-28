@@ -457,7 +457,7 @@ pub(crate) fn build_single_target(
 
     // Clean up downloaded build tools. Only the tool's own cache dir is
     // removed — never a shared `/tmp` path, which another user/process may
-    // own or have symlinked (roadmap #36).
+    // own or have symlinked.
     let _ = std::fs::remove_dir_all(cache_dir().join("build-tools"));
 
     // Model bytes must enter the rootfs before payload compression. Metadata

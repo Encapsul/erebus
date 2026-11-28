@@ -73,9 +73,6 @@ receipts. See [what erebus proves](../docs/src/concepts/proof.md) and the
 ## Status
 
 This kit ships with an automated offline proof in CI (`evidence_e2e.rs`), but
-**T4 is not complete**: no auditor or consultancy has yet provided the written
-confirmation that the pack is sufficient for their engagement. Do not present
-this directory as third-party validation. The ready-to-send brief and blank
-answer form are in [T4-request.md](T4-request.md). The request checklist is:
-one ICP agent, 14 days of receipts, the pinned keys out of band, this script's
-output, and the auditor's own written conclusion.
+no auditor or consultancy has yet provided written confirmation that the pack is
+sufficient for their engagement. Do not present this directory as third-party
+validation.

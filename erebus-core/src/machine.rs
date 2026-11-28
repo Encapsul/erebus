@@ -1,4 +1,4 @@
-//! Per-machine identity (ROADMAP P0-6).
+//! Per-machine identity.
 //!
 //! The operator key (`ERE_ATTEST_KEY`) says *who vouches* for a run; it can
 //! be copied anywhere. The machine key says *where* it ran: generated on the

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Transparency-log battery for registry_server.py (ROADMAP P0-5).
+"""Transparency-log battery for registry_server.py.
 
 Pure stdlib. Starts a throwaway registry, publishes receipts and checks:
   * Merkle primitives against the RFC 9162 test vectors (byte-compatible

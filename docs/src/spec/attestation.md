@@ -613,7 +613,7 @@ blobs over 128 MiB unless `COSIGN_MAX_ATTACHMENT_SIZE` is raised (e.g.
   key; the registry certificate names the owner, and `GET /machines` lists
   every enrolled key so it can be revoked (revocation lists: P1).
 - The machine key is a **software** key. A TPM2-backed quote is on the
-  roadmap (P1, optional, Linux only) and will be an extra field, never a
+  not built yet (optional, Linux only) and will be an extra field, never a
   requirement.
 - **What tool linkage proves, and what it does not.** It proves, per call
   id, what the engine asked for and what the agent *reported back* to it,

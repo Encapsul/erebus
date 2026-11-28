@@ -1,4 +1,4 @@
-//! Offline verification of a registry transparency-log proof (ROADMAP P0-5).
+//! Offline verification of a registry transparency-log proof.
 //!
 //! `erebus attest --push` stores what the registry returned next to the
 //! receipt (`<receipt>.proof.json`); `erebus verify-attest --proof` then

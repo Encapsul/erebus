@@ -1,4 +1,4 @@
-//! Local trail witness checkpoints (ROADMAP R1 — disconnected anchoring).
+//! Local trail witness checkpoints.
 //!
 //! While offline, a second Ed25519 key (the **witness**) co-signs the local
 //! trail head. Design (deliberately simple; not a full Merkle tree offline):

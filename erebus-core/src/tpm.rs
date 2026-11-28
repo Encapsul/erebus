@@ -1,4 +1,4 @@
-//! Host-bound seal for the machine key (ROADMAP R6).
+//! Host-bound seal for the machine key.
 //!
 //! A software key file is 32 raw bytes and can be copied. A TPM-sealed file is
 //! ciphertext bound to a host secret that is **not** in the key file (the TPM,

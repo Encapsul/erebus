@@ -1,6 +1,6 @@
-# T2 internal pilot
+# Internal pilot harness
 
-This is the operational harness for ROADMAP §7.3 T2. It runs a real
+This harness runs a real
 Apache-2.0 model, records one signed receipt per inference call, publishes
 each receipt into the transparency log, stores the verified inclusion proof
 beside it, and measures the pilot from those files.
@@ -87,5 +87,4 @@ scripts/pilot/serve.sh restart
 python3 scripts/pilot/report.py
 ```
 
-Only numbers printed by `report.py` should appear in a pitch. Until the gates
-are met, say “pilot running”, not “T2 complete”.
+Only numbers printed by `report.py` should be quoted.

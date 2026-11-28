@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """erebus registry v2 — HTTP entry point. stdlib only.
 
-Layout (ROADMAP P1-4):
+Layout:
   erebus_registry/util.py, artifacts.py, auth.py, store.py, http.py
   + proof core (ed25519, merkle, tsa, tlog)
 This file wires CLI flags to Store + Handler and starts the server.
@@ -213,7 +213,7 @@ def main() -> None:
                     help="Display name for the SSO provider (default: OIDC)")
     ap.add_argument("--sso-base-url",
                     help="Public base URL of this registry (for redirect_uri)")
-    # Transparency log (ROADMAP P0-5)
+    # Transparency log
     ap.add_argument("--log-key",
                     help="Ed25519 seed (32 raw bytes, `erebus keygen` format) signing "
                          "log checkpoints; default <dir>/log.key, created 0600 if absent")

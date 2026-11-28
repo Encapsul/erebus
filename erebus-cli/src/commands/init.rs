@@ -300,7 +300,7 @@ Sign every execution (opt-in): `ERE_ATTEST_KEY=<path to .key> ./agent.erebus` wr
   `libssl`, `libcrypto`, `libgomp`, `libgcc_s`): the bundle runs on any
   distro with a **same-or-newer glibc** than the build machine. Older-glibc
   hosts cannot exec the bundled llama-cli. A fully static (musl) llama.cpp
-  build would break that tie (roadmap).
+  build would break that tie (not built yet).
 - The arch is pinned by `libggml-cpu-*.so` and the release zip you staged
   (`x64` on x86_64, `aarch64` on ARM): build on the same arch as the target
   machine.

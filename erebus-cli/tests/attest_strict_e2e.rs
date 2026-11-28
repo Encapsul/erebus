@@ -1,5 +1,5 @@
-//! End-to-end acceptance test for ROADMAP P0-6 (machine identity) and P0-7
-//! (standard DSSE/in-toto envelope):
+//! End-to-end acceptance test for machine identity and the standard
+//! DSSE/in-toto envelope:
 //!
 //! 1. `erebus enroll --registry` against the real `scripts/registry_server.py`
 //!    → machine key + certificate signed by the registry key.

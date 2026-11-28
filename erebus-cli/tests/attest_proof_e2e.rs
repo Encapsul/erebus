@@ -1,4 +1,4 @@
-//! End-to-end acceptance test for ROADMAP P0-5: `erebus attest --push`
+//! End-to-end acceptance test for `erebus attest --push`
 //! against the real `scripts/registry_server.py`, then
 //! `erebus verify-attest --proof` **offline** (registry stopped), then tamper.
 //!

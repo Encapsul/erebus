@@ -698,11 +698,11 @@ class Handler(BaseHTTPRequestHandler):
         is_pack = bool(SAFE_PACK.match(fname))
         if not (SAFE_FILE.match(fname) or is_pack or is_sidecar) or not os.path.isfile(full):
             return self.send_json({"error": "package not found"}, 404)
-        # Policy-gated promotion (roadmap #8): a deny-listed artifact must not
+        # Policy-gated promotion: a deny-listed artifact must not
         # be served even when requested by name. Revoked/Deleted always fail
         # closed; Quarantined is served only under an allow_untrusted policy.
         if SAFE_FILE.match(fname) and not is_pack and not is_sidecar:
-            # Integrity gate (roadmap #13), checked BEFORE the embedded state:
+            # Integrity gate, checked BEFORE the embedded state:
             # corruption rewrites the blob's own lifecycle footer, so a bit-
             # rotted or tampered artifact must be refused regardless of what
             # state its (possibly rewritten) footer claims. Auto-quarantine:

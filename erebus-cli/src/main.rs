@@ -394,8 +394,8 @@ fn experimental_guard(enabled: bool, name: &str) -> anyhow::Result<()> {
     anyhow::bail!("`{name}` is experimental; pass --experimental or set ERE_EXPERIMENTAL=1")
 }
 
-/// Frozen surfaces (ROADMAP §4) keep their tests but stay hidden from help
-/// and gated until the trust-center milestone is done. Keeping the list here
+/// Maintenance-only commands keep their tests but stay hidden from help
+/// and gated. Keeping the list here
 /// means a new frozen command cannot be added to the CLI without being gated.
 fn check_frozen(command: &Commands, experimental: bool) -> anyhow::Result<()> {
     match frozen_command(command) {

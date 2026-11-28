@@ -1,4 +1,4 @@
-//! `erebus provenance` — SLSA v1 statement for a source tree (ROADMAP R5).
+//! `erebus provenance` — SLSA v1 statement for a source tree.
 //! `erebus build --key` calls [`emit`] so the bundle sidecar is the same bytes.
 
 use anyhow::{Context, Result};
